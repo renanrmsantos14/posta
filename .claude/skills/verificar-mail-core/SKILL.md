@@ -7,5 +7,6 @@ description: Verifica o mail-core do Posta (pastas, mover, excluir, sync IMAP) s
 
 1. `cargo test -q -p mail-core` (unitários: descoberta de pastas, store por papel).
 2. `pnpm test:imap` (GreenMail em Docker: sync por pasta, mover, excluir de vez). Precisa de Docker rodando.
-3. Se mexeu em `apps/client/src-tauri`: o crate `posta` não compila no host (falta libdbus). Rode o cargo check no Docker (comando na Tarefa 4 de `docs/superpowers/plans/2026-11-08-arquivar-excluir-pastas.md`, `timeout 600000`, em background) e depois `git checkout -- apps/client/src-tauri/gen/schemas` (gerados pelo Docker).
+3. Disco do /home cheio ou Docker Desktop sem acesso a /tmp: use volume nomeado (`-v posta-target:/dt -e CARGO_TARGET_DIR=/dt`) em vez de `target/docker`. Se mexeu em `apps/client/src-tauri`: o crate `posta` não compila no host (falta libdbus). Rode o cargo check no Docker (comando na Tarefa 4 de `docs/superpowers/plans/2026-11-08-arquivar-excluir-pastas.md`, `timeout 600000`, em background) e depois `git checkout -- apps/client/src-tauri/gen/schemas` (gerados pelo Docker).
+3b. Mudou `oauth.rs`/`AuthMode`: os unitários `oauth::tests` (XOAUTH2, PKCE, URL, loopback) e `tests/account_serde.rs` (contas antigas) rodam no passo 1. Login real com Google/Microsoft exige credenciais e não é automatizável aqui.
 4. Passou quando: todos os testes verdes e o cargo check termina com `Finished` sem `error`.

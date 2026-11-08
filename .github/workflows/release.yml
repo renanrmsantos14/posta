@@ -42,6 +42,9 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          POSTA_GOOGLE_CLIENT_ID: ${{ secrets.POSTA_GOOGLE_CLIENT_ID }}
+          POSTA_GOOGLE_CLIENT_SECRET: ${{ secrets.POSTA_GOOGLE_CLIENT_SECRET }}
+          POSTA_MS_CLIENT_ID: ${{ secrets.POSTA_MS_CLIENT_ID }}
         with:
           projectPath: apps/client
           tagName: ${{ github.ref_name }}

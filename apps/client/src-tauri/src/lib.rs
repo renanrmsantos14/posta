@@ -1,8 +1,9 @@
 //! Ponte entre a UI e o mail-core. Leituras vêm do SQLite local; rede só em sync e flags.
 
-use mail_core::{imap_sync, send, ImapAccount, MessageDetail, MessageSummary, Outgoing, ReplyRef, Role, SendReport, Store};
+use mail_core::oauth::{self, Provider};
+use mail_core::{imap_sync, send, AuthMode, ImapAccount, MessageDetail, MessageSummary, Outgoing, ReplyRef, Role, SendReport, Store};
 use serde::{Deserialize, Serialize};
-use std::{fs, path::PathBuf, sync::Mutex};
+use std::{collections::HashMap, fs, path::PathBuf, sync::Mutex, time::{Duration, Instant}};
 use tauri::{AppHandle, Manager, State};
 
 const KEYRING_SERVICE: &str = "posta";
@@ -12,6 +13,8 @@ struct AppState {
     /// Conexão de leitura da UI. A sincronização abre a sua (WAL permite as duas).
     store: Mutex<Store>,
     syncing: Mutex<()>,
+    /// Access tokens OAuth por conta, só em memória, com o instante em que vencem.
+    tokens: Mutex<HashMap<String, (String, Instant)>>,
 }
 
 type CmdResult<T> = Result<T, String>;
@@ -47,10 +50,52 @@ impl AppState {
             .into_iter()
             .find(|a| a.id == id)
             .ok_or_else(|| format!("conta {id} não encontrada"))?;
-        acc.password = keyring::Entry::new(KEYRING_SERVICE, id)
-            .and_then(|e| e.get_password())
-            .map_err(|e| format!("senha de {id} no cofre do sistema: {e}"))?;
+        acc.password = match acc.auth.provider() {
+            Some(p) => self.access_token(id, p)?,
+            None => keyring::Entry::new(KEYRING_SERVICE, id)
+                .and_then(|e| e.get_password())
+                .map_err(|e| format!("senha de {id} no cofre do sistema: {e}"))?,
+        };
         Ok(acc)
+    }
+
+    /// Access token válido: o da memória se ainda não vence em 60 s; senão renova com o refresh token do cofre.
+    fn access_token(&self, id: &str, p: Provider) -> CmdResult<String> {
+        // O cache fica travado durante a renovação: envio e sync simultâneos não gastam o mesmo refresh token (a Microsoft o rotaciona).
+        let mut cache = self.tokens.lock().unwrap();
+        if let Some((t, exp)) = cache.get(id) {
+            if *exp > Instant::now() + Duration::from_secs(60) {
+                return Ok(t.clone());
+            }
+        }
+        let client = oauth_client(p).ok_or_else(|| "login OAuth não configurado nesta versão do Posta".to_string())?;
+        let entry = keyring::Entry::new(KEYRING_SERVICE, &refresh_key(id)).map_err(err)?;
+        let refresh = entry
+            .get_password()
+            .map_err(|e| format!("refresh token de {id} no cofre do sistema: {e}"))?;
+        let t = oauth::refresh(p, &client, &refresh).map_err(|e| format!("{e}. Entre de novo nesta conta."))?;
+        // A Microsoft rotaciona o refresh token a cada uso.
+        if let Some(new) = &t.refresh_token {
+            entry.set_password(new).map_err(|e| format!("não consegui guardar o refresh token: {e}"))?;
+        }
+        cache.insert(id.to_string(), (t.access_token.clone(), Instant::now() + t.expires_in));
+        Ok(t.access_token)
+    }
+
+    fn cache_token(&self, id: &str, t: &oauth::Tokens) {
+        self.tokens.lock().unwrap().insert(id.to_string(), (t.access_token.clone(), Instant::now() + t.expires_in));
+    }
+
+    /// Grava a conta na lista e tenta descobrir as pastas (falha não impede adicionar; o próximo sync tenta de novo).
+    fn save_account(&self, account: &ImapAccount) -> CmdResult<()> {
+        let mut all = self.accounts()?;
+        all.retain(|a| a.id != account.id);
+        all.push(account.clone());
+        self.save_accounts(&all)?;
+        if let Ok(f) = imap_sync::discover_folders(account) {
+            self.store.lock().unwrap().set_folders(&account.id, &f).ok();
+        }
+        Ok(())
     }
 
     /// Pastas da conta; descobre no servidor na primeira vez.
@@ -91,14 +136,70 @@ async fn add_imap_account(app: AppHandle, mut account: ImapAccount) -> CmdResult
         keyring::Entry::new(KEYRING_SERVICE, &account.id)
             .and_then(|e| e.set_password(&account.password))
             .map_err(|e| format!("não consegui guardar a senha no cofre do sistema: {e}"))?;
-        let mut all = st.accounts()?;
-        all.retain(|a| a.id != account.id);
-        all.push(account.clone());
-        st.save_accounts(&all)?;
-        // Falha na descoberta não impede adicionar; o próximo sync tenta de novo.
-        if let Ok(f) = imap_sync::discover_folders(&account) {
-            st.store.lock().unwrap().set_folders(&account.id, &f).ok();
-        }
+        st.save_account(&account)?;
+        Ok(account)
+    })
+    .await
+}
+
+fn refresh_key(id: &str) -> String {
+    format!("{id}:oauth-refresh")
+}
+
+/// Aplicativo OAuth embutido no build (`POSTA_*` na compilação); sem ele o login do provedor fica desligado.
+fn oauth_client(p: Provider) -> Option<oauth::Client> {
+    let (id, secret) = match p {
+        Provider::Google => (option_env!("POSTA_GOOGLE_CLIENT_ID"), option_env!("POSTA_GOOGLE_CLIENT_SECRET")),
+        Provider::Microsoft => (option_env!("POSTA_MS_CLIENT_ID"), None),
+    };
+    let id = id.filter(|s| !s.is_empty())?;
+    Some(oauth::Client { id: id.to_string(), secret: secret.map(str::to_string) })
+}
+
+/// Provedores com login OAuth disponível neste build.
+#[tauri::command]
+fn oauth_providers() -> Vec<Provider> {
+    [Provider::Google, Provider::Microsoft].into_iter().filter(|p| oauth_client(*p).is_some()).collect()
+}
+
+/// Entra com Google/Microsoft no navegador do sistema e adiciona a conta (até 3 min de espera).
+#[tauri::command]
+async fn oauth_login(app: AppHandle, provider: Provider) -> CmdResult<ImapAccount> {
+    blocking(app, move |st| {
+        let client = oauth_client(provider).ok_or_else(|| "login OAuth não configurado nesta versão do Posta".to_string())?;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").map_err(err)?;
+        let redirect = provider.redirect_uri(listener.local_addr().map_err(err)?.port());
+        let (verifier, challenge) = oauth::pkce_pair();
+        let state = oauth::random_token();
+        let url = oauth::authorization_url(provider, &client.id, &redirect, &challenge, &state);
+        open::that(&url).map_err(|e| format!("não consegui abrir o navegador: {e}"))?;
+        let code = oauth::wait_for_code(&listener, &state, Duration::from_secs(180)).map_err(err)?;
+        let tokens = oauth::exchange_code(provider, &client, &code, &redirect, &verifier).map_err(err)?;
+        let email = tokens.email.clone().ok_or_else(|| "o provedor não informou o email da conta".to_string())?;
+        let refresh = tokens.refresh_token.clone().ok_or_else(|| "o provedor não devolveu refresh token".to_string())?;
+
+        let (smtp_host, smtp_port, tls) = provider.smtp();
+        let host = provider.imap_host().to_string();
+        let account = ImapAccount {
+            id: format!("{email}@{host}"),
+            host,
+            port: 993,
+            security: mail_core::Security::Tls,
+            username: email,
+            smtp: Some(mail_core::SmtpServer {
+                host: smtp_host.into(),
+                port: smtp_port,
+                security: if tls { mail_core::Security::Tls } else { mail_core::Security::StartTls },
+            }),
+            auth: AuthMode::from(provider),
+            password: tokens.access_token.clone(),
+        };
+        imap_sync::check_login(&account).map_err(err)?;
+        keyring::Entry::new(KEYRING_SERVICE, &refresh_key(&account.id))
+            .and_then(|e| e.set_password(&refresh))
+            .map_err(|e| format!("não consegui guardar o refresh token no cofre do sistema: {e}"))?;
+        st.cache_token(&account.id, &tokens);
+        st.save_account(&account)?;
         Ok(account)
     })
     .await
@@ -300,11 +401,13 @@ pub fn run() {
             let dir = app.path().app_data_dir()?;
             fs::create_dir_all(&dir)?;
             let store = Store::open(dir.join("mail.sqlite"))?;
-            app.manage(AppState { dir, store: Mutex::new(store), syncing: Mutex::new(()) });
+            app.manage(AppState { dir, store: Mutex::new(store), syncing: Mutex::new(()), tokens: Mutex::new(HashMap::new()) });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             add_imap_account,
+            oauth_providers,
+            oauth_login,
             list_accounts,
             sync_inbox,
             list_folders,

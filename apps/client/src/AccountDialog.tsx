@@ -1,7 +1,7 @@
 // Adicionar conta IMAP. Fecha por X, Esc ou clique fora; pergunta antes de descartar o que foi digitado.
 import { useEffect, useRef, useState } from "react";
-import { X, Check } from "@phosphor-icons/react";
-import { api, type Account, type Security } from "./api";
+import { X, Check, GoogleLogo, MicrosoftOutlookLogo } from "@phosphor-icons/react";
+import { api, type Account, type Provider, type Security } from "./api";
 
 interface Props { onClose: () => void; onAdded: (a: Account) => void }
 
@@ -16,6 +16,11 @@ const PRESETS: Record<string, { host: string; smtp: string; smtpPort: string; hi
   "yahoo.com": { host: "imap.mail.yahoo.com", smtp: "smtp.mail.yahoo.com", smtpPort: "465" },
 };
 
+const OAUTH_BUTTONS: { provider: Provider; label: string; Icon: typeof GoogleLogo }[] = [
+  { provider: "google", label: "Entrar com Google", Icon: GoogleLogo },
+  { provider: "microsoft", label: "Entrar com Microsoft", Icon: MicrosoftOutlookLogo },
+];
+
 type Status = "idle" | "saving" | "done";
 const EXIT_MS = 150;
 
@@ -28,12 +33,15 @@ export function AccountDialog({ onClose, onAdded }: Props) {
   const [confirming, setConfirming] = useState(false);
   const [leaving, setLeaving] = useState(false);
   const first = useRef<HTMLInputElement>(null);
+  const [providers, setProviders] = useState<Provider[] | null>(null); // null = ainda carregando
+  const [oauth, setOauth] = useState<Provider | null>(null);
 
   const dirty = form.username !== "" || form.password !== "" || hostTouched;
   const domain = form.username.split("@")[1]?.toLowerCase() ?? "";
   const preset = PRESETS[domain];
 
   useEffect(() => first.current?.focus(), []);
+  useEffect(() => { api.oauthProviders().then(setProviders).catch(() => setProviders([])); }, []);
 
   function close() {
     setLeaving(true);
@@ -41,7 +49,7 @@ export function AccountDialog({ onClose, onAdded }: Props) {
   }
 
   function requestClose() {
-    if (status !== "idle") return; // durante o salvamento não fecha
+    if (status !== "idle" || oauth) return; // durante o salvamento e a espera do navegador não fecha
     if (dirty) setConfirming(true);
     else close();
   }
@@ -91,15 +99,51 @@ export function AccountDialog({ onClose, onAdded }: Props) {
     }
   }
 
+  async function signIn(provider: Provider) {
+    setError("");
+    setOauth(provider);
+    try {
+      const acc = await api.oauthLogin(provider);
+      setStatus("done");
+      setTimeout(() => {
+        onAdded(acc);
+        close();
+      }, 650);
+    } catch (err) {
+      setError(String(err));
+      setErrorKey((k) => k + 1);
+    } finally {
+      setOauth(null);
+    }
+  }
+
+  const busy = status !== "idle" || oauth !== null;
+  const missing = providers !== null && OAUTH_BUTTONS.some((b) => !providers.includes(b.provider));
+
   return (
     <div className="overlay" data-leaving={leaving || undefined} onPointerDown={(e) => e.target === e.currentTarget && requestClose()}>
       <form className="dialog" role="dialog" aria-modal="true" aria-labelledby="dlg-title" onSubmit={submit}>
         <header className="dialog-head">
           <h2 id="dlg-title">Adicionar conta</h2>
-          <button type="button" className="icon-btn" aria-label="Fechar" onClick={requestClose} disabled={status !== "idle"}>
+          <button type="button" className="icon-btn" aria-label="Fechar" onClick={requestClose} disabled={busy}>
             <X size={16} weight="bold" />
           </button>
         </header>
+
+        <div className="oauth-buttons">
+          {OAUTH_BUTTONS.map(({ provider, label, Icon }) => {
+            const available = providers?.includes(provider) ?? false;
+            return (
+              <button key={provider} type="button" className="btn wide" disabled={!available || busy}
+                title={available ? undefined : "Indisponível nesta versão: faltam as credenciais do app (docs/oauth.md)."}
+                onClick={() => signIn(provider)}>
+                {oauth === provider ? <><span className="spinner" aria-hidden />Aguardando o navegador…</> : <><Icon size={18} weight="bold" />{label}</>}
+              </button>
+            );
+          })}
+          {missing && <p className="hint">Entrar com Google ou Microsoft ainda não está habilitado nesta versão (veja docs/oauth.md).</p>}
+          <p className="oauth-or"><span>ou use email e senha</span></p>
+        </div>
 
         <label className="field">
           <span>Email</span>
@@ -144,7 +188,7 @@ export function AccountDialog({ onClose, onAdded }: Props) {
         {error && <p key={errorKey} className="form-error" role="alert">{error}</p>}
         <p className="hint">A senha fica no cofre do sistema, nunca em arquivo.</p>
 
-        <button className="btn primary wide" data-status={status} disabled={status !== "idle"}>
+        <button className="btn primary wide" data-status={status} disabled={busy}>
           <span className="btn-label" data-show={status === "idle" || undefined}>Conectar</span>
           <span className="btn-label" data-show={status === "saving" || undefined}><span className="spinner" aria-hidden />Testando conexão</span>
           <span className="btn-label" data-show={status === "done" || undefined}><Check size={16} weight="bold" />Conectada</span>
