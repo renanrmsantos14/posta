@@ -1,7 +1,7 @@
 // Configurações: versão instalada e atualizações. Fecha por X, Esc ou clique fora.
 import { useEffect, useState } from "react";
 import { ArrowsClockwise, X } from "@phosphor-icons/react";
-import { autoCheck, checkUpdate, setAutoCheck, type Update } from "./updater";
+import { autoCheck, canUpdate, checkUpdate, setAutoCheck, type Update } from "./updater";
 import { toast } from "./toast";
 import build from "./version.json";
 
@@ -64,18 +64,18 @@ export function SettingsDialog({ onClose, onUpdate }: Props) {
               <div className="settings-strong">Posta v{build.version}</div>
               <div className="settings-sub">Compilado em {build.builtAt}</div>
             </div>
-            <button type="button" className="btn" onClick={check} disabled={checking} data-busy={checking || undefined}>
+            {canUpdate && <button type="button" className="btn" onClick={check} disabled={checking} data-busy={checking || undefined}>
               <ArrowsClockwise size={15} weight="bold" className="sync-icon" />
               {checking ? "Procurando…" : "Procurar atualizações"}
-            </button>
+            </button>}
           </div>
-          <label className="settings-row switch-row">
+          {canUpdate && <label className="settings-row switch-row">
             <div>
               <div className="settings-strong">Procurar automaticamente</div>
               <div className="settings-sub">Ao abrir o app e a cada 6 horas</div>
             </div>
             <input type="checkbox" role="switch" className="switch" checked={auto} onChange={(e) => toggle(e.target.checked)} />
-          </label>
+          </label>}
         </section>
       </div>
     </div>

@@ -20,13 +20,17 @@ function write(key: string, value: string) {
   try { localStorage.setItem(key, value); } catch { /* armazenamento indisponível: só não lembra */ }
 }
 
-export const autoCheck = () => read(AUTO_KEY) !== "off";
+/** No Android o APK é reinstalado à mão (o atualizador só existe no desktop). */
+export const canUpdate = !(isTauri && /Android/i.test(navigator.userAgent));
+
+export const autoCheck = () => canUpdate && read(AUTO_KEY) !== "off";
 export const setAutoCheck = (on: boolean) => write(AUTO_KEY, on ? "on" : "off");
 /** "Depois": a checagem automática não insiste nessa versão; a manual mostra de novo. */
 export const skipped = () => read(SKIP_KEY);
 export const skip = (version: string) => write(SKIP_KEY, version);
 
 export async function checkUpdate(): Promise<Update | null> {
+  if (!canUpdate) return null;
   if (!isTauri) return mockCheck();
   const { check } = await import("@tauri-apps/plugin-updater");
   const found = await check();

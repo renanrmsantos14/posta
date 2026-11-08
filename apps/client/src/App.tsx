@@ -192,7 +192,13 @@ export default function App() {
     if (!accounts?.length) return;
     syncRef.current(false);
     const t = setInterval(() => syncRef.current(false), SYNC_EVERY_MS);
-    return () => clearInterval(t);
+    // Android suspende o app em segundo plano: ao voltar, sincroniza na hora.
+    const onVisible = () => document.visibilityState === "visible" && syncRef.current(false);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      clearInterval(t);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
   }, [accounts?.length]);
 
   // IDLE no backend: avisa na hora que algo mudou na caixa de entrada.

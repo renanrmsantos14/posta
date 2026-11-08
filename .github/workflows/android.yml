@@ -1,0 +1,104 @@
+# Gera o APK do Android. Sem segredos: assina com uma chave de debug (instalação direta, fora da Play Store).
+# Em tags v* anexa o APK ao release criado pelo workflow Release.
+name: Android
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/android.yml"
+      - "apps/client/**"
+      - "crates/**"
+      - "Cargo.*"
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      NDK_VERSION: 27.2.12479018
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools ndk;27.2.12479018
+
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Compila o APK (sem assinatura)
+        env:
+          NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/${{ env.NDK_VERSION }}
+        working-directory: apps/client
+        run: pnpm tauri android build --apk --target aarch64 armv7 x86_64
+
+      # Chave de debug só deste projeto, guardada no cache para que as próximas versões
+      # continuem instalando por cima da anterior (se o cache expirar, desinstale antes).
+      - name: Chave de debug
+        id: cache-key
+        uses: actions/cache@v4
+        with:
+          path: ~/.android/posta-debug.keystore
+          key: posta-android-debug-keystore-v1
+
+      - name: Cria a chave de debug
+        if: steps.cache-key.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/.android
+          keytool -genkeypair -keystore ~/.android/posta-debug.keystore -storepass android -keypass android \
+            -alias posta-debug -keyalg RSA -keysize 2048 -validity 36500 -dname "CN=Posta Debug,O=Posta,C=BR"
+
+      - name: Alinha e assina
+        run: |
+          BT="$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)"
+          VERSION="$(node -p "require('./apps/client/package.json').version")"
+          UNSIGNED="$(find apps/client/src-tauri/gen/android -name '*-release-unsigned.apk' | head -1)"
+          test -n "$UNSIGNED"
+          mkdir -p dist-android
+          "$BT/zipalign" -f -p 4 "$UNSIGNED" dist-android/aligned.apk
+          "$BT/apksigner" sign --ks ~/.android/posta-debug.keystore --ks-pass pass:android --key-pass pass:android \
+            --ks-key-alias posta-debug --out "dist-android/Posta_${VERSION}_android.apk" dist-android/aligned.apk
+          rm -f dist-android/aligned.apk dist-android/*.idsig
+          "$BT/apksigner" verify --print-certs "dist-android/Posta_${VERSION}_android.apk" | head -3
+          ls -la dist-android
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: posta-android-apk
+          path: dist-android/*.apk
+          if-no-files-found: error
+
+      - name: Anexa ao release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # O release é criado pelo workflow Release; espera ele existir (até 30 min).
+          for i in $(seq 1 60); do
+            gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 && break
+            sleep 30
+          done
+          gh release upload "$GITHUB_REF_NAME" dist-android/*.apk --clobber

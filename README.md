@@ -9,13 +9,15 @@ Instaladores na página de [Releases](https://github.com/renanrmsantos14/posta/r
 - **Windows**: `Posta_x.y.z_x64-setup.exe`. Sem certificado pago, o SmartScreen avisa na primeira vez: *Mais informações* → *Executar assim mesmo*.
 - **Linux**: `Posta_x.y.z_amd64.AppImage` (dar permissão de execução) ou `.deb` no Ubuntu/Debian.
 
-Depois de instalado, o Posta se atualiza sozinho: procura versão nova ao abrir e a cada 6 h, mostra as novidades e pergunta antes de instalar. Em **Configurações** (engrenagem) dá para procurar na hora ou desligar a checagem automática.
+- **Android**: `Posta_x.y.z_android.apk` (nos Releases, ou no artefato `posta-android-apk` da execução do workflow *Android*). Baixe no celular, abra o arquivo e permita "instalar apps desconhecidos" para o navegador/gerenciador quando o Android pedir. O APK é assinado com uma chave de debug (sem Play Store); para atualizar, instale o APK novo por cima. Se o Android recusar por assinatura diferente, desinstale antes. A senha da conta fica no Android Keystore (SharedPreferences cifrado). Não há sincronização em segundo plano: o app sincroniza ao abrir, ao voltar para o primeiro plano e a cada 60 s enquanto aberto (WorkManager fica para depois).
+
+Depois de instalado no desktop, o Posta se atualiza sozinho: procura versão nova ao abrir e a cada 6 h, mostra as novidades e pergunta antes de instalar. Em **Configurações** (engrenagem) dá para procurar na hora ou desligar a checagem automática.
 
 ## Como funciona
 
 - `crates/mail-core`: sincroniza IMAP para um SQLite local (WAL + busca FTS5 sem acento). A UI só lê o banco local, por isso abre e busca na hora.
 - `apps/client`: interface React. Fora do Tauri (`pnpm dev` no navegador) usa dados de exemplo de `src/mock.ts`.
-- `apps/client/src-tauri`: comandos Tauri. Contas ficam em `accounts.json` na pasta de dados do app; senhas e refresh tokens OAuth no cofre do sistema (crate `keyring`).
+- `apps/client/src-tauri`: comandos Tauri. Contas ficam em `accounts.json` na pasta de dados do app; senhas e refresh tokens OAuth no cofre do sistema (crate `keyring`; no Android, Keystore via `android-native-keyring-store`, em `src/secret.rs`).
 - Chegada instantânea: no backend, uma thread por conta mantém IMAP IDLE na Caixa de entrada (renova a cada 25 min, reconecta com espera crescente de 5 s a 5 min). Ao receber aviso, sincroniza a INBOX e emite o evento `mail-changed`, que a UI escuta para recarregar. Servidor sem IDLE: a mesma thread faz polling a cada 60 s. A UI mantém um sync de segurança a cada 5 min.
 
 ## Comandos
@@ -55,5 +57,5 @@ SMTP com servidor e porta sugeridos pelo domínio (465 = TLS, outras = STARTTLS)
 2. Arquivar e excluir; pastas além da caixa de entrada.
 3. ~~IMAP IDLE para chegada instantânea.~~ Feito.
 4. ~~OAuth (Google e Microsoft).~~ Feito, sem Graph/Gmail API: IMAP/SMTP com XOAUTH2. Falta validar com contas reais (veja `docs/oauth.md`).
-5. Android: guardar a senha no Keystore (o `keyring` padrão não cobre Android) e sincronizar em segundo plano.
+5. ~~Android: APK, senha no Keystore.~~ Feito. Falta sincronizar em segundo plano (WorkManager, 15 min), notificações e login OAuth no Android.
 6. ~~Emails em HTML, exibidos em iframe isolado.~~ Feito: sem scripts, imagens remotas só com "Mostrar imagens", links no navegador do sistema.

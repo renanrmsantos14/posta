@@ -14,11 +14,18 @@ tauri-build = { version = "2.7", features = [] }
 tauri = { version = "2.12", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-keyring = "4.2"
-open = "5"
 mail-core = { path = "../../../crates/mail-core" }
 tauri-plugin-process = "2.4.0"
 tauri-plugin-opener = "2"
 
 [target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
 tauri-plugin-updater = "2.14.1"
+
+# Segredos: cofre do sistema no desktop; Android Keystore (via SharedPreferences cifrado) no Android.
+[target.'cfg(not(target_os = "android"))'.dependencies]
+keyring = "4.2"
+open = "5"
+
+[target.'cfg(target_os = "android")'.dependencies]
+keyring-core = "1"
+android-native-keyring-store = "1"

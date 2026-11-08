@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::{collections::{HashMap, HashSet}, fs, path::PathBuf, sync::Mutex, time::{Duration, Instant}};
 use tauri::{AppHandle, Emitter, Manager, State};
 
-const KEYRING_SERVICE: &str = "posta";
+mod secret;
 
 struct AppState {
     dir: PathBuf,
@@ -54,9 +54,7 @@ impl AppState {
             .ok_or_else(|| format!("conta {id} não encontrada"))?;
         acc.password = match acc.auth.provider() {
             Some(p) => self.access_token(id, p)?,
-            None => keyring::Entry::new(KEYRING_SERVICE, id)
-                .and_then(|e| e.get_password())
-                .map_err(|e| format!("senha de {id} no cofre do sistema: {e}"))?,
+            None => secret::get(id).map_err(|e| format!("senha de {id} no cofre do sistema: {e}"))?,
         };
         Ok(acc)
     }
@@ -71,14 +69,13 @@ impl AppState {
             }
         }
         let client = oauth_client(p).ok_or_else(|| "login OAuth não configurado nesta versão do Posta".to_string())?;
-        let entry = keyring::Entry::new(KEYRING_SERVICE, &refresh_key(id)).map_err(err)?;
-        let refresh = entry
-            .get_password()
+        let key = refresh_key(id);
+        let refresh = secret::get(&key)
             .map_err(|e| format!("refresh token de {id} no cofre do sistema: {e}"))?;
         let t = oauth::refresh(p, &client, &refresh).map_err(|e| format!("{e}. Entre de novo nesta conta."))?;
         // A Microsoft rotaciona o refresh token a cada uso.
         if let Some(new) = &t.refresh_token {
-            entry.set_password(new).map_err(|e| format!("não consegui guardar o refresh token: {e}"))?;
+            secret::set(&key, new).map_err(|e| format!("não consegui guardar o refresh token: {e}"))?;
         }
         cache.insert(id.to_string(), (t.access_token.clone(), Instant::now() + t.expires_in));
         Ok(t.access_token)
@@ -192,8 +189,7 @@ async fn add_imap_account(app: AppHandle, mut account: ImapAccount) -> CmdResult
     let account = blocking(app, move |st| {
         imap_sync::check_login(&account).map_err(err)?;
         account.id = format!("{}@{}", account.username, account.host);
-        keyring::Entry::new(KEYRING_SERVICE, &account.id)
-            .and_then(|e| e.set_password(&account.password))
+        secret::set(&account.id, &account.password)
             .map_err(|e| format!("não consegui guardar a senha no cofre do sistema: {e}"))?;
         st.save_account(&account)?;
         Ok(account)
@@ -201,6 +197,17 @@ async fn add_imap_account(app: AppHandle, mut account: ImapAccount) -> CmdResult
     .await?;
     watch_inbox(&handle, account.id.clone());
     Ok(account)
+}
+
+#[cfg(not(target_os = "android"))]
+fn open_browser(url: &str) -> CmdResult<()> {
+    open::that(url).map_err(|e| format!("não consegui abrir o navegador: {e}"))
+}
+
+/// No Android o login OAuth (redirect em 127.0.0.1) ainda não foi validado; use senha de app por enquanto.
+#[cfg(target_os = "android")]
+fn open_browser(_url: &str) -> CmdResult<()> {
+    Err("o login com Google e Microsoft ainda não está disponível no Android; use a senha de app".to_string())
 }
 
 fn refresh_key(id: &str) -> String {
@@ -234,7 +241,7 @@ async fn oauth_login(app: AppHandle, provider: Provider) -> CmdResult<ImapAccoun
         let (verifier, challenge) = oauth::pkce_pair();
         let state = oauth::random_token();
         let url = oauth::authorization_url(provider, &client.id, &redirect, &challenge, &state);
-        open::that(&url).map_err(|e| format!("não consegui abrir o navegador: {e}"))?;
+        open_browser(&url)?;
         let code = oauth::wait_for_code(&listener, &state, Duration::from_secs(180)).map_err(err)?;
         let tokens = oauth::exchange_code(provider, &client, &code, &redirect, &verifier).map_err(err)?;
         let email = tokens.email.clone().ok_or_else(|| "o provedor não informou o email da conta".to_string())?;
@@ -257,8 +264,7 @@ async fn oauth_login(app: AppHandle, provider: Provider) -> CmdResult<ImapAccoun
             password: tokens.access_token.clone(),
         };
         imap_sync::check_login(&account).map_err(err)?;
-        keyring::Entry::new(KEYRING_SERVICE, &refresh_key(&account.id))
-            .and_then(|e| e.set_password(&refresh))
+        secret::set(&refresh_key(&account.id), &refresh)
             .map_err(|e| format!("não consegui guardar o refresh token no cofre do sistema: {e}"))?;
         st.cache_token(&account.id, &tokens);
         st.save_account(&account)?;
@@ -469,13 +475,18 @@ async fn send_message(app: AppHandle, draft: Draft) -> CmdResult<SendReport> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // O rustls-native-certs não conhece os certificados do Android; aponta para a pasta do sistema.
+    #[cfg(target_os = "android")]
+    std::env::set_var("SSL_CERT_DIR", "/apex/com.android.conscrypt/cacerts:/system/etc/security/cacerts");
     tauri::Builder::default()
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
-            // Atualização pelo próprio app: só no desktop (Android atualiza pela loja).
+            // Atualização pelo próprio app: só no desktop (no Android, reinstala-se o APK).
             #[cfg(desktop)]
-            app.handle().plugin(tauri_plugin_updater::Builder::new().build())?;
+            {
+                app.handle().plugin(tauri_plugin_updater::Builder::new().build())?;
+            }
             let dir = app.path().app_data_dir()?;
             fs::create_dir_all(&dir)?;
             let store = Store::open(dir.join("mail.sqlite"))?;
