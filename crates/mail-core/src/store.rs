@@ -4,6 +4,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use std::path::Path;
 
+use crate::folders::{Folder, Role};
 use crate::Result;
 
 /// O banco é só uma cópia do servidor: mudou o esquema, apaga e sincroniza de novo.
@@ -36,6 +37,13 @@ CREATE TABLE IF NOT EXISTS messages (
   UNIQUE (account, mailbox, uid)
 );
 CREATE INDEX IF NOT EXISTS messages_by_date ON messages (date DESC);
+CREATE TABLE IF NOT EXISTS folders (
+  account TEXT NOT NULL,
+  role TEXT NOT NULL,
+  name TEXT NOT NULL,
+  PRIMARY KEY (account, role)
+);
+CREATE INDEX IF NOT EXISTS messages_by_box ON messages (account, mailbox, date DESC);
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5 (
   subject, from_name, from_addr, body_text,
   content = 'messages', content_rowid = 'id',
@@ -104,6 +112,11 @@ pub struct MessageDetail {
 pub struct Store {
     conn: Connection,
 }
+
+/// Nome da pasta do papel ?1 na conta da linha; Caixa de entrada sem linha em `folders` é "INBOX".
+const IN_ROLE: &str = "m.mailbox = COALESCE(
+    (SELECT f.name FROM folders f WHERE f.account = m.account AND f.role = ?1),
+    CASE ?1 WHEN 'inbox' THEN 'INBOX' END)";
 
 const SUMMARY_COLS: &str =
     "m.id, m.account, m.uid, m.from_name, m.from_addr, m.subject, m.date, m.snippet, m.seen";
@@ -321,6 +334,83 @@ impl Store {
             )
             .optional()?)
     }
+
+    pub fn set_folders(&mut self, account: &str, folders: &[Folder]) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute("DELETE FROM folders WHERE account = ?1", params![account])?;
+        for f in folders {
+            tx.execute(
+                "INSERT INTO folders (account, role, name) VALUES (?1, ?2, ?3)",
+                params![account, f.role.as_str(), f.name],
+            )?;
+        }
+        Ok(tx.commit()?)
+    }
+
+    pub fn folders(&self, account: &str) -> Result<Vec<Folder>> {
+        let mut stmt = self.conn.prepare_cached("SELECT role, name FROM folders WHERE account = ?1")?;
+        let rows = stmt
+            .query_map(params![account], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut out: Vec<Folder> = rows
+            .into_iter()
+            .filter_map(|(role, name)| Some(Folder { role: Role::parse(&role)?, name }))
+            .collect();
+        out.sort_by_key(|f| Role::ALL.iter().position(|r| *r == f.role));
+        Ok(out)
+    }
+
+    pub fn folder_name(&self, account: &str, role: Role) -> Result<Option<String>> {
+        let found: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT name FROM folders WHERE account = ?1 AND role = ?2",
+                params![account, role.as_str()],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(found.or_else(|| (role == Role::Inbox).then(|| "INBOX".to_string())))
+    }
+
+    /// Pasta unificada: o papel em todas as contas, mais recentes primeiro.
+    pub fn list_folder(&self, role: Role, limit: u32, offset: u32) -> Result<Vec<MessageSummary>> {
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT {SUMMARY_COLS} FROM messages m WHERE {IN_ROLE}
+             ORDER BY m.date DESC, m.id DESC LIMIT ?2 OFFSET ?3"
+        ))?;
+        let rows = stmt
+            .query_map(params![role.as_str(), limit, offset], row_to_summary)?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(rows)
+    }
+
+    pub fn count_folder(&self, role: Role) -> Result<u32> {
+        Ok(self.conn.query_row(
+            &format!("SELECT COUNT(*) FROM messages m WHERE {IN_ROLE}"),
+            params![role.as_str()],
+            |r| r.get(0),
+        )?)
+    }
+
+    pub fn search_folder(&self, query: &str, role: Role, limit: u32) -> Result<Vec<MessageSummary>> {
+        let Some(q) = fts_query(query) else {
+            return Ok(Vec::new());
+        };
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT {SUMMARY_COLS} FROM messages_fts f JOIN messages m ON m.id = f.rowid
+             WHERE messages_fts MATCH ?2 AND {IN_ROLE} ORDER BY m.date DESC LIMIT ?3"
+        ))?;
+        let rows = stmt
+            .query_map(params![role.as_str(), q, limit], row_to_summary)?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(rows)
+    }
+
+    /// Apaga a cópia local (o gatilho limpa o FTS). Usado depois que o servidor confirmou mover/excluir.
+    pub fn remove(&self, id: i64) -> Result<()> {
+        self.conn.execute("DELETE FROM messages WHERE id = ?1", params![id])?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -391,6 +481,48 @@ mod tests {
         assert_eq!((r.uid, r.message_id.as_str()), (7, "7@exemplo.com"));
         assert_eq!(s.get(id).unwrap().unwrap().reply_addr, "ana@exemplo.com");
         assert!(s.reply_ref(999).unwrap().is_none());
+    }
+
+    fn folders_a() -> Vec<Folder> {
+        vec![
+            Folder { role: Role::Inbox, name: "INBOX".into() },
+            Folder { role: Role::Trash, name: "Lixeira".into() },
+        ]
+    }
+
+    #[test]
+    fn lista_e_busca_por_papel_juntam_contas() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.set_folders("a", &folders_a()).unwrap();
+        s.set_folders("b", &[Folder { role: Role::Trash, name: "Trash".into() }]).unwrap();
+        s.insert_messages("a", "INBOX", &[msg(1, "Entrada", "", 1)]).unwrap();
+        s.insert_messages("a", "Lixeira", &[msg(2, "Lixo a", "cotacao", 2)]).unwrap();
+        s.insert_messages("b", "Trash", &[msg(3, "Lixo b", "cotacao", 3)]).unwrap();
+        s.insert_messages("b", "INBOX", &[msg(4, "Entrada b", "", 4)]).unwrap();
+
+        let lixo: Vec<_> = s.list_folder(Role::Trash, 50, 0).unwrap().into_iter().map(|m| m.subject).collect();
+        assert_eq!(lixo, ["Lixo b", "Lixo a"]);
+        // Conta b não tem linha de Inbox: cai no padrão "INBOX".
+        assert_eq!(s.list_folder(Role::Inbox, 50, 0).unwrap().len(), 2);
+        assert_eq!(s.count_folder(Role::Trash).unwrap(), 2);
+        assert_eq!(s.search_folder("cotacao", Role::Trash, 10).unwrap().len(), 2);
+        assert!(s.search_folder("cotacao", Role::Inbox, 10).unwrap().is_empty());
+        assert_eq!(s.folder_name("b", Role::Inbox).unwrap().as_deref(), Some("INBOX"));
+        assert_eq!(s.folder_name("b", Role::Archive).unwrap(), None);
+    }
+
+    #[test]
+    fn set_folders_substitui_e_remove_apaga_do_fts() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.set_folders("a", &folders_a()).unwrap();
+        s.set_folders("a", &[Folder { role: Role::Sent, name: "Sent".into() }]).unwrap();
+        assert_eq!(s.folders("a").unwrap(), [Folder { role: Role::Sent, name: "Sent".into() }]);
+
+        s.insert_messages("a", "INBOX", &[msg(1, "Cotação", "", 1)]).unwrap();
+        let id = s.list("INBOX", 1, 0).unwrap()[0].id;
+        s.remove(id).unwrap();
+        assert!(s.get(id).unwrap().is_none());
+        assert!(s.search("cotacao", 10).unwrap().is_empty());
     }
 
     #[test]
