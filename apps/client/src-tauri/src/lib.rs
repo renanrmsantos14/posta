@@ -181,7 +181,11 @@ async fn send_message(app: AppHandle, draft: Draft) -> CmdResult<SendReport> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_process::init())
         .setup(|app| {
+            // Atualização pelo próprio app: só no desktop (Android atualiza pela loja).
+            #[cfg(desktop)]
+            app.handle().plugin(tauri_plugin_updater::Builder::new().build())?;
             let dir = app.path().app_data_dir()?;
             fs::create_dir_all(&dir)?;
             let store = Store::open(dir.join("mail.sqlite"))?;

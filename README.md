@@ -2,6 +2,15 @@
 
 Cliente de email pessoal, rápido e personalizado. Windows, Linux e Android (iOS depois), com Tauri 2 + React e núcleo em Rust.
 
+## Baixar
+
+Instaladores na página de [Releases](https://github.com/renanrmsantos14/posta/releases/latest):
+
+- **Windows**: `Posta_x.y.z_x64-setup.exe`. Sem certificado pago, o SmartScreen avisa na primeira vez: *Mais informações* → *Executar assim mesmo*.
+- **Linux**: `Posta_x.y.z_amd64.AppImage` (dar permissão de execução) ou `.deb` no Ubuntu/Debian.
+
+Depois de instalado, o Posta se atualiza sozinho: procura versão nova ao abrir e a cada 6 h, mostra as novidades e pergunta antes de instalar. Em **Configurações** (engrenagem) dá para procurar na hora ou desligar a checagem automática.
+
 ## Como funciona
 
 - `crates/mail-core`: sincroniza IMAP para um SQLite local (WAL + busca FTS5 sem acento). A UI só lê o banco local, por isso abre e busca na hora.
@@ -14,11 +23,18 @@ Cliente de email pessoal, rápido e personalizado. Windows, Linux e Android (iOS
 | --- | --- |
 | `pnpm dev` | UI no navegador em http://localhost:36480 com dados de exemplo |
 | `pnpm --filter client tauri dev` | App desktop real (precisa das dependências do Tauri no sistema) |
-| `pnpm --filter client tauri build` | Instalador; incrementa a versão (`v0.0.x · data/hora`) |
+| `pnpm release [versão]` | Sobe a versão (PATCH, ou a informada), cria commit e tag `vX.Y.Z` e envia; o GitHub Actions gera os instaladores e publica o release |
+| `pnpm --filter client tauri build` | Instalador local (exige `TAURI_SIGNING_PRIVATE_KEY` com a chave de assinatura) |
 | `pnpm test` | Testes do núcleo (banco local) |
 | `pnpm test:imap` | Sobe Greenmail no Docker e testa IMAP real (1.000 mensagens) e resposta por SMTP |
 
 Linux precisa de `libwebkit2gtk-4.1-dev`, `libgtk-3-dev`, `librsvg2-dev` e de um serviço de segredos (GNOME Keyring/KWallet).
+
+## Publicar versão
+
+`pnpm release` no `master` limpo. O workflow `.github/workflows/release.yml` compila Windows e Linux, assina as atualizações e publica o `latest.json` que o app consulta.
+
+A chave de assinatura fica em `~/.tauri/posta.key` (senha em `~/.tauri/posta.key.password`) e nos secrets `TAURI_SIGNING_PRIVATE_KEY`/`TAURI_SIGNING_PRIVATE_KEY_PASSWORD` do GitHub. **Guarde cópia dos dois arquivos**: sem eles, quem já instalou não recebe mais atualizações automáticas.
 
 ## Atalhos
 

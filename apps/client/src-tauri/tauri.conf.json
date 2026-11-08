@@ -11,7 +11,14 @@
   },
   "app": {
     "windows": [
-      { "label": "main", "title": "Posta", "width": 1280, "height": 820, "minWidth": 360, "minHeight": 480 }
+      {
+        "label": "main",
+        "title": "Posta",
+        "width": 1280,
+        "height": 820,
+        "minWidth": 360,
+        "minHeight": 480
+      }
     ],
     "security": {
       "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:"
@@ -20,6 +27,24 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"]
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDAyMjUwODgyNjM4M0U5QTAKUldTZzZZTmpnZ2dsQXZWRDBnQkFCN0YrcVFWaDMvZmExNUFmRFZGTDQyTVhyNS9TWkh3UjJsVFIK",
+      "endpoints": [
+        "https://github.com/renanrmsantos14/posta/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }
