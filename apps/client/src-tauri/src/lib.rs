@@ -1,11 +1,10 @@
 //! Ponte entre a UI e o mail-core. Leituras vêm do SQLite local; rede só em sync e flags.
 
-use mail_core::{imap_sync, send, ImapAccount, MessageDetail, MessageSummary, Outgoing, SendReport, Store};
+use mail_core::{imap_sync, send, ImapAccount, MessageDetail, MessageSummary, Outgoing, ReplyRef, Role, SendReport, Store};
 use serde::{Deserialize, Serialize};
 use std::{fs, path::PathBuf, sync::Mutex};
 use tauri::{AppHandle, Manager, State};
 
-const INBOX: &str = "INBOX";
 const KEYRING_SERVICE: &str = "posta";
 
 struct AppState {
@@ -53,6 +52,25 @@ impl AppState {
             .map_err(|e| format!("senha de {id} no cofre do sistema: {e}"))?;
         Ok(acc)
     }
+
+    /// Pastas da conta; descobre no servidor na primeira vez.
+    fn ensure_folders(&self, store: &mut Store, acc: &ImapAccount) -> CmdResult<()> {
+        if store.folders(&acc.id).map_err(err)?.is_empty() {
+            let found = imap_sync::discover_folders(acc).map_err(err)?;
+            store.set_folders(&acc.id, &found).map_err(err)?;
+        }
+        Ok(())
+    }
+
+    /// Conta, pasta e UID de uma mensagem local.
+    fn locate(&self, id: i64) -> CmdResult<ReplyRef> {
+        self.store
+            .lock()
+            .unwrap()
+            .reply_ref(id)
+            .map_err(err)?
+            .ok_or_else(|| "mensagem não encontrada".to_string())
+    }
 }
 
 /// Roda trabalho de rede/disco fora da thread da janela.
@@ -77,6 +95,10 @@ async fn add_imap_account(app: AppHandle, mut account: ImapAccount) -> CmdResult
         all.retain(|a| a.id != account.id);
         all.push(account.clone());
         st.save_accounts(&all)?;
+        // Falha na descoberta não impede adicionar; o próximo sync tenta de novo.
+        if let Ok(f) = imap_sync::discover_folders(&account) {
+            st.store.lock().unwrap().set_folders(&account.id, &f).ok();
+        }
         Ok(account)
     })
     .await
@@ -90,6 +112,8 @@ fn list_accounts(state: State<'_, AppState>) -> CmdResult<Vec<ImapAccount>> {
 #[derive(Serialize, Default)]
 struct SyncResult {
     fetched: usize,
+    /// Mensagens que existem no servidor nas pastas sincronizadas.
+    total: usize,
     errors: Vec<String>,
     /// true quando outra sincronização já estava em andamento.
     skipped: bool,
@@ -104,11 +128,60 @@ async fn sync_inbox(app: AppHandle) -> CmdResult<SyncResult> {
         let mut store = Store::open(st.db_path()).map_err(err)?;
         let mut result = SyncResult::default();
         for acc in st.accounts()? {
+            let r = st.account_with_password(&acc.id).and_then(|a| {
+                if let Err(e) = st.ensure_folders(&mut store, &a) {
+                    result.errors.push(format!("{}: pastas: {e}", acc.id));
+                }
+                imap_sync::sync_mailbox(&a, &mut store, "INBOX", None).map_err(err)
+            });
+            match r {
+                Ok(r) => {
+                    result.fetched += r.fetched;
+                    result.total += r.total;
+                }
+                Err(e) => result.errors.push(format!("{}: {e}", acc.id)),
+            }
+        }
+        Ok(result)
+    })
+    .await
+}
+
+/// Papéis presentes em ao menos uma conta (Inbox sempre), na ordem de `Role::ALL`.
+#[tauri::command]
+fn list_folders(state: State<'_, AppState>) -> CmdResult<Vec<Role>> {
+    let accounts = state.accounts()?;
+    let store = state.store.lock().unwrap();
+    let mut present = vec![Role::Inbox];
+    for acc in accounts {
+        for f in store.folders(&acc.id).map_err(err)? {
+            if !present.contains(&f.role) {
+                present.push(f.role);
+            }
+        }
+    }
+    present.sort_by_key(|r| Role::ALL.iter().position(|x| x == r));
+    Ok(present)
+}
+
+#[tauri::command]
+async fn sync_folder(app: AppHandle, role: Role, keep: usize) -> CmdResult<SyncResult> {
+    blocking(app, move |st| {
+        let Ok(_guard) = st.syncing.try_lock() else {
+            return Ok(SyncResult { skipped: true, ..Default::default() });
+        };
+        let mut store = Store::open(st.db_path()).map_err(err)?;
+        let mut result = SyncResult::default();
+        for acc in st.accounts()? {
+            let Some(name) = store.folder_name(&acc.id, role).map_err(err)? else { continue };
             match st
                 .account_with_password(&acc.id)
-                .and_then(|a| imap_sync::sync_mailbox(&a, &mut store, INBOX).map_err(err))
+                .and_then(|a| imap_sync::sync_mailbox(&a, &mut store, &name, Some(keep)).map_err(err))
             {
-                Ok(r) => result.fetched += r.fetched,
+                Ok(r) => {
+                    result.fetched += r.fetched;
+                    result.total += r.total;
+                }
                 Err(e) => result.errors.push(format!("{}: {e}", acc.id)),
             }
         }
@@ -118,13 +191,43 @@ async fn sync_inbox(app: AppHandle) -> CmdResult<SyncResult> {
 }
 
 #[tauri::command]
-fn list_messages(state: State<'_, AppState>, limit: u32, offset: u32) -> CmdResult<Vec<MessageSummary>> {
-    state.store.lock().unwrap().list(INBOX, limit, offset).map_err(err)
+fn list_messages(state: State<'_, AppState>, role: Role, limit: u32, offset: u32) -> CmdResult<Vec<MessageSummary>> {
+    state.store.lock().unwrap().list_folder(role, limit, offset).map_err(err)
 }
 
 #[tauri::command]
-fn search_messages(state: State<'_, AppState>, query: String) -> CmdResult<Vec<MessageSummary>> {
-    state.store.lock().unwrap().search(&query, 200).map_err(err)
+fn search_messages(state: State<'_, AppState>, query: String, role: Role) -> CmdResult<Vec<MessageSummary>> {
+    state.store.lock().unwrap().search_folder(&query, role, 200).map_err(err)
+}
+
+/// Move para a pasta do papel na mesma conta. A cópia local sai só depois do OK do servidor.
+#[tauri::command]
+async fn move_message(app: AppHandle, id: i64, role: Role) -> CmdResult<()> {
+    blocking(app, move |st| {
+        let loc = st.locate(id)?;
+        let to = st
+            .store
+            .lock()
+            .unwrap()
+            .folder_name(&loc.account, role)
+            .map_err(err)?
+            .ok_or_else(|| "esta conta não tem essa pasta".to_string())?;
+        let acc = st.account_with_password(&loc.account)?;
+        imap_sync::move_message(&acc, &loc.mailbox, loc.uid, &to).map_err(err)?;
+        st.store.lock().unwrap().remove(id).map_err(err)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn delete_forever(app: AppHandle, id: i64) -> CmdResult<()> {
+    blocking(app, move |st| {
+        let loc = st.locate(id)?;
+        let acc = st.account_with_password(&loc.account)?;
+        imap_sync::delete_forever(&acc, &loc.mailbox, loc.uid).map_err(err)?;
+        st.store.lock().unwrap().remove(id).map_err(err)
+    })
+    .await
 }
 
 /// Abre a mensagem e, se estava não lida, marca como lida aqui e no servidor.
@@ -141,14 +244,17 @@ async fn open_message(app: AppHandle, id: i64) -> CmdResult<Option<MessageDetail
         }
         store.set_seen(id, true).map_err(err)?;
         d.summary.seen = true;
-        d
+        let loc = store.reply_ref(id).map_err(err)?;
+        (d, loc)
     };
-    let (account, uid) = (detail.summary.account.clone(), detail.summary.uid);
+    let (detail, loc) = detail;
+    let Some(loc) = loc else { return Ok(Some(detail)) };
+    let (account, mailbox, uid) = (loc.account, loc.mailbox, loc.uid);
     tauri::async_runtime::spawn_blocking(move || {
         let st = app.state::<AppState>();
         if let Err(e) = st
             .account_with_password(&account)
-            .and_then(|a| imap_sync::set_seen(&a, INBOX, uid, true).map_err(err))
+            .and_then(|a| imap_sync::set_seen(&a, &mailbox, uid, true).map_err(err))
         {
             eprintln!("marcar lida no servidor falhou ({account}/{uid}): {e}");
         }
@@ -196,6 +302,10 @@ pub fn run() {
             add_imap_account,
             list_accounts,
             sync_inbox,
+            list_folders,
+            sync_folder,
+            move_message,
+            delete_forever,
             list_messages,
             search_messages,
             open_message,
