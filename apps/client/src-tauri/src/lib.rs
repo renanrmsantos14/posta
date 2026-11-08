@@ -223,6 +223,11 @@ async fn move_message(app: AppHandle, id: i64, role: Role) -> CmdResult<()> {
 async fn delete_forever(app: AppHandle, id: i64) -> CmdResult<()> {
     blocking(app, move |st| {
         let loc = st.locate(id)?;
+        // Só a Lixeira apaga de vez; em qualquer outra pasta o caminho é mover para a Lixeira.
+        let trash = st.store.lock().unwrap().folder_name(&loc.account, Role::Trash).map_err(err)?;
+        if trash.as_deref() != Some(loc.mailbox.as_str()) {
+            return Err("só dá para excluir de vez dentro da Lixeira".to_string());
+        }
         let acc = st.account_with_password(&loc.account)?;
         imap_sync::delete_forever(&acc, &loc.mailbox, loc.uid).map_err(err)?;
         st.store.lock().unwrap().remove(id).map_err(err)

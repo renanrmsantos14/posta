@@ -26,8 +26,6 @@ pub struct SendReport {
     pub warning: Option<String>,
 }
 
-
-
 fn recipients(to: &str) -> Result<Mailboxes> {
     let list: Vec<Mailbox> = to
         .split([',', ';'])

@@ -191,17 +191,19 @@ pub(crate) fn list_folders(session: &mut ImapSession) -> Result<(Vec<Listed>, Op
     Ok((listed, delimiter))
 }
 
-/// Descobre as pastas padrão. Sem Arquivo, cria e assina um.
+/// Descobre as pastas padrão. Sem Arquivo, tenta criar e assinar um; se o servidor recusar, segue sem Arquivo.
 pub fn discover_folders(acc: &ImapAccount) -> Result<Vec<Folder>> {
     let mut session = connect(acc)?;
     let (listed, delimiter) = list_folders(&mut session)?;
     let mut folders = pick(&listed);
     if !folders.iter().any(|f| f.role == Role::Archive) {
         let name = archive_name(&listed, delimiter.as_deref());
-        session.create(&name)?;
-        session.subscribe(&name).ok();
-        folders.push(Folder { role: Role::Archive, name });
-        folders.sort_by_key(|f| Role::ALL.iter().position(|r| *r == f.role));
+        // Servidor que não deixa criar pasta não pode esconder Enviados/Lixeira já descobertos.
+        if session.create(&name).is_ok() {
+            session.subscribe(&name).ok();
+            folders.push(Folder { role: Role::Archive, name });
+            folders.sort_by_key(|f| Role::ALL.iter().position(|r| *r == f.role));
+        }
     }
     session.logout().ok();
     Ok(folders)
