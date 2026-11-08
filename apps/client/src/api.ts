@@ -41,6 +41,8 @@ export interface MessageSummary {
 
 export interface MessageDetail extends MessageSummary {
   body_text: string;
+  /** HTML original; vazio quando a mensagem só tem texto. */
+  body_html: string;
   /** Reply-To, ou o remetente. */
   reply_addr: string;
 }

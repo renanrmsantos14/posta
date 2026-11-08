@@ -55,4 +55,4 @@ SMTP com servidor e porta sugeridos pelo domínio (465 = TLS, outras = STARTTLS)
 3. IMAP IDLE para chegada instantânea, no lugar do intervalo de 60 s.
 4. ~~OAuth (Google e Microsoft).~~ Feito, sem Graph/Gmail API: IMAP/SMTP com XOAUTH2. Falta validar com contas reais (veja `docs/oauth.md`).
 5. Android: guardar a senha no Keystore (o `keyring` padrão não cobre Android) e sincronizar em segundo plano.
-6. Emails em HTML, exibidos em iframe isolado.
+6. ~~Emails em HTML, exibidos em iframe isolado.~~ Feito: sem scripts, imagens remotas só com "Mostrar imagens", links no navegador do sistema.

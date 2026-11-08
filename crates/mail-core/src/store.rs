@@ -8,7 +8,7 @@ use crate::folders::{Folder, Role};
 use crate::Result;
 
 /// O banco é só uma cópia do servidor: mudou o esquema, apaga e sincroniza de novo.
-const SCHEMA_VERSION: i32 = 2;
+const SCHEMA_VERSION: i32 = 3;
 
 const SCHEMA: &str = "
 PRAGMA journal_mode = WAL;
@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS messages (
   date INTEGER NOT NULL,
   snippet TEXT NOT NULL DEFAULT '',
   body_text TEXT NOT NULL DEFAULT '',
+  body_html TEXT NOT NULL DEFAULT '',
   seen INTEGER NOT NULL DEFAULT 0,
   message_id TEXT NOT NULL DEFAULT '',
   refs TEXT NOT NULL DEFAULT '',
@@ -68,6 +69,8 @@ pub struct NewMessage {
     pub subject: String,
     pub date: i64,
     pub body_text: String,
+    /// HTML original; vazio quando a mensagem só tem texto. A busca continua sobre `body_text`.
+    pub body_html: String,
     pub seen: bool,
     /// Message-ID sem os sinais < >.
     pub message_id: String,
@@ -106,6 +109,8 @@ pub struct MessageDetail {
     #[serde(flatten)]
     pub summary: MessageSummary,
     pub body_text: String,
+    /// Vazio quando a mensagem só tem texto.
+    pub body_html: String,
     pub reply_addr: String,
 }
 
@@ -218,9 +223,9 @@ impl Store {
         {
             let mut stmt = tx.prepare_cached(
                 "INSERT OR IGNORE INTO messages
-                 (account, mailbox, uid, from_name, from_addr, subject, date, snippet, body_text, seen,
+                 (account, mailbox, uid, from_name, from_addr, subject, date, snippet, body_text, body_html, seen,
                   message_id, refs, reply_addr)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             )?;
             for m in msgs {
                 stmt.execute(params![
@@ -233,6 +238,7 @@ impl Store {
                     m.date,
                     snippet(&m.body_text),
                     m.body_text,
+                    m.body_html,
                     m.seen,
                     m.message_id,
                     m.refs,
@@ -303,13 +309,14 @@ impl Store {
         Ok(self
             .conn
             .query_row(
-                &format!("SELECT {SUMMARY_COLS}, m.body_text, m.reply_addr FROM messages m WHERE m.id = ?1"),
+                &format!("SELECT {SUMMARY_COLS}, m.body_text, m.body_html, m.reply_addr FROM messages m WHERE m.id = ?1"),
                 params![id],
                 |r| {
                     Ok(MessageDetail {
                         summary: row_to_summary(r)?,
                         body_text: r.get(9)?,
-                        reply_addr: r.get(10)?,
+                        body_html: r.get(10)?,
+                        reply_addr: r.get(11)?,
                     })
                 },
             )
@@ -425,6 +432,7 @@ mod tests {
             subject: subject.into(),
             date,
             body_text: body.into(),
+            body_html: String::new(),
             seen: false,
             message_id: format!("{uid}@exemplo.com"),
             refs: String::new(),
@@ -539,5 +547,19 @@ mod tests {
         for ext in ["", "-wal", "-shm"] {
             std::fs::remove_file(format!("{}{ext}", dir.display())).ok();
         }
+    }
+
+    #[test]
+    fn html_volta_no_detalhe_e_busca_segue_no_texto() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.set_uid_validity("a", "INBOX", 1).unwrap();
+        let mut m = msg(1, "Promo", "oferta de inverno", 100);
+        m.body_html = "<p>oferta de <b>inverno</b></p>".into();
+        s.insert_messages("a", "INBOX", &[m]).unwrap();
+        let id = s.search("inverno", 10).unwrap()[0].id;
+        let d = s.get(id).unwrap().unwrap();
+        assert_eq!(d.body_html, "<p>oferta de <b>inverno</b></p>");
+        assert_eq!(d.body_text, "oferta de inverno");
+        assert!(s.search("strong", 10).unwrap().is_empty());
     }
 }

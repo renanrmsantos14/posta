@@ -394,6 +394,7 @@ async fn send_message(app: AppHandle, draft: Draft) -> CmdResult<SendReport> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             // Atualização pelo próprio app: só no desktop (Android atualiza pela loja).
             #[cfg(desktop)]

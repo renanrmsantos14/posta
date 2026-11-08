@@ -34,10 +34,28 @@ let messages: MockMessage[] = Array.from({ length: 60 }, (_, i) => {
     date: now - Math.round((hoursAgo + round * 200) * H),
     snippet: body.slice(0, 200),
     body_text: `${body}\n\nAbraço,\n${from_name.split(" ")[0]}`,
+    body_html: "",
     seen: i > 2 && i % 4 !== 0,
     reply_addr: from_addr,
     role: "inbox",
   };
+});
+
+// Dois emails em HTML: um simples e outro com imagem remota (para a faixa "Mostrar imagens").
+const IMG = "https://placehold.co/560x180/png?text=Oferta+de+inverno";
+const htmlSamples: [string, string, string, string, string, number][] = [
+  ["Café Origem", "contato@cafeorigem.com.br", "Seu pedido #4821 saiu para entrega", "Seu pedido saiu para entrega e chega amanhã entre 9h e 12h.",
+    `<div style="font-family:Georgia,serif;max-width:560px;margin:0 auto;padding:16px"><h2 style="color:#5b3a1e">Pedido a caminho</h2><p>Olá, Renan! Seu pedido <b>#4821</b> saiu para entrega e chega amanhã entre <b>9h e 12h</b>.</p><table style="width:100%;border-collapse:collapse"><tr><td style="padding:6px 0;border-bottom:1px solid #eee">Café Santa Luzia 250 g</td><td style="text-align:right;border-bottom:1px solid #eee">R$ 38,00</td></tr><tr><td style="padding:6px 0">Frete</td><td style="text-align:right">R$ 12,00</td></tr></table><p><a href="https://example.com/rastreio">Acompanhar entrega</a></p></div>`, 1.2],
+  ["Loja Norte", "ofertas@lojanorte.com.br", "Últimos dias: casacos com 40%", "Casacos, botas e cachecóis com até 40% de desconto.",
+    `<div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto"><img src="${IMG}" width="560" alt="Oferta de inverno" style="display:block;width:100%"><div style="padding:16px"><h2 style="margin:0 0 8px">Frio chegou, desconto também</h2><p>Casacos, botas e cachecóis com até <b>40% de desconto</b> até domingo.</p><p><a href="https://example.com/ofertas" style="background:#111;color:#fff;padding:10px 16px;border-radius:6px;text-decoration:none">Ver ofertas</a></p></div></div>`, 3.5],
+];
+htmlSamples.forEach(([from_name, from_addr, subject, text, html, hoursAgo], i) => {
+  const id = 1000 + i;
+  messages.unshift({
+    id, account: accounts[0].id, uid: id, from_name, from_addr, subject,
+    date: now - Math.round(hoursAgo * H), snippet: text, body_text: text, body_html: html,
+    seen: false, reply_addr: from_addr, role: "inbox",
+  });
 });
 
 // Enviados e Lixeira de exemplo.
@@ -54,13 +72,13 @@ extra.forEach(([role, name, addr, subject, body], i) => {
   messages.push({
     id, account: accounts[0].id, uid: id,
     from_name: mine ? "Renan" : name, from_addr: mine ? "renan@exemplo.com" : addr,
-    subject, date: now - (i + 1) * 30 * H, snippet: body, body_text: `${body}\n\n${mine ? "Renan" : name}`,
+    subject, date: now - (i + 1) * 30 * H, snippet: body, body_text: `${body}\n\n${mine ? "Renan" : name}`, body_html: "",
     seen: true, reply_addr: addr, role,
   });
 });
 
 const norm = (s: string) => s.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase();
-const summary = ({ body_text: _b, reply_addr: _r, role: _o, ...s }: MockMessage): MessageSummary => s;
+const summary = ({ body_text: _b, body_html: _h, reply_addr: _r, role: _o, ...s }: MockMessage): MessageSummary => s;
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 let syncCount = 0;
 
@@ -101,7 +119,7 @@ export const mockApi = {
       {
         id, account: accounts[0].id, uid: id, from_name: "Marina Duarte", from_addr: "marina@lumenarquitetura.com.br",
         subject: "Orçamento aprovado", date: Math.floor(Date.now() / 1000),
-        snippet: "Tudo certo com o orçamento. Podemos assinar na segunda?", body_text: "Tudo certo com o orçamento. Podemos assinar na segunda?\n\nMarina", seen: false,
+        snippet: "Tudo certo com o orçamento. Podemos assinar na segunda?", body_text: "Tudo certo com o orçamento. Podemos assinar na segunda?\n\nMarina", body_html: "", seen: false,
         reply_addr: "marina@lumenarquitetura.com.br", role: "inbox",
       },
       ...messages,
