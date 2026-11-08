@@ -124,10 +124,8 @@ export default function App() {
       if (r.skipped) return;
       r.errors.forEach((e) => toast(e, "error"));
       api.folders().then(setFolderList).catch(() => {});
-      if (r.fetched && folder !== "inbox") {
-        toast(plural(r.fetched, "mensagem nova", "mensagens novas"), "success");
-      } else if (r.fetched) {
-        await reload(messages.length);
+      if (r.fetched) {
+        if (folder === "inbox") await reload(messages.length);
         toast(plural(r.fetched, "mensagem nova", "mensagens novas"), "success");
       } else if (manual && !r.errors.length) {
         toast("Caixa em dia", "info");
