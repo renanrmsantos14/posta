@@ -3,7 +3,7 @@
 //! Sem a variável, os testes passam sem fazer nada.
 
 use imap::{ClientBuilder, ConnectionMode};
-use mail_core::{imap_sync, send, ImapAccount, Outgoing, Security, SmtpServer, Store};
+use mail_core::{imap_sync, send, ImapAccount, Outgoing, Role, Security, SmtpServer, Store};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 fn account(tag: &str) -> Option<ImapAccount> {
@@ -54,7 +54,7 @@ fn sincroniza_incremental_flags_e_exclusao() {
     s.append("INBOX", &raw(3, "Terceira")).finish().unwrap();
 
     let mut store = Store::open_in_memory().unwrap();
-    let r = imap_sync::sync_mailbox(&acc, &mut store, "INBOX").unwrap();
+    let r = imap_sync::sync_mailbox(&acc, &mut store, "INBOX", None).unwrap();
     assert_eq!((r.fetched, r.total), (3, 3));
     let list = store.list("INBOX", 50, 0).unwrap();
     assert_eq!(list.len(), 3);
@@ -65,7 +65,7 @@ fn sincroniza_incremental_flags_e_exclusao() {
     assert!(list.iter().find(|m| m.subject == "Reunião").unwrap().seen);
 
     // Segunda sincronização não baixa nada de novo.
-    assert_eq!(imap_sync::sync_mailbox(&acc, &mut store, "INBOX").unwrap().fetched, 0);
+    assert_eq!(imap_sync::sync_mailbox(&acc, &mut store, "INBOX", None).unwrap().fetched, 0);
 
     // Marcar lida no servidor e excluir outra lá; o local acompanha.
     imap_sync::set_seen(&acc, "INBOX", cot.uid, true).unwrap();
@@ -75,7 +75,7 @@ fn sincroniza_incremental_flags_e_exclusao() {
     s.expunge().unwrap();
     s.logout().ok();
 
-    imap_sync::sync_mailbox(&acc, &mut store, "INBOX").unwrap();
+    imap_sync::sync_mailbox(&acc, &mut store, "INBOX", None).unwrap();
     let list = store.list("INBOX", 50, 0).unwrap();
     assert_eq!(list.len(), 2);
     assert!(list.iter().all(|m| m.seen));
@@ -93,7 +93,7 @@ fn mil_mensagens_sincronizam_e_buscam_rapido() {
     let dir = std::env::temp_dir().join(format!("{}.sqlite", acc.id));
     let mut store = Store::open(&dir).unwrap();
     let t = Instant::now();
-    assert_eq!(imap_sync::sync_mailbox(&acc, &mut store, "INBOX").unwrap().fetched, 1000);
+    assert_eq!(imap_sync::sync_mailbox(&acc, &mut store, "INBOX", None).unwrap().fetched, 1000);
     let sync = t.elapsed();
 
     let t = Instant::now();
@@ -124,7 +124,7 @@ fn responde_por_smtp_guarda_em_enviados_e_marca_respondida() {
     );
     session(&eu).append("INBOX", original.as_bytes()).finish().unwrap();
     let mut mine = Store::open_in_memory().unwrap();
-    imap_sync::sync_mailbox(&eu, &mut mine, "INBOX").unwrap();
+    imap_sync::sync_mailbox(&eu, &mut mine, "INBOX", None).unwrap();
     let id = mine.list("INBOX", 1, 0).unwrap()[0].id;
     let reply = mine.reply_ref(id).unwrap().unwrap();
     assert_eq!(mine.get(id).unwrap().unwrap().reply_addr, ana.username);
@@ -142,7 +142,7 @@ fn responde_por_smtp_guarda_em_enviados_e_marca_respondida() {
     let mut theirs = Store::open_in_memory().unwrap();
     let mut got = None;
     for _ in 0..20 {
-        imap_sync::sync_mailbox(&ana, &mut theirs, "INBOX").unwrap();
+        imap_sync::sync_mailbox(&ana, &mut theirs, "INBOX", None).unwrap();
         got = theirs.search("saguao", 5).unwrap().into_iter().next();
         if got.is_some() {
             break;
@@ -160,4 +160,66 @@ fn responde_por_smtp_guarda_em_enviados_e_marca_respondida() {
     s.select("INBOX").unwrap();
     let f = s.uid_fetch(reply.uid.to_string(), "FLAGS").unwrap();
     assert!(f.iter().next().unwrap().flags().iter().any(|f| matches!(f, imap::types::Flag::Answered)));
+}
+
+#[test]
+fn descobre_pastas_e_cria_arquivo() {
+    let Some(acc) = account("dir") else { return };
+    let mut s = session(&acc);
+    s.create("Trash").unwrap();
+    s.logout().ok();
+
+    let f = imap_sync::discover_folders(&acc).unwrap();
+    let name = |r: Role| f.iter().find(|x| x.role == r).map(|x| x.name.clone());
+    assert_eq!(name(Role::Inbox).as_deref(), Some("INBOX"));
+    assert_eq!(name(Role::Trash).as_deref(), Some("Trash"));
+    assert_eq!(name(Role::Archive).as_deref(), Some("Archive"));
+    // Segunda vez não tenta criar de novo.
+    assert_eq!(imap_sync::discover_folders(&acc).unwrap(), f);
+}
+
+#[test]
+fn arquiva_e_exclui_de_vez() {
+    let Some(acc) = account("mv") else { return };
+    let mut s = session(&acc);
+    s.append("INBOX", &raw(1, "Arquivar")).finish().unwrap();
+    s.append("INBOX", &raw(2, "Ficar")).finish().unwrap();
+    s.logout().ok();
+    let folders = imap_sync::discover_folders(&acc).unwrap();
+    let archive = folders.iter().find(|f| f.role == Role::Archive).unwrap().name.clone();
+
+    let mut store = Store::open_in_memory().unwrap();
+    store.set_folders(&acc.id, &folders).unwrap();
+    imap_sync::sync_mailbox(&acc, &mut store, "INBOX", None).unwrap();
+    let alvo = store.list("INBOX", 10, 0).unwrap().into_iter().find(|m| m.subject == "Arquivar").unwrap();
+
+    imap_sync::move_message(&acc, "INBOX", alvo.uid, &archive).unwrap();
+    store.remove(alvo.id).unwrap();
+    imap_sync::sync_mailbox(&acc, &mut store, "INBOX", None).unwrap();
+    imap_sync::sync_mailbox(&acc, &mut store, &archive, Some(1000)).unwrap();
+    let arquivo = store.list_folder(Role::Archive, 10, 0).unwrap();
+    assert_eq!(arquivo.iter().map(|m| m.subject.as_str()).collect::<Vec<_>>(), ["Arquivar"]);
+    assert_eq!(store.list_folder(Role::Inbox, 10, 0).unwrap().len(), 1);
+
+    imap_sync::delete_forever(&acc, &archive, arquivo[0].uid).unwrap();
+    imap_sync::sync_mailbox(&acc, &mut store, &archive, Some(1000)).unwrap();
+    assert!(store.list_folder(Role::Archive, 10, 0).unwrap().is_empty());
+}
+
+#[test]
+fn janela_baixa_so_as_mais_recentes() {
+    let Some(acc) = account("win") else { return };
+    let mut s = session(&acc);
+    for i in 0..5 {
+        s.append("INBOX", &raw(i, &format!("M{i}"))).finish().unwrap();
+    }
+    s.logout().ok();
+    let mut store = Store::open_in_memory().unwrap();
+    let r = imap_sync::sync_mailbox(&acc, &mut store, "INBOX", Some(2)).unwrap();
+    assert_eq!((r.fetched, r.total), (2, 5));
+    let mut uids = store.local_uids(&acc.id, "INBOX").unwrap();
+    uids.sort_unstable();
+    assert_eq!(uids.len(), 2);
+    // Ampliar a janela baixa só o que falta.
+    assert_eq!(imap_sync::sync_mailbox(&acc, &mut store, "INBOX", Some(4)).unwrap().fetched, 2);
 }

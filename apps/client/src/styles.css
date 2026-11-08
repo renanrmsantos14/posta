@@ -88,10 +88,16 @@ kbd {
   display: flex; align-items: center; gap: 10px;
   width: 100%; padding: 6px 8px;
   border: 0; border-radius: 6px;
-  background: var(--selected);
-  color: var(--strong);
+  background: transparent;
+  color: var(--muted);
   font-weight: 500;
   text-align: left;
+  cursor: pointer;
+  transition: transform 160ms var(--ease-out), background-color 150ms ease, color 150ms ease;
+}
+.nav-item[aria-current="page"] { background: var(--selected); color: var(--strong); }
+@media (hover: hover) and (pointer: fine) {
+  .nav-item:hover:not([aria-current="page"]) { background: var(--hover); color: var(--text); }
 }
 .count {
   margin-left: auto;
@@ -203,8 +209,12 @@ kbd {
   cursor: default;
   transition: background-color 120ms ease;
 }
-.row + .row { box-shadow: 0 -1px 0 var(--line); }
-.row[aria-selected="true"], .row[aria-selected="true"] + .row { box-shadow: none; }
+/* Divisória como linha reta: box-shadow seguia o border-radius e desenhava uma "casca" curva. */
+.row { position: relative; }
+.row + .row::before {
+  content: ""; position: absolute; top: 0; left: 10px; right: 10px; height: 1px; background: var(--line);
+}
+.row[aria-selected="true"]::before, .row[aria-selected="true"] + .row::before { display: none; }
 .row[aria-selected="true"] { background: var(--selected); }
 .dot {
   grid-area: dot; align-self: center;
@@ -509,6 +519,29 @@ kbd {
   pointer-events: none; user-select: none;
 }
 
+/* ---------- Pastas e ações ---------- */
+.folder-tabs { gap: 4px; overflow-x: auto; scrollbar-width: none; padding: 0 14px 8px; }
+.folder-tabs::-webkit-scrollbar { display: none; }
+.folder-tabs .btn { flex: none; white-space: nowrap; }
+.folder-tabs .btn[aria-current="page"] { background: var(--selected); color: var(--strong); }
+.actions { flex-wrap: wrap; }
+/* Leitor estreito: atalhos saem dos botões para as ações caberem numa linha. */
+.message { container-type: inline-size; }
+@container (max-width: 600px) { .actions kbd { display: none; } }
+/* Confirmação de exclusão: cobre a janela; clicar fora cancela. */
+.confirm.scrim {
+  position: fixed; z-index: 30; align-items: center; border-radius: 0;
+  background: rgba(0, 0, 0, 0.32);
+}
+.confirm-card {
+  display: flex; flex-direction: column; gap: 12px; width: min(360px, 100%);
+  padding: 24px; border-radius: 12px; background: var(--surface);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.18);
+  transition: transform 200ms var(--ease-out), opacity 160ms ease;
+  @starting-style { opacity: 0; transform: scale(0.97); }
+}
+.confirm-card span { color: var(--muted); margin-top: -6px; }
+
 /* ---------- Telas menores ---------- */
 @media (max-width: 1080px) {
   .app { grid-template-columns: 64px minmax(300px, 360px) 1fr; }
@@ -543,6 +576,7 @@ kbd {
   .meta-date { display: none; }
   .search kbd { display: none; }
   .mobile-only { display: inline-flex; }
+  .folder-tabs.mobile-only { display: flex; }
   /* Escrever vira folha de tela cheia, subindo de baixo. */
   .composer {
     inset: 0; width: auto; height: auto;

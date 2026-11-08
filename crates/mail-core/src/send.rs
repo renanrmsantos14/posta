@@ -1,12 +1,12 @@
 //! Envio por SMTP. Depois de entregue, guarda a cópia em Enviados e marca a original como respondida.
 
 use imap::types::Flag;
-use imap_proto::NameAttribute;
 use lettre::message::{header, Mailbox, Mailboxes};
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{Message, SmtpTransport, Transport};
 use serde::{Deserialize, Serialize};
 
+use crate::folders::{pick, Role};
 use crate::imap_sync::{connect, ImapAccount, ImapSession, Security};
 use crate::store::ReplyRef;
 use crate::{Error, Result};
@@ -25,9 +25,6 @@ pub struct SendReport {
     /// A mensagem saiu, mas algo depois do envio falhou (ex.: cópia em Enviados).
     pub warning: Option<String>,
 }
-
-/// Nomes comuns quando o servidor não marca a pasta com \Sent.
-const SENT_NAMES: [&str; 6] = ["Sent", "Enviados", "Itens Enviados", "Sent Items", "Sent Messages", "INBOX.Sent"];
 
 fn recipients(to: &str) -> Result<Mailboxes> {
     let list: Vec<Mailbox> = to
@@ -83,15 +80,9 @@ fn server_saves_sent(acc: &ImapAccount) -> bool {
 }
 
 fn sent_folder(session: &mut ImapSession) -> Result<String> {
-    let names = session.list(None, Some("*"))?;
-    if let Some(n) = names.iter().find(|n| n.attributes().contains(&NameAttribute::Sent)) {
-        return Ok(n.name().to_string());
-    }
-    if let Some(n) = SENT_NAMES
-        .iter()
-        .find_map(|want| names.iter().find(|n| n.name().eq_ignore_ascii_case(want)))
-    {
-        return Ok(n.name().to_string());
+    let (listed, _) = crate::imap_sync::list_folders(session)?;
+    if let Some(f) = pick(&listed).into_iter().find(|f| f.role == Role::Sent) {
+        return Ok(f.name);
     }
     session.create("Sent")?;
     Ok("Sent".into())
