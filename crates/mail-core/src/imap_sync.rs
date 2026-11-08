@@ -1,9 +1,10 @@
-//! Sincronização IMAP → Store. Uma conexão por chamada; IDLE fica para a próxima etapa.
+//! Sincronização IMAP → Store. Uma conexão por chamada; `idle_wait` espera novidades (IMAP IDLE).
 
 use imap::{ClientBuilder, ConnectionMode, Session};
 use mail_parser::{MessageParser, PartKind};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::time::Duration;
 
 use imap_proto::NameAttribute;
 
@@ -114,6 +115,31 @@ pub(crate) fn connect(acc: &ImapAccount) -> Result<ImapSession> {
         _ => client.authenticate("XOAUTH2", &XOauth2::new(&acc.username, &acc.password)),
     }
     .map_err(|(e, _)| e.into())
+}
+
+/// Como terminou a espera de `idle_wait`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdleEnd {
+    /// O servidor avisou de novidade na caixa (chegada, remoção ou mudança de flag).
+    Changed,
+    /// Nada mudou dentro do prazo; o servidor pode derrubar o IDLE se passar de ~29 min.
+    TimedOut,
+    /// O servidor não anuncia IDLE: quem chama deve fazer polling.
+    Unsupported,
+}
+
+/// Bloqueia até o servidor avisar de mudança em `mailbox` ou até `timeout`. Abre e fecha a própria conexão.
+pub fn idle_wait(acc: &ImapAccount, mailbox: &str, timeout: Duration) -> Result<IdleEnd> {
+    let mut session = connect(acc)?;
+    if !session.capabilities()?.has_str("IDLE") {
+        return Ok(IdleEnd::Unsupported);
+    }
+    session.select(mailbox)?;
+    let outcome = session.idle().timeout(timeout).keepalive(false).wait_while(imap::extensions::idle::stop_on_any)?;
+    Ok(match outcome {
+        imap::extensions::idle::WaitOutcome::MailboxChanged => IdleEnd::Changed,
+        imap::extensions::idle::WaitOutcome::TimedOut => IdleEnd::TimedOut,
+    })
 }
 
 fn parse(uid: u32, raw: &[u8], seen: bool, fallback_date: i64, own_addr: &str) -> NewMessage {

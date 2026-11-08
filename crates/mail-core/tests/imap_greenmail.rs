@@ -237,3 +237,27 @@ fn fetch_to_traz_o_primeiro_destinatario() {
     assert_eq!(imap_sync::fetch_to(&eu, "INBOX", uid).unwrap().as_deref(), Some("ana@exemplo.com"));
     assert_eq!(imap_sync::fetch_to(&eu, "INBOX", uid + 99).unwrap(), None);
 }
+
+#[test]
+fn idle_acorda_quando_chega_mensagem() {
+    use mail_core::IdleEnd;
+    use std::time::Duration;
+    let Some(acc) = account("idle") else { return };
+    let waiter = {
+        let acc = acc.clone();
+        std::thread::spawn(move || {
+            let t = Instant::now();
+            (imap_sync::idle_wait(&acc, "INBOX", Duration::from_secs(20)).unwrap(), t.elapsed())
+        })
+    };
+    // Dá tempo de o IDLE começar, depois entrega uma mensagem por outra conexão.
+    std::thread::sleep(Duration::from_millis(1500));
+    session(&acc).append("INBOX", &raw(1, "Chegou")).finish().unwrap();
+    let (end, took) = waiter.join().unwrap();
+    assert_eq!(end, IdleEnd::Changed);
+    assert!(took < Duration::from_secs(10), "voltou só após {took:?}");
+
+    // Sem novidade: expira no prazo.
+    let end = imap_sync::idle_wait(&acc, "INBOX", Duration::from_secs(2)).unwrap();
+    assert_eq!(end, IdleEnd::TimedOut);
+}

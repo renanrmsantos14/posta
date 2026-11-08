@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowLeft, ArrowBendUpLeft, ArrowsClockwise, Archive, MagnifyingGlass, NotePencil, Plus, Trash, Tray, EnvelopeSimple, GearSix } from "@phosphor-icons/react";
 import { HtmlBody, hasRemoteImages } from "./HtmlBody";
-import { api, type Account, type MessageDetail, type MessageSummary, type Role } from "./api";
+import { api, isTauri, type Account, type MessageDetail, type MessageSummary, type Role } from "./api";
 import { AccountDialog } from "./AccountDialog";
 import { Composer, type ComposeInit } from "./Composer";
 import { Toaster, toast } from "./toast";
@@ -12,7 +12,8 @@ import { autoCheck, checkUpdate, CHECK_EVERY_MS, skip, skipped, type Update } fr
 import build from "./version.json";
 
 const PAGE = 100;
-const SYNC_EVERY_MS = 60_000;
+// Rede de segurança: a chegada normal vem do IDLE (evento `mail-changed`).
+const SYNC_EVERY_MS = 300_000;
 /** Janela inicial das pastas fora da Caixa de entrada, e quanto cresce ao rolar até o fim. */
 const KEEP = 1000;
 const KEEP_STEP = 500;
@@ -193,6 +194,24 @@ export default function App() {
     const t = setInterval(() => syncRef.current(false), SYNC_EVERY_MS);
     return () => clearInterval(t);
   }, [accounts?.length]);
+
+  // IDLE no backend: avisa na hora que algo mudou na caixa de entrada.
+  const onMailChanged = useRef(async (_fetched: number) => {});
+  onMailChanged.current = async (fetched: number) => {
+    api.folders().then(setFolderList).catch(() => {});
+    if (folderRef.current !== "inbox") return;
+    await reload(messages.length);
+    if (fetched) toast(plural(fetched, "mensagem nova", "mensagens novas"), "success");
+  };
+  useEffect(() => {
+    if (!isTauri) return;
+    let off: (() => void) | undefined;
+    let alive = true;
+    import("@tauri-apps/api/event")
+      .then(({ listen }) => listen<number>("mail-changed", (e) => { onMailChanged.current(e.payload).catch(() => {}); }))
+      .then((un) => (alive ? (off = un) : un()));
+    return () => { alive = false; off?.(); };
+  }, []);
 
   // Busca local a cada tecla: sem debounce, o SQLite responde em < 1 ms.
   useEffect(() => {
