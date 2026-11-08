@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, ArrowBendUpLeft, ArrowsClockwise, MagnifyingGlass, NotePencil, Plus, Tray, EnvelopeSimple, GearSix } from "@phosphor-icons/react";
-import { api, type Account, type MessageDetail, type MessageSummary } from "./api";
+import { ArrowLeft, ArrowBendUpLeft, ArrowsClockwise, Archive, MagnifyingGlass, NotePencil, Plus, Trash, Tray, EnvelopeSimple, GearSix } from "@phosphor-icons/react";
+import { api, type Account, type MessageDetail, type MessageSummary, type Role } from "./api";
 import { AccountDialog } from "./AccountDialog";
 import { Composer, type ComposeInit } from "./Composer";
 import { Toaster, toast } from "./toast";
+import { FOLDERS } from "./folders";
 import { SettingsDialog } from "./SettingsDialog";
 import { UpdateDialog } from "./UpdateDialog";
 import { autoCheck, checkUpdate, CHECK_EVERY_MS, skip, skipped, type Update } from "./updater";
@@ -11,6 +12,10 @@ import build from "./version.json";
 
 const PAGE = 100;
 const SYNC_EVERY_MS = 60_000;
+/** Janela inicial das pastas fora da Caixa de entrada, e quanto cresce ao rolar até o fim. */
+const KEEP = 1000;
+const KEEP_STEP = 500;
+const UNDO_MS = 4000;
 const TZ = "America/Sao_Paulo";
 
 const fmtTime = new Intl.DateTimeFormat("pt-BR", { timeZone: TZ, hour: "2-digit", minute: "2-digit" });
@@ -57,15 +62,33 @@ export default function App() {
   const [freshIds, setFreshIds] = useState<Set<number>>(new Set());
   /** Cascata só na primeira abertura; buscas e atualizações trocam a lista sem animar. */
   const [intro, setIntro] = useState(true);
+  const [folder, setFolder] = useState<Role>("inbox");
+  const [folderList, setFolderList] = useState<Role[]>(["inbox"]);
+  /** Janela da pasta atual no servidor e total que o servidor informou. */
+  const [keep, setKeep] = useState(KEEP);
+  const [serverTotal, setServerTotal] = useState<number | null>(null);
+  const [loadingFolder, setLoadingFolder] = useState(true);
+  const [inboxUnread, setInboxUnread] = useState(0);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const known = useRef<Set<number> | null>(null);
+  const folderRef = useRef(folder);
+  folderRef.current = folder;
+  const loadingMore = useRef(false);
   const searchRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLUListElement>(null);
 
   const visible = results ?? messages;
   const unread = useMemo(() => messages.filter((m) => !m.seen).length, [messages]);
 
+  const current = visible.find((m) => m.id === selectedId) ?? null;
+  const archiveTo: Role = folder === "trash" || folder === "junk" ? "inbox" : "archive";
+  const canArchive = folder !== "archive" && folderList.includes(archiveTo);
+  const canTrash = folder === "trash" || folderList.includes("trash");
+
   const reload = useCallback(async (count = PAGE) => {
-    const list = await api.list(Math.max(count, PAGE), 0);
+    const list = await api.list(folder, Math.max(count, PAGE), 0);
+    if (folderRef.current !== folder) return;
     if (known.current) {
       const fresh = list.filter((m) => !known.current!.has(m.id)).map((m) => m.id);
       if (fresh.length) {
@@ -76,15 +99,29 @@ export default function App() {
     known.current = new Set(list.map((m) => m.id));
     setMessages(list);
     setHasMore(list.length >= Math.max(count, PAGE));
+  }, [folder]);
+
+  const syncFolder = useCallback(async (role: Role, window: number) => {
+    const r = await api.syncFolder(role, window);
+    r.errors.forEach((e) => toast(e, "error"));
+    if (folderRef.current === role) setServerTotal(r.total);
   }, []);
 
   const sync = useCallback(async (manual: boolean) => {
     setSyncing(true);
     try {
+      if (manual && folder !== "inbox") {
+        await syncFolder(folder, keep);
+        await reload(messages.length);
+        return;
+      }
       const r = await api.sync();
       if (r.skipped) return;
       r.errors.forEach((e) => toast(e, "error"));
-      if (r.fetched) {
+      api.folders().then(setFolderList).catch(() => {});
+      if (r.fetched && folder !== "inbox") {
+        toast(plural(r.fetched, "mensagem nova", "mensagens novas"), "success");
+      } else if (r.fetched) {
         await reload(messages.length);
         toast(plural(r.fetched, "mensagem nova", "mensagens novas"), "success");
       } else if (manual && !r.errors.length) {
@@ -95,13 +132,44 @@ export default function App() {
     } finally {
       setSyncing(false);
     }
-  }, [reload, messages.length]);
+  }, [reload, syncFolder, folder, keep, messages.length]);
 
-  // Primeira carga: o banco local responde na hora; a rede vem depois.
   useEffect(() => {
     api.listAccounts().then(setAccounts);
-    reload().finally(() => setTimeout(() => setIntro(false), 700));
-  }, [reload]);
+    api.folders().then(setFolderList).catch(() => {});
+  }, []);
+
+  // Carga da pasta: o banco local responde na hora; fora da Caixa de entrada, o servidor vem depois.
+  useEffect(() => {
+    let alive = true;
+    known.current = null;
+    setKeep(KEEP);
+    setServerTotal(null);
+    setLoadingFolder(true);
+    (async () => {
+      try {
+        await reload();
+        if (alive && folder !== "inbox") {
+          setSyncing(true);
+          await syncFolder(folder, KEEP);
+          if (alive) await reload();
+        }
+      } catch (e) {
+        if (alive) toast(`Falha ao carregar a pasta: ${e}`, "error");
+      } finally {
+        if (alive) {
+          setSyncing(false);
+          setLoadingFolder(false);
+          setTimeout(() => setIntro(false), 700);
+        }
+      }
+    })();
+    return () => { alive = false; };
+  }, [reload, syncFolder, folder]);
+
+  useEffect(() => {
+    if (folder === "inbox") setInboxUnread(unread);
+  }, [folder, unread]);
 
   const syncRef = useRef(sync);
   syncRef.current = sync;
@@ -116,9 +184,21 @@ export default function App() {
   useEffect(() => {
     if (!query.trim()) return setResults(null);
     let alive = true;
-    api.search(query).then((r) => alive && setResults(r));
+    api.search(query, folder).then((r) => alive && setResults(r));
     return () => { alive = false; };
-  }, [query]);
+  }, [query, folder]);
+
+  function openFolder(role: Role) {
+    if (role === folder) return;
+    setQuery("");
+    setResults(null);
+    setMessages([]);
+    setSelectedId(null);
+    setDetail(null);
+    setReaderOpen(false);
+    setIntro(false);
+    setFolder(role);
+  }
 
   async function select(id: number, keyboard = false) {
     setViaKeyboard(keyboard);
@@ -171,11 +251,88 @@ export default function App() {
   }
 
   async function loadMore() {
-    if (!hasMore || results) return;
-    const more = await api.list(PAGE, messages.length);
-    more.forEach((m) => known.current?.add(m.id));
-    setMessages((l) => [...l, ...more]);
-    setHasMore(more.length === PAGE);
+    if (results || loadingMore.current) return;
+    loadingMore.current = true;
+    try {
+      if (hasMore) {
+        const more = await api.list(folder, PAGE, messages.length);
+        more.forEach((m) => known.current?.add(m.id));
+        setMessages((l) => [...l, ...more]);
+        setHasMore(more.length === PAGE);
+      } else if (folder !== "inbox" && serverTotal !== null && serverTotal > keep) {
+        const next = keep + KEEP_STEP;
+        setKeep(next);
+        await syncFolder(folder, next);
+        await reload(messages.length + PAGE);
+      }
+    } catch (e) {
+      toast(`Falha ao carregar mais: ${e}`, "error");
+    } finally {
+      loadingMore.current = false;
+    }
+  }
+
+  /** Tira a mensagem da lista, seleciona a vizinha e devolve a função que a reinsere no mesmo lugar. */
+  function takeOut(m: MessageSummary) {
+    const from = folder;
+    const idx = visible.findIndex((x) => x.id === m.id);
+    const next = visible[idx + 1] ?? visible[idx - 1];
+    const drop = (l: MessageSummary[]) => l.filter((x) => x.id !== m.id);
+    setMessages(drop);
+    setResults((r) => r && drop(r));
+    if (next) select(next.id, true);
+    else { setSelectedId(null); setDetail(null); setReaderOpen(false); }
+    return () => {
+      if (folderRef.current !== from) return;
+      const put = (l: MessageSummary[]) => (l.some((x) => x.id === m.id) ? l : [...l.slice(0, idx), m, ...l.slice(idx)]);
+      setMessages(put);
+      setResults((r) => r && put(r));
+      select(m.id, true);
+    };
+  }
+
+  /** Sai da lista na hora; o servidor só recebe quando o "Desfazer" expira. */
+  function moveOut(m: MessageSummary, to: Role) {
+    const restore = takeOut(m);
+    const text = to === "trash" ? "Movida para a Lixeira" : to === "inbox" ? "Movida para a Caixa de entrada" : "Arquivada";
+    toast(text, "info", {
+      action: { label: "Desfazer", onClick: restore },
+      duration: UNDO_MS,
+      onClose: async (reason) => {
+        if (reason === "action") return;
+        try {
+          await api.move(m.id, to);
+        } catch (e) {
+          restore();
+          toast(`Não foi possível mover: ${e}`, "error");
+        }
+      },
+    });
+  }
+
+  function archive() {
+    if (current && canArchive) moveOut(current, archiveTo);
+  }
+
+  function remove() {
+    if (!current || !canTrash) return;
+    if (folder === "trash") setConfirmDelete(true);
+    else moveOut(current, "trash");
+  }
+
+  async function deleteForever() {
+    if (!current || deleting) return;
+    setDeleting(true);
+    try {
+      await api.deleteForever(current.id);
+      takeOut(current);
+      toast("Excluída de vez", "success");
+    } catch (e) {
+      toast(`Não foi possível excluir: ${e}`, "error");
+    } finally {
+      setDeleting(false);
+      setConfirmDelete(false);
+    }
   }
 
   // Atualização: procura ao abrir e a cada 6 h, em silêncio; só avisa se houver versão nova não adiada.
@@ -191,10 +348,14 @@ export default function App() {
     return () => clearInterval(timer);
   }, []);
 
-  // Atalhos: j/k ou setas navegam, / busca, r responde, c escreve, u sincroniza, Esc limpa a busca ou volta.
+  // Atalhos: j/k ou setas navegam, / busca, r responde, c escreve, u sincroniza, e arquiva, # exclui, Esc limpa a busca ou volta.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (dialog || compose || settings || update) return;
+      if (confirmDelete) {
+        if (e.key === "Escape" && !deleting) setConfirmDelete(false);
+        return;
+      }
       const t = e.target;
       const typing = t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement || t instanceof HTMLSelectElement;
       if (e.key === "Escape") {
@@ -223,6 +384,10 @@ export default function App() {
         writeNew();
       } else if (e.key === "u") {
         sync(true);
+      } else if (e.key === "e") {
+        archive();
+      } else if (e.key === "#") {
+        remove();
       }
     };
     window.addEventListener("keydown", onKey);
@@ -243,11 +408,17 @@ export default function App() {
           <NotePencil size={16} weight="bold" /> <span>Escrever</span>
         </button>
         <nav>
-          <button className="nav-item" aria-current="page">
-            <Tray size={16} weight="bold" />
-            <span>Caixa de entrada</span>
-            {unread > 0 && <span className="count">{unread}</span>}
-          </button>
+          {folderList.map((r) => {
+            const Icon = FOLDERS[r].icon;
+            return (
+              <button key={r} className="nav-item" title={FOLDERS[r].label} onClick={() => openFolder(r)}
+                aria-current={r === folder ? "page" : undefined}>
+                <Icon size={16} weight="bold" />
+                <span>{FOLDERS[r].label}</span>
+                {r === "inbox" && inboxUnread > 0 && <span className="count">{inboxUnread}</span>}
+              </button>
+            );
+          })}
         </nav>
         <div className="rail-section">
           <div className="rail-label">Contas</div>
@@ -267,6 +438,8 @@ export default function App() {
           <span><kbd>r</kbd> responder</span>
           <span><kbd>c</kbd> escrever</span>
           <span><kbd>u</kbd> sincronizar</span>
+          <span><kbd>e</kbd> arquivar</span>
+          <span><kbd>#</kbd> excluir</span>
         </div>
         <button className="btn ghost small settings-btn" onClick={() => setSettings(true)} aria-label="Configurações">
           <GearSix size={15} weight="bold" /> <span>Configurações</span>
@@ -292,6 +465,17 @@ export default function App() {
             <GearSix size={16} weight="bold" />
           </button>
         </div>
+        <div className="folder-tabs mobile-only" role="tablist" aria-label="Pastas">
+          {folderList.map((r) => {
+            const Icon = FOLDERS[r].icon;
+            return (
+              <button key={r} className="btn ghost small" onClick={() => openFolder(r)}
+                aria-current={r === folder ? "page" : undefined}>
+                <Icon size={14} weight="bold" /> {FOLDERS[r].label}
+              </button>
+            );
+          })}
+        </div>
         {results && (
           <div className="result-meta">{plural(results.length, "resultado", "resultados")} para “{query.trim()}”</div>
         )}
@@ -305,6 +489,8 @@ export default function App() {
           </div>
         ) : results && results.length === 0 ? (
           <div className="empty quiet"><p>Nada encontrado.</p></div>
+        ) : !results && visible.length === 0 ? (
+          <div className="empty quiet"><p>{loadingFolder ? "Carregando…" : FOLDERS[folder].empty}</p></div>
         ) : (
           <ul ref={listRef} className="list" role="listbox" aria-label="Mensagens" data-intro={intro || undefined}
             onScroll={(e) => {
@@ -331,7 +517,7 @@ export default function App() {
         {detail && detail.id === selectedId ? (
           <article key={detail.id} className="message" data-instant={viaKeyboard || undefined}>
             <button className="btn ghost small back" onClick={() => setReaderOpen(false)}>
-              <ArrowLeft size={14} weight="bold" /> Caixa de entrada
+              <ArrowLeft size={14} weight="bold" /> {FOLDERS[folder].label}
             </button>
             <h1>{detail.subject || "(sem assunto)"}</h1>
             <div className="meta">
@@ -346,12 +532,34 @@ export default function App() {
               <button className="btn" onClick={reply}>
                 <ArrowBendUpLeft size={15} weight="bold" /> Responder <kbd>r</kbd>
               </button>
+              {canArchive && (
+                <button className="btn" onClick={archive}>
+                  {archiveTo === "inbox" ? <Tray size={15} weight="bold" /> : <Archive size={15} weight="bold" />}
+                  {archiveTo === "inbox" ? "Mover para a entrada" : "Arquivar"} <kbd>e</kbd>
+                </button>
+              )}
+              <button className="btn" onClick={remove} disabled={!canTrash}
+                title={canTrash ? undefined : "Esta conta não tem Lixeira"}>
+                <Trash size={15} weight="bold" /> {folder === "trash" ? "Excluir de vez" : "Excluir"} <kbd>#</kbd>
+              </button>
             </div>
             <div className="body">{detail.body_text}</div>
           </article>
         ) : (
           <div className="reader-empty">
             <p>{messages.length ? "Selecione uma mensagem" : ""}</p>
+          </div>
+        )}
+        {confirmDelete && current && (
+          <div className="confirm scrim" onMouseDown={(e) => { if (e.target === e.currentTarget && !deleting) setConfirmDelete(false); }}>
+            <div className="confirm-card" role="alertdialog" aria-labelledby="delete-title">
+              <p id="delete-title">Excluir de vez?</p>
+              <span>Não dá para desfazer.</span>
+              <div className="confirm-actions">
+                <button type="button" className="btn" onClick={() => setConfirmDelete(false)} disabled={deleting} autoFocus>Cancelar</button>
+                <button type="button" className="btn danger" onClick={deleteForever} disabled={deleting}>Excluir</button>
+              </div>
+            </div>
           </div>
         )}
       </main>

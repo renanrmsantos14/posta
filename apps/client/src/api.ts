@@ -56,8 +56,12 @@ export interface SendReport {
   warning: string | null;
 }
 
+export type Role = "inbox" | "sent" | "archive" | "trash" | "junk";
+
 export interface SyncResult {
   fetched: number;
+  /** Mensagens no servidor nas pastas sincronizadas. */
+  total: number;
   errors: string[];
   skipped: boolean;
 }
@@ -69,10 +73,14 @@ export const api = isTauri
       listAccounts: () => invoke<Account[]>("list_accounts"),
       addAccount: (account: NewAccount) =>
         invoke<Account>("add_imap_account", { account: { ...account, id: "" } }),
+      folders: () => invoke<Role[]>("list_folders"),
       sync: () => invoke<SyncResult>("sync_inbox"),
-      list: (limit: number, offset: number) =>
-        invoke<MessageSummary[]>("list_messages", { limit, offset }),
-      search: (query: string) => invoke<MessageSummary[]>("search_messages", { query }),
+      syncFolder: (role: Role, keep: number) => invoke<SyncResult>("sync_folder", { role, keep }),
+      list: (role: Role, limit: number, offset: number) =>
+        invoke<MessageSummary[]>("list_messages", { role, limit, offset }),
+      search: (query: string, role: Role) => invoke<MessageSummary[]>("search_messages", { query, role }),
+      move: (id: number, role: Role) => invoke<void>("move_message", { id, role }),
+      deleteForever: (id: number) => invoke<void>("delete_forever", { id }),
       open: (id: number) => invoke<MessageDetail | null>("open_message", { id }),
       send: (draft: Draft) => invoke<SendReport>("send_message", { draft }),
     }
