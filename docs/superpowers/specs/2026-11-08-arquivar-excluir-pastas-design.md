@@ -41,11 +41,11 @@ Data: 08/11/2026. Aprovado no chat (abordagem A).
 - `imap_sync::delete_forever(acc, mailbox, uid)`: `\Deleted` + expunge.
 - Store: `remove(id)` apaga a linha local (e o FTS). A pasta de destino traz a mensagem de volta na próxima sincronização dela.
 - Comandos Tauri: `move_message(id, role)` e `delete_forever(id)`. Leem conta, pasta e UID da linha local; apagam a linha só depois de o servidor confirmar.
-- `list_messages` e `search_messages` recebem `account` e `role` da pasta aberta; a busca filtra pela pasta.
+- `list_messages` e `search_messages` recebem o `role` da pasta aberta e juntam todas as contas (como a Caixa de entrada já faz); a busca filtra pela pasta.
 
 ## Interface
 
-- Menu lateral: por conta, as pastas descobertas, com ícones Phosphor (Tray, PaperPlaneTilt, Archive, Trash, Warning). Pasta ativa marcada. No celular, as mesmas pastas no menu atual.
+- Menu lateral: uma entrada por papel, unificada entre contas (aparece se ao menos uma conta tem a pasta), com ícones Phosphor (Tray, PaperPlaneTilt, Archive, Trash, Warning). Pasta ativa marcada. No celular (sem menu lateral), as mesmas pastas numa faixa de abas abaixo da barra superior.
 - Mensagem aberta: botões Arquivar e Excluir na barra; atalhos `e` e `#` (Shift+3) quando nenhum campo de texto tem foco. Na Lixeira, o botão vira "Excluir de vez"; em Arquivo, o botão Arquivar some.
 - Fluxo:
   1. Ação → a mensagem sai da lista e a seleção vai para a próxima (ou anterior, se era a última).
@@ -53,7 +53,7 @@ Data: 08/11/2026. Aprovado no chat (abordagem A).
   3. Desfazer → a mensagem volta para a mesma posição e é selecionada de novo.
   4. Fim dos 4 s → chama o servidor. Falha → a mensagem volta à lista e aparece o aviso de erro com o motivo.
 - "Excluir de vez": confirmação no painel da mensagem ("Excluir de vez?" — "Cancelar" / "Excluir"); sem desfazer.
-- Pasta vazia: texto simples ("Nada na Lixeira"). Carregando pasta: skeleton da lista existente.
+- Pasta vazia: texto simples ("Nada na Lixeira"). Carregando pasta pela primeira vez: texto "Carregando…".
 - Modo mock (navegador): pastas fixas e mover em memória, para prints e testes de UI.
 
 ## Erros
