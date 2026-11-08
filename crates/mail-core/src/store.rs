@@ -6,6 +6,9 @@ use std::path::Path;
 
 use crate::Result;
 
+/// O banco é só uma cópia do servidor: mudou o esquema, apaga e sincroniza de novo.
+const SCHEMA_VERSION: i32 = 2;
+
 const SCHEMA: &str = "
 PRAGMA journal_mode = WAL;
 PRAGMA synchronous = NORMAL;
@@ -27,6 +30,9 @@ CREATE TABLE IF NOT EXISTS messages (
   snippet TEXT NOT NULL DEFAULT '',
   body_text TEXT NOT NULL DEFAULT '',
   seen INTEGER NOT NULL DEFAULT 0,
+  message_id TEXT NOT NULL DEFAULT '',
+  refs TEXT NOT NULL DEFAULT '',
+  reply_addr TEXT NOT NULL DEFAULT '',
   UNIQUE (account, mailbox, uid)
 );
 CREATE INDEX IF NOT EXISTS messages_by_date ON messages (date DESC);
@@ -55,6 +61,22 @@ pub struct NewMessage {
     pub date: i64,
     pub body_text: String,
     pub seen: bool,
+    /// Message-ID sem os sinais < >.
+    pub message_id: String,
+    /// IDs de References, separados por espaço, sem < >.
+    pub refs: String,
+    /// Para quem a resposta vai: Reply-To, ou o remetente.
+    pub reply_addr: String,
+}
+
+/// O que é preciso para responder mantendo a conversa agrupada.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReplyRef {
+    pub account: String,
+    pub mailbox: String,
+    pub uid: u32,
+    pub message_id: String,
+    pub refs: String,
 }
 
 /// Linha da lista de mensagens (sem o corpo).
@@ -76,6 +98,7 @@ pub struct MessageDetail {
     #[serde(flatten)]
     pub summary: MessageSummary,
     pub body_text: String,
+    pub reply_addr: String,
 }
 
 pub struct Store {
@@ -128,7 +151,14 @@ impl Store {
     }
 
     fn init(conn: Connection) -> Result<Self> {
+        let version: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if version != SCHEMA_VERSION {
+            conn.execute_batch(
+                "DROP TABLE IF EXISTS messages_fts; DROP TABLE IF EXISTS messages; DROP TABLE IF EXISTS mailbox_state;",
+            )?;
+        }
         conn.execute_batch(SCHEMA)?;
+        conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         Ok(Self { conn })
     }
 
@@ -175,8 +205,9 @@ impl Store {
         {
             let mut stmt = tx.prepare_cached(
                 "INSERT OR IGNORE INTO messages
-                 (account, mailbox, uid, from_name, from_addr, subject, date, snippet, body_text, seen)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                 (account, mailbox, uid, from_name, from_addr, subject, date, snippet, body_text, seen,
+                  message_id, refs, reply_addr)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             )?;
             for m in msgs {
                 stmt.execute(params![
@@ -189,7 +220,10 @@ impl Store {
                     m.date,
                     snippet(&m.body_text),
                     m.body_text,
-                    m.seen
+                    m.seen,
+                    m.message_id,
+                    m.refs,
+                    m.reply_addr
                 ])?;
             }
         }
@@ -256,12 +290,32 @@ impl Store {
         Ok(self
             .conn
             .query_row(
-                &format!("SELECT {SUMMARY_COLS}, m.body_text FROM messages m WHERE m.id = ?1"),
+                &format!("SELECT {SUMMARY_COLS}, m.body_text, m.reply_addr FROM messages m WHERE m.id = ?1"),
                 params![id],
                 |r| {
                     Ok(MessageDetail {
                         summary: row_to_summary(r)?,
                         body_text: r.get(9)?,
+                        reply_addr: r.get(10)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    pub fn reply_ref(&self, id: i64) -> Result<Option<ReplyRef>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT account, mailbox, uid, message_id, refs FROM messages WHERE id = ?1",
+                params![id],
+                |r| {
+                    Ok(ReplyRef {
+                        account: r.get(0)?,
+                        mailbox: r.get(1)?,
+                        uid: r.get(2)?,
+                        message_id: r.get(3)?,
+                        refs: r.get(4)?,
                     })
                 },
             )
@@ -282,6 +336,9 @@ mod tests {
             date,
             body_text: body.into(),
             seen: false,
+            message_id: format!("{uid}@exemplo.com"),
+            refs: String::new(),
+            reply_addr: "ana@exemplo.com".into(),
         }
     }
 
@@ -323,5 +380,32 @@ mod tests {
         assert_eq!(s.local_uids("a", "INBOX").unwrap(), [1]);
         s.set_uid_validity("a", "INBOX", 2).unwrap();
         assert!(s.local_uids("a", "INBOX").unwrap().is_empty());
+    }
+
+    #[test]
+    fn referencia_para_resposta() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.insert_messages("a", "INBOX", &[msg(7, "x", "", 1)]).unwrap();
+        let id = s.list("INBOX", 1, 0).unwrap()[0].id;
+        let r = s.reply_ref(id).unwrap().unwrap();
+        assert_eq!((r.uid, r.message_id.as_str()), (7, "7@exemplo.com"));
+        assert_eq!(s.get(id).unwrap().unwrap().reply_addr, "ana@exemplo.com");
+        assert!(s.reply_ref(999).unwrap().is_none());
+    }
+
+    #[test]
+    fn esquema_antigo_e_recriado() {
+        let dir = std::env::temp_dir().join(format!("posta-schema-{}.sqlite", std::process::id()));
+        {
+            let c = Connection::open(&dir).unwrap();
+            c.execute_batch("CREATE TABLE messages (id INTEGER PRIMARY KEY, subject TEXT);").unwrap();
+        }
+        let mut s = Store::open(&dir).unwrap();
+        s.insert_messages("a", "INBOX", &[msg(1, "x", "", 1)]).unwrap();
+        assert_eq!(s.list("INBOX", 5, 0).unwrap().len(), 1);
+        drop(s);
+        for ext in ["", "-wal", "-shm"] {
+            std::fs::remove_file(format!("{}{ext}", dir.display())).ok();
+        }
     }
 }

@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, ArrowsClockwise, MagnifyingGlass, Plus, Tray, EnvelopeSimple } from "@phosphor-icons/react";
+import { ArrowLeft, ArrowBendUpLeft, ArrowsClockwise, MagnifyingGlass, NotePencil, Plus, Tray, EnvelopeSimple } from "@phosphor-icons/react";
 import { api, type Account, type MessageDetail, type MessageSummary } from "./api";
 import { AccountDialog } from "./AccountDialog";
+import { Composer, type ComposeInit } from "./Composer";
 import { Toaster, toast } from "./toast";
 import build from "./version.json";
 
@@ -23,6 +24,12 @@ function shortDate(unix: number) {
   return fmtFull.format(d);
 }
 
+/** Corpo da resposta: espaço para escrever no topo e a mensagem original citada. */
+function replyBody(d: MessageDetail) {
+  const quoted = d.body_text.trimEnd().split("\n").map((l) => `> ${l}`).join("\n");
+  return `\n\nEm ${fmtLong.format(new Date(d.date * 1000))}, ${d.from_name || d.from_addr} escreveu:\n${quoted}\n`;
+}
+
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 
 export default function App() {
@@ -38,6 +45,9 @@ export default function App() {
   const [syncing, setSyncing] = useState(false);
   const [dialog, setDialog] = useState(false);
   const [readerOpen, setReaderOpen] = useState(false);
+  const [compose, setCompose] = useState<ComposeInit | null>(null);
+  /** Remonta o painel a cada abertura, mesmo com o mesmo rascunho. */
+  const [composeKey, setComposeKey] = useState(0);
   /** Ids que chegaram depois da primeira carga: entram com destaque. */
   const [freshIds, setFreshIds] = useState<Set<number>>(new Set());
   /** Cascata só na primeira abertura; buscas e atualizações trocam a lista sem animar. */
@@ -118,6 +128,43 @@ export default function App() {
     }
   }
 
+  function openComposer(init: ComposeInit) {
+    setComposeKey((k) => k + 1);
+    setCompose(init);
+  }
+
+  function writeNew() {
+    if (!accounts?.length) return setDialog(true);
+    openComposer({ title: "Nova mensagem", account: accounts[0].id, reply_to: null, to: "", subject: "", body: "" });
+  }
+
+  function reply() {
+    if (!detail || !accounts?.length) return;
+    const subject = /^re:/i.test(detail.subject) ? detail.subject : `Re: ${detail.subject}`;
+    const account = accounts.some((a) => a.id === detail.account) ? detail.account : accounts[0].id;
+    openComposer({ title: "Responder", account, reply_to: detail.id, to: detail.reply_addr, subject, body: replyBody(detail) });
+  }
+
+  // O painel fecha na hora; o envio espera o "Desfazer" expirar. Se falhar, o rascunho volta intacto.
+  function send(d: ComposeInit) {
+    setCompose(null);
+    toast("Enviando…", "sending", {
+      action: { label: "Desfazer", onClick: () => openComposer({ ...d, restored: true }) },
+      onClose: async (reason) => {
+        if (reason === "action") return;
+        const { title: _t, restored: _r, ...draft } = d;
+        try {
+          const r = await api.send(draft);
+          toast("Mensagem enviada", "success");
+          if (r.warning) toast(r.warning, "info");
+        } catch (e) {
+          toast(`Não foi enviada: ${e}`, "error");
+          openComposer({ ...d, restored: true });
+        }
+      },
+    });
+  }
+
   async function loadMore() {
     if (!hasMore || results) return;
     const more = await api.list(PAGE, messages.length);
@@ -126,11 +173,12 @@ export default function App() {
     setHasMore(more.length === PAGE);
   }
 
-  // Atalhos: j/k ou setas navegam, / busca, r sincroniza, Esc limpa a busca ou volta.
+  // Atalhos: j/k ou setas navegam, / busca, r responde, c escreve, u sincroniza, Esc limpa a busca ou volta.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (dialog) return;
-      const typing = e.target instanceof HTMLInputElement;
+      if (dialog || compose) return;
+      const t = e.target;
+      const typing = t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement || t instanceof HTMLSelectElement;
       if (e.key === "Escape") {
         if (typing) { setQuery(""); searchRef.current?.blur(); }
         else setReaderOpen(false);
@@ -150,6 +198,12 @@ export default function App() {
         e.preventDefault();
         searchRef.current?.focus();
       } else if (e.key === "r") {
+        e.preventDefault();
+        reply();
+      } else if (e.key === "c") {
+        e.preventDefault();
+        writeNew();
+      } else if (e.key === "u") {
         sync(true);
       }
     };
@@ -167,6 +221,9 @@ export default function App() {
     <div className="app" data-reader={readerOpen || undefined}>
       <aside className="rail">
         <div className="brand">Posta</div>
+        <button className="btn primary compose-btn" onClick={writeNew} aria-label="Escrever">
+          <NotePencil size={16} weight="bold" /> <span>Escrever</span>
+        </button>
         <nav>
           <button className="nav-item" aria-current="page">
             <Tray size={16} weight="bold" />
@@ -189,7 +246,9 @@ export default function App() {
         <div className="shortcuts" aria-label="Atalhos">
           <span><kbd>j</kbd><kbd>k</kbd> navegar</span>
           <span><kbd>/</kbd> buscar</span>
-          <span><kbd>r</kbd> sincronizar</span>
+          <span><kbd>r</kbd> responder</span>
+          <span><kbd>c</kbd> escrever</span>
+          <span><kbd>u</kbd> sincronizar</span>
         </div>
       </aside>
 
@@ -259,6 +318,11 @@ export default function App() {
               </div>
               <time className="meta-date">{fmtLong.format(new Date(detail.date * 1000))}</time>
             </div>
+            <div className="actions">
+              <button className="btn" onClick={reply}>
+                <ArrowBendUpLeft size={15} weight="bold" /> Responder <kbd>r</kbd>
+              </button>
+            </div>
             <div className="body">{detail.body_text}</div>
           </article>
         ) : (
@@ -276,6 +340,14 @@ export default function App() {
             toast(`Conta ${a.username} conectada`, "success");
           }}
         />
+      )}
+      {compose && accounts && (
+        <Composer key={composeKey} init={compose} accounts={accounts} onSend={send} onDiscard={() => setCompose(null)} />
+      )}
+      {!compose && !dialog && (
+        <button className="fab mobile-only" onClick={writeNew} aria-label="Escrever">
+          <NotePencil size={22} weight="bold" />
+        </button>
       )}
       <Toaster />
       <div className="version" aria-hidden>v{build.version} · {build.builtAt}</div>

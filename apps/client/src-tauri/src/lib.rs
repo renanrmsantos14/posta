@@ -1,7 +1,7 @@
 //! Ponte entre a UI e o mail-core. Leituras vêm do SQLite local; rede só em sync e flags.
 
-use mail_core::{imap_sync, ImapAccount, MessageDetail, MessageSummary, Store};
-use serde::Serialize;
+use mail_core::{imap_sync, send, ImapAccount, MessageDetail, MessageSummary, Outgoing, SendReport, Store};
+use serde::{Deserialize, Serialize};
 use std::{fs, path::PathBuf, sync::Mutex};
 use tauri::{AppHandle, Manager, State};
 
@@ -156,6 +156,28 @@ async fn open_message(app: AppHandle, id: i64) -> CmdResult<Option<MessageDetail
     Ok(Some(detail))
 }
 
+#[derive(Deserialize)]
+struct Draft {
+    account: String,
+    /// Id local da mensagem respondida, para encadear a conversa.
+    reply_to: Option<i64>,
+    #[serde(flatten)]
+    message: Outgoing,
+}
+
+#[tauri::command]
+async fn send_message(app: AppHandle, draft: Draft) -> CmdResult<SendReport> {
+    blocking(app, move |st| {
+        let reply = match draft.reply_to {
+            Some(id) => st.store.lock().unwrap().reply_ref(id).map_err(err)?,
+            None => None,
+        };
+        let acc = st.account_with_password(&draft.account)?;
+        send::send(&acc, &draft.message, reply.as_ref()).map_err(err)
+    })
+    .await
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -172,7 +194,8 @@ pub fn run() {
             sync_inbox,
             list_messages,
             search_messages,
-            open_message
+            open_message,
+            send_message
         ])
         .run(tauri::generate_context!())
         .expect("erro ao iniciar o Posta");
