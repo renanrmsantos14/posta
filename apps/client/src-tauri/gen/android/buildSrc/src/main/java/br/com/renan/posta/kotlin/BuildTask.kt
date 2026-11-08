@@ -23,7 +23,7 @@ abstract class BuildTask : DefaultTask() {
 
     @TaskAction
     fun assemble() {
-        val executable = """node""";
+        val executable = """pnpm""";
         try {
             runTauriCli(executable)
         } catch (e: Exception) {
