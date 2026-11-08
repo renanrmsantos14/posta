@@ -4,3 +4,4 @@ dist/
 .worktrees/
 *.sqlite
 *.sqlite-*
+*.tsbuildinfo
