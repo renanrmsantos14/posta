@@ -1,7 +1,7 @@
 //! Sincronização IMAP → Store. Uma conexão por chamada; IDLE fica para a próxima etapa.
 
 use imap::{ClientBuilder, ConnectionMode, Session};
-use mail_parser::MessageParser;
+use mail_parser::{MessageParser, PartKind};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
@@ -141,6 +141,17 @@ fn parse(uid: u32, raw: &[u8], seen: bool, fallback_date: i64) -> NewMessage {
             .as_ref()
             .and_then(|m| m.body_text(0))
             .map(|b| b.into_owned())
+            .unwrap_or_default(),
+        body_html: msg
+            .as_ref()
+            .map(|m| {
+                // `html_body` também traz texto puro convertido; só interessa HTML de verdade.
+                m.html_body()
+                    .filter(|p| matches!(p.kind(), PartKind::Html))
+                    .filter_map(|p| p.text())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
             .unwrap_or_default(),
         seen,
         message_id: msg.as_ref().and_then(|m| m.message_id()).unwrap_or_default().to_string(),
@@ -291,4 +302,36 @@ pub fn set_seen(acc: &ImapAccount, mailbox: &str, uid: u32, seen: bool) -> Resul
 pub fn check_login(acc: &ImapAccount) -> Result<()> {
     connect(acc)?.logout().ok();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn guarda_o_html_e_o_texto_da_alternativa() {
+        let raw = b"From: Ana <ana@exemplo.com>\r\nSubject: Oi\r\nMIME-Version: 1.0\r\n\
+Content-Type: multipart/alternative; boundary=\"b\"\r\n\r\n\
+--b\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nol\xc3\xa1 texto\r\n\
+--b\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<p>ol\xc3\xa1 <b>html</b></p>\r\n--b--\r\n";
+        let m = parse(1, raw, false, 0);
+        assert_eq!(m.body_text.trim(), "olá texto");
+        assert!(m.body_html.contains("<b>html</b>"), "{}", m.body_html);
+    }
+
+    #[test]
+    fn so_html_ainda_gera_texto_para_busca() {
+        let raw = b"From: a@b.c\r\nSubject: x\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<p>so html</p>\r\n";
+        let m = parse(1, raw, false, 0);
+        assert!(m.body_html.contains("<p>so html</p>"));
+        assert!(m.body_text.contains("so html"));
+    }
+
+    #[test]
+    fn so_texto_nao_vira_html() {
+        let raw = b"From: a@b.c\r\nSubject: x\r\nContent-Type: text/plain\r\n\r\nsimples\r\n";
+        let m = parse(1, raw, false, 0);
+        assert_eq!(m.body_html, "");
+        assert_eq!(m.body_text.trim(), "simples");
+    }
 }

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowLeft, ArrowBendUpLeft, ArrowsClockwise, Archive, MagnifyingGlass, NotePencil, Plus, Trash, Tray, EnvelopeSimple, GearSix } from "@phosphor-icons/react";
+import { HtmlBody, hasRemoteImages } from "./HtmlBody";
 import { api, type Account, type MessageDetail, type MessageSummary, type Role } from "./api";
 import { AccountDialog } from "./AccountDialog";
 import { Composer, type ComposeInit } from "./Composer";
@@ -50,6 +51,8 @@ export default function App() {
   const [detail, setDetail] = useState<MessageDetail | null>(null);
   /** Seleção por teclado troca o conteúdo sem animação. */
   const [viaKeyboard, setViaKeyboard] = useState(false);
+  /** Mensagens cujas imagens remotas o usuário liberou (só nesta sessão). */
+  const [imagesOk, setImagesOk] = useState<Set<number>>(new Set());
   const [syncing, setSyncing] = useState(false);
   const [dialog, setDialog] = useState(false);
   const [readerOpen, setReaderOpen] = useState(false);
@@ -559,7 +562,21 @@ export default function App() {
                 <Trash size={15} weight="bold" /> {folder === "trash" ? "Excluir de vez" : "Excluir"} <kbd>#</kbd>
               </button>
             </div>
-            <div className="body">{detail.body_text}</div>
+            {detail.body_html ? (
+              <>
+                {!imagesOk.has(detail.id) && hasRemoteImages(detail.body_html) && (
+                  <div className="img-banner" role="status">
+                    <span>Imagens remotas bloqueadas para proteger sua privacidade.</span>
+                    <button type="button" className="btn" onClick={() => setImagesOk((s) => new Set(s).add(detail.id))}>
+                      Mostrar imagens
+                    </button>
+                  </div>
+                )}
+                <HtmlBody html={detail.body_html} remote={imagesOk.has(detail.id)} />
+              </>
+            ) : (
+              <div className="body">{detail.body_text}</div>
+            )}
           </article>
         ) : (
           <div className="reader-empty">

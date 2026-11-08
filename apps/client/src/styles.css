@@ -274,6 +274,10 @@ kbd {
 .meta-addr { font: 12px/1.4 var(--mono); color: var(--muted); }
 .meta-date { margin-left: auto; font: 12px/1.4 var(--mono); color: var(--faint); text-align: right; }
 .body { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 15px; line-height: 1.7; }
+.html-body { display: block; width: 100%; border: 1px solid var(--line); border-radius: 8px; background: #fff; color-scheme: light; }
+.img-banner { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+  margin: 0 0 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--yellow-bg);
+  color: var(--text); font-size: 13px; }
 .back { display: none; margin: -8px 0 16px -8px; }
 
 /* ---------- Vazio ---------- */
