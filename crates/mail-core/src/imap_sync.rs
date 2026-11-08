@@ -5,6 +5,9 @@ use mail_parser::MessageParser;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
+use imap_proto::NameAttribute;
+
+use crate::folders::{archive_name, pick, Folder, Listed, Role};
 use crate::store::{NewMessage, Store};
 use crate::Result;
 
@@ -119,7 +122,8 @@ fn is_seen(fetch: &imap::types::Fetch) -> bool {
 
 /// Traz a pasta para o banco local: novas mensagens (as mais recentes primeiro),
 /// exclusões feitas no servidor e mudanças de lida/não lida.
-pub fn sync_mailbox(acc: &ImapAccount, store: &mut Store, mailbox: &str) -> Result<SyncReport> {
+/// `Some(n)`: só baixa o corpo das n mais recentes do servidor; as locais mais antigas ficam.
+pub fn sync_mailbox(acc: &ImapAccount, store: &mut Store, mailbox: &str, keep: Option<usize>) -> Result<SyncReport> {
     let mut session = connect(acc)?;
     let selected = session.select(mailbox)?;
     store.set_uid_validity(&acc.id, mailbox, selected.uid_validity.unwrap_or(0))?;
@@ -135,8 +139,12 @@ pub fn sync_mailbox(acc: &ImapAccount, store: &mut Store, mailbox: &str) -> Resu
     store.apply_server_state(&acc.id, mailbox, &server)?;
 
     let local: HashSet<u32> = store.local_uids(&acc.id, mailbox)?.into_iter().collect();
-    let mut missing: Vec<u32> = server.iter().map(|(u, _)| *u).filter(|u| !local.contains(u)).collect();
-    missing.sort_unstable_by(|a, b| b.cmp(a));
+    let mut newest: Vec<u32> = server.iter().map(|(u, _)| *u).collect();
+    newest.sort_unstable_by(|a, b| b.cmp(a));
+    if let Some(n) = keep {
+        newest.truncate(n);
+    }
+    let missing: Vec<u32> = newest.into_iter().filter(|u| !local.contains(u)).collect();
 
     let mut report = SyncReport { fetched: 0, total: server.len() };
     for chunk in missing.chunks(BATCH) {
@@ -154,6 +162,80 @@ pub fn sync_mailbox(acc: &ImapAccount, store: &mut Store, mailbox: &str) -> Resu
     }
     session.logout().ok();
     Ok(report)
+}
+
+fn special(attrs: &[NameAttribute]) -> Option<&'static str> {
+    attrs.iter().find_map(|a| match a {
+        NameAttribute::Sent => Some("sent"),
+        NameAttribute::Archive => Some("archive"),
+        NameAttribute::All => Some("all"),
+        NameAttribute::Trash => Some("trash"),
+        NameAttribute::Junk => Some("junk"),
+        _ => None,
+    })
+}
+
+/// Pastas do servidor e o delimitador da hierarquia (o da INBOX).
+pub(crate) fn list_folders(session: &mut ImapSession) -> Result<(Vec<Listed>, Option<String>)> {
+    let names = session.list(None, Some("*"))?;
+    let delimiter = names
+        .iter()
+        .find(|n| n.name().eq_ignore_ascii_case("INBOX"))
+        .and_then(|n| n.delimiter())
+        .map(str::to_string);
+    let listed = names
+        .iter()
+        .filter(|n| !n.attributes().contains(&NameAttribute::NoSelect))
+        .map(|n| Listed { name: n.name().to_string(), special: special(n.attributes()) })
+        .collect();
+    Ok((listed, delimiter))
+}
+
+/// Descobre as pastas padrão. Sem Arquivo, cria e assina um.
+pub fn discover_folders(acc: &ImapAccount) -> Result<Vec<Folder>> {
+    let mut session = connect(acc)?;
+    let (listed, delimiter) = list_folders(&mut session)?;
+    let mut folders = pick(&listed);
+    if !folders.iter().any(|f| f.role == Role::Archive) {
+        let name = archive_name(&listed, delimiter.as_deref());
+        session.create(&name)?;
+        session.subscribe(&name).ok();
+        folders.push(Folder { role: Role::Archive, name });
+        folders.sort_by_key(|f| Role::ALL.iter().position(|r| *r == f.role));
+    }
+    session.logout().ok();
+    Ok(folders)
+}
+
+/// Move pelo UID. Sem MOVE no servidor: copia, marca como apagada e remove.
+pub fn move_message(acc: &ImapAccount, from: &str, uid: u32, to: &str) -> Result<()> {
+    let mut session = connect(acc)?;
+    let caps = session.capabilities()?;
+    let (has_move, uidplus) = (caps.has_str("MOVE"), caps.has_str("UIDPLUS"));
+    drop(caps);
+    session.select(from)?;
+    let id = uid.to_string();
+    if has_move {
+        session.uid_mv(&id, to)?;
+    } else {
+        session.uid_copy(&id, to)?;
+        session.uid_store(&id, "+FLAGS.SILENT (\\Deleted)")?;
+        if uidplus { session.uid_expunge(&id)?; } else { session.expunge()?; }
+    }
+    session.logout().ok();
+    Ok(())
+}
+
+/// Apaga de vez (usado dentro da Lixeira).
+pub fn delete_forever(acc: &ImapAccount, mailbox: &str, uid: u32) -> Result<()> {
+    let mut session = connect(acc)?;
+    let uidplus = session.capabilities()?.has_str("UIDPLUS");
+    session.select(mailbox)?;
+    let id = uid.to_string();
+    session.uid_store(&id, "+FLAGS.SILENT (\\Deleted)")?;
+    if uidplus { session.uid_expunge(&id)?; } else { session.expunge()?; }
+    session.logout().ok();
+    Ok(())
 }
 
 /// Marca como lida/não lida no servidor. A UI já atualizou o banco local antes.
