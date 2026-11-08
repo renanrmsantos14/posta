@@ -4,12 +4,19 @@ import { mockApi } from "./mock";
 
 export type Security = "tls" | "starttls" | "plaintext";
 
+export interface SmtpServer {
+  host: string;
+  port: number;
+  security: Security;
+}
+
 export interface Account {
   id: string;
   host: string;
   port: number;
   security: Security;
   username: string;
+  smtp?: SmtpServer | null;
 }
 
 export interface NewAccount extends Omit<Account, "id"> {
@@ -31,6 +38,22 @@ export interface MessageSummary {
 
 export interface MessageDetail extends MessageSummary {
   body_text: string;
+  /** Reply-To, ou o remetente. */
+  reply_addr: string;
+}
+
+export interface Draft {
+  account: string;
+  /** Id local da mensagem respondida. */
+  reply_to: number | null;
+  to: string;
+  subject: string;
+  body: string;
+}
+
+export interface SendReport {
+  saved_to_sent: boolean;
+  warning: string | null;
 }
 
 export interface SyncResult {
@@ -51,6 +74,7 @@ export const api = isTauri
         invoke<MessageSummary[]>("list_messages", { limit, offset }),
       search: (query: string) => invoke<MessageSummary[]>("search_messages", { query }),
       open: (id: number) => invoke<MessageDetail | null>("open_message", { id }),
+      send: (draft: Draft) => invoke<SendReport>("send_message", { draft }),
     }
   : mockApi;
 

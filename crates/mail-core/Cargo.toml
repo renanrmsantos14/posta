@@ -5,6 +5,8 @@ edition = "2021"
 
 [dependencies]
 imap = { version = "3.0.0-alpha.15", default-features = false, features = ["rustls-tls"] }
+imap-proto = "0.16.7"
+lettre = { version = "0.11.23", default-features = false, features = ["smtp-transport", "builder", "rustls", "ring", "rustls-native-certs", "hostname"] }
 mail-parser = "1.0.1"
 rusqlite = { version = "0.41.1", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }

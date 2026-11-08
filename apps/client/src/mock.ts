@@ -1,5 +1,5 @@
 // Dados de exemplo para rodar a UI no navegador (pnpm dev), sem Tauri e sem rede.
-import type { Account, MessageDetail, MessageSummary, NewAccount, SyncResult } from "./api";
+import type { Account, Draft, MessageDetail, MessageSummary, NewAccount, SendReport, SyncResult } from "./api";
 
 const now = Math.floor(Date.now() / 1000);
 const H = 3600;
@@ -17,7 +17,7 @@ const seed: [string, string, string, string, number][] = [
   ["Prefeitura de Campinas", "nfse@campinas.sp.gov.br", "Nota fiscal de serviço emitida", "A NFS-e nº 00012873 foi emitida. Consulte o documento pelo código de verificação no portal.", 140],
 ];
 
-let accounts: Account[] = [{ id: "renan@imap.exemplo.com", host: "imap.exemplo.com", port: 993, security: "tls", username: "renan" }];
+let accounts: Account[] = [{ id: "renan@imap.exemplo.com", host: "imap.exemplo.com", port: 993, security: "tls", username: "renan@exemplo.com" }];
 
 let messages: MessageDetail[] = Array.from({ length: 60 }, (_, i) => {
   const [from_name, from_addr, subject, body, hoursAgo] = seed[i % seed.length];
@@ -33,11 +33,12 @@ let messages: MessageDetail[] = Array.from({ length: 60 }, (_, i) => {
     snippet: body.slice(0, 200),
     body_text: `${body}\n\nAbraço,\n${from_name.split(" ")[0]}`,
     seen: i > 2 && i % 4 !== 0,
+    reply_addr: from_addr,
   };
 });
 
 const norm = (s: string) => s.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase();
-const summary = ({ body_text: _b, ...s }: MessageDetail): MessageSummary => s;
+const summary = ({ body_text: _b, reply_addr: _r, ...s }: MessageDetail): MessageSummary => s;
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 let syncCount = 0;
 
@@ -48,7 +49,7 @@ export const mockApi = {
   async addAccount(a: NewAccount): Promise<Account> {
     await wait(900);
     if (a.password.length < 3) throw "LOGIN failed. Invalid login/password";
-    const acc = { id: `${a.username}@${a.host}`, host: a.host, port: a.port, security: a.security, username: a.username };
+    const acc = { id: `${a.username}@${a.host}`, host: a.host, port: a.port, security: a.security, username: a.username, smtp: a.smtp };
     accounts = [...accounts.filter((x) => x.id !== acc.id), acc];
     return acc;
   },
@@ -62,6 +63,7 @@ export const mockApi = {
         id, account: accounts[0].id, uid: id, from_name: "Marina Duarte", from_addr: "marina@lumenarquitetura.com.br",
         subject: "Orçamento aprovado", date: Math.floor(Date.now() / 1000),
         snippet: "Tudo certo com o orçamento. Podemos assinar na segunda?", body_text: "Tudo certo com o orçamento. Podemos assinar na segunda?\n\nMarina", seen: false,
+        reply_addr: "marina@lumenarquitetura.com.br",
       },
       ...messages,
     ];
@@ -82,5 +84,11 @@ export const mockApi = {
     if (!m) return null;
     m.seen = true;
     return { ...m };
+  },
+  /** Para testar a falha: qualquer destinatário com "erro". */
+  async send(d: Draft): Promise<SendReport> {
+    await wait(800);
+    if (d.to.includes("erro")) throw "SMTP: connection refused";
+    return { saved_to_sent: true, warning: null };
   },
 };

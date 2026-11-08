@@ -6,20 +6,21 @@ import { api, type Account, type Security } from "./api";
 interface Props { onClose: () => void; onAdded: (a: Account) => void }
 
 /** Servidores conhecidos pelo domínio do email. */
-const PRESETS: Record<string, { host: string; hint?: string }> = {
-  "gmail.com": { host: "imap.gmail.com", hint: "No Gmail, use uma senha de app (Conta Google → Segurança)." },
-  "outlook.com": { host: "outlook.office365.com" },
-  "hotmail.com": { host: "outlook.office365.com" },
-  "live.com": { host: "outlook.office365.com" },
-  "icloud.com": { host: "imap.mail.me.com", hint: "No iCloud, use uma senha específica de app." },
-  "yahoo.com": { host: "imap.mail.yahoo.com" },
+const OUTLOOK = { host: "outlook.office365.com", smtp: "smtp-mail.outlook.com", smtpPort: "587" };
+const PRESETS: Record<string, { host: string; smtp: string; smtpPort: string; hint?: string }> = {
+  "gmail.com": { host: "imap.gmail.com", smtp: "smtp.gmail.com", smtpPort: "465", hint: "No Gmail, use uma senha de app (Conta Google → Segurança)." },
+  "outlook.com": OUTLOOK,
+  "hotmail.com": OUTLOOK,
+  "live.com": OUTLOOK,
+  "icloud.com": { host: "imap.mail.me.com", smtp: "smtp.mail.me.com", smtpPort: "587", hint: "No iCloud, use uma senha específica de app." },
+  "yahoo.com": { host: "imap.mail.yahoo.com", smtp: "smtp.mail.yahoo.com", smtpPort: "465" },
 };
 
 type Status = "idle" | "saving" | "done";
 const EXIT_MS = 150;
 
 export function AccountDialog({ onClose, onAdded }: Props) {
-  const [form, setForm] = useState({ username: "", password: "", host: "", port: "993", security: "tls" as Security });
+  const [form, setForm] = useState({ username: "", password: "", host: "", port: "993", security: "tls" as Security, smtpHost: "", smtpPort: "465" });
   const [hostTouched, setHostTouched] = useState(false);
   const [status, setStatus] = useState<Status>("idle");
   const [error, setError] = useState("");
@@ -62,6 +63,8 @@ export function AccountDialog({ onClose, onAdded }: Props) {
       if (key === "username" && !hostTouched) {
         const d = String(value).split("@")[1]?.toLowerCase();
         next.host = (d && PRESETS[d]?.host) || (d ? `imap.${d}` : "");
+        next.smtpHost = (d && PRESETS[d]?.smtp) || (d ? `smtp.${d}` : "");
+        next.smtpPort = (d && PRESETS[d]?.smtpPort) || "465";
       }
       if (key === "security") next.port = value === "tls" ? "993" : "143";
       return next;
@@ -73,7 +76,9 @@ export function AccountDialog({ onClose, onAdded }: Props) {
     setError("");
     setStatus("saving");
     try {
-      const acc = await api.addAccount({ ...form, port: Number(form.port) });
+      const { smtpHost, smtpPort, ...imap } = form;
+      const smtp = { host: smtpHost, port: Number(smtpPort), security: (smtpPort === "465" ? "tls" : "starttls") as Security };
+      const acc = await api.addAccount({ ...imap, port: Number(form.port), smtp });
       setStatus("done");
       setTimeout(() => {
         onAdded(acc);
@@ -118,8 +123,18 @@ export function AccountDialog({ onClose, onAdded }: Props) {
             <input required inputMode="numeric" pattern="\d+" value={form.port} onChange={(e) => update("port", e.target.value)} />
           </label>
         </div>
+        <div className="field-row">
+          <label className="field grow">
+            <span>Servidor SMTP (envio)</span>
+            <input required value={form.smtpHost} onChange={(e) => { setHostTouched(true); update("smtpHost", e.target.value); }} />
+          </label>
+          <label className="field port">
+            <span>Porta</span>
+            <input required inputMode="numeric" pattern="\d+" value={form.smtpPort} onChange={(e) => update("smtpPort", e.target.value)} />
+          </label>
+        </div>
         <label className="field">
-          <span>Segurança</span>
+          <span>Segurança IMAP</span>
           <select value={form.security} onChange={(e) => update("security", e.target.value as Security)}>
             <option value="tls">TLS (recomendado)</option>
             <option value="starttls">STARTTLS</option>

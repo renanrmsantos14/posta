@@ -48,7 +48,7 @@ body {
   -webkit-font-smoothing: antialiased;
   overflow: hidden;
 }
-button, input, select { font: inherit; color: inherit; }
+button, input, select, textarea { font: inherit; color: inherit; }
 kbd {
   font: 11px/1 var(--mono);
   padding: 3px 5px;
@@ -351,6 +351,60 @@ kbd {
 .confirm p { margin: 0; font: 500 20px/1.2 var(--serif); color: var(--strong); }
 .confirm-actions { display: flex; gap: 8px; }
 
+/* ---------- Escrever / responder ---------- */
+.compose-btn { justify-content: flex-start; margin-top: -8px; }
+.actions { display: flex; gap: 8px; margin: -12px 0 28px; }
+.actions kbd { margin-left: 4px; }
+
+/* Painel encaixado no canto: a mensagem respondida continua visível. */
+.composer {
+  position: fixed; right: 24px; bottom: 0; z-index: 20;
+  display: flex; flex-direction: column;
+  width: min(560px, calc(100vw - 48px)); height: min(560px, calc(100vh - 48px));
+  border: 1px solid var(--line); border-bottom: 0; border-radius: 12px 12px 0 0;
+  background: var(--surface);
+  box-shadow: 0 -8px 40px rgba(0, 0, 0, 0.06);
+  transition: transform 240ms var(--ease-out), opacity 240ms var(--ease-out);
+  @starting-style { opacity: 0; transform: translateY(24px); }
+}
+.composer[data-leaving] { opacity: 0; transform: translateY(16px); transition-duration: 150ms; }
+.composer-head { display: flex; align-items: center; justify-content: space-between; padding: 12px 12px 8px 20px; }
+.composer-head h2 { margin: 0; font: 500 18px/1.2 var(--serif); letter-spacing: -0.02em; color: var(--strong); }
+.composer-head .icon-btn, .composer-foot .icon-btn { border-color: transparent; }
+.composer-fields { display: flex; flex-direction: column; padding: 0 20px; }
+.line {
+  display: flex; align-items: center; gap: 12px;
+  min-height: 40px; border-bottom: 1px solid var(--line);
+  font-size: 14px;
+}
+.line > span:first-child { width: 56px; flex: none; font-size: 12px; color: var(--muted); }
+.line input, .line select { flex: 1; min-width: 0; padding: 8px 0; border: 0; outline: 0; background: transparent; color: var(--strong); }
+.line[data-invalid] { border-bottom-color: var(--red); }
+.from-value { color: var(--muted); }
+.composer-error { margin-top: 8px; }
+.composer-body {
+  flex: 1; min-height: 0; resize: none;
+  padding: 16px 20px; border: 0; outline: 0;
+  background: transparent; color: var(--text);
+  font: 15px/1.7 var(--sans);
+}
+.composer-foot { display: flex; align-items: center; gap: 10px; padding: 12px 12px 12px 20px; border-top: 1px solid var(--line); }
+.hint-keys { display: inline-flex; gap: 3px; }
+.push { margin-left: auto; }
+.composer .confirm { border-radius: 12px 12px 0 0; }
+
+.fab {
+  position: fixed; right: 16px; bottom: calc(28px + env(safe-area-inset-bottom)); z-index: 5;
+  width: 52px; height: 52px; align-items: center; justify-content: center;
+  border: 0; border-radius: 14px;
+  background: var(--btn); color: var(--btn-text);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.12);
+  cursor: pointer;
+  transition: transform 160ms var(--ease-out);
+  @starting-style { transform: scale(0.9); opacity: 0; }
+}
+.fab:active { transform: scale(0.95); }
+
 /* ---------- Toasts ---------- */
 .toaster {
   position: fixed; bottom: 20px; left: 50%; z-index: 30;
@@ -374,6 +428,29 @@ kbd {
 .toast[data-kind="success"] svg { color: var(--green); }
 .toast[data-kind="error"] { background: var(--red-bg); color: var(--red); border-color: transparent; }
 .toast[data-kind="info"] svg { color: var(--muted); }
+/* Com o painel de escrita aberto, os avisos ficam no espaço livre à esquerda dele. */
+@media (min-width: 721px) {
+  .app:has(.composer) .toaster { left: calc((100% - 584px) / 2); transition: left 240ms var(--ease-out); }
+}
+.toast[data-kind="sending"] svg { color: var(--blue); }
+.toast:has(.toast-action) { position: relative; overflow: hidden; padding-right: 6px; }
+.toast-action {
+  margin-left: 8px; padding: 4px 10px;
+  border: 0; border-radius: 6px;
+  background: var(--selected); color: var(--strong); font-weight: 600;
+  cursor: pointer;
+  transition: transform 160ms var(--ease-out), background-color 160ms ease;
+}
+.toast-action:active { transform: scale(0.97); }
+/* Tempo restante para desfazer: barra linear que para no hover. */
+.toast-timer {
+  position: absolute; left: 0; right: 0; bottom: 0; height: 2px;
+  background: var(--blue); opacity: 0.5;
+  transform-origin: left;
+  animation: drain linear both;
+}
+.toast[data-paused] .toast-timer { animation-play-state: paused; }
+@keyframes drain { from { transform: scaleX(1); } to { transform: scaleX(0); } }
 
 .mobile-only { display: none; }
 
@@ -393,6 +470,8 @@ kbd {
   .count { position: absolute; top: -4px; right: -6px; }
   .account { justify-content: center; }
   .message { padding: 40px 32px 80px; }
+  .compose-btn { justify-content: center; padding: 8px; }
+  .compose-btn span { display: none; }
 }
 
 /* Celular: uma coluna; a leitura desliza por cima como uma folha. */
@@ -413,6 +492,18 @@ kbd {
   .meta-date { display: none; }
   .search kbd { display: none; }
   .mobile-only { display: inline-flex; }
+  /* Escrever vira folha de tela cheia, subindo de baixo. */
+  .composer {
+    inset: 0; width: auto; height: auto;
+    border: 0; border-radius: 0; box-shadow: none;
+    padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom);
+    transition: transform 320ms var(--ease-drawer);
+    @starting-style { opacity: 1; transform: translateY(100%); }
+  }
+  .composer[data-leaving] { opacity: 1; transform: translateY(100%); transition-duration: 220ms; }
+  .composer .confirm { border-radius: 0; }
+  .composer-fields, .composer-body { padding-left: 16px; padding-right: 16px; }
+  .hint-keys { display: none; }
   /* Espaço para o selo de versão não cobrir a última linha. */
   .list { padding-bottom: calc(24px + env(safe-area-inset-bottom)); }
 }
@@ -422,7 +513,8 @@ kbd {
     animation-duration: 1ms !important;
     animation-iteration-count: 1 !important;
   }
-  .reader, .dialog, .toast, .btn-label, .dot { transition-property: opacity !important; }
+  .reader, .dialog, .toast, .btn-label, .dot, .composer, .fab { transition-property: opacity !important; }
+  .toast-timer { animation: none !important; }
   .icon-btn[data-busy] .sync-icon, .spinner { animation: pulse 1s ease infinite !important; animation-duration: 1s !important; animation-iteration-count: infinite !important; }
   @keyframes pulse { 50% { opacity: 0.4; } }
 }

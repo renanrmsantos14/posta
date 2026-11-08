@@ -3,20 +3,24 @@
 //! Sem a variável, os testes passam sem fazer nada.
 
 use imap::{ClientBuilder, ConnectionMode};
-use mail_core::{imap_sync, ImapAccount, Security, Store};
+use mail_core::{imap_sync, send, ImapAccount, Outgoing, Security, SmtpServer, Store};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 fn account(tag: &str) -> Option<ImapAccount> {
     let addr = std::env::var("POSTA_IMAP_TEST").ok()?;
     let (host, port) = addr.split_once(':')?;
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-    let user = format!("{tag}{nanos}");
+    // Greenmail cria a caixa pelo endereço: login = email.
+    let user = format!("{tag}{nanos}@localhost");
     Some(ImapAccount {
         id: user.clone(),
         host: host.into(),
         port: port.parse().ok()?,
         security: Security::Plaintext,
         username: user.clone(),
+        smtp: std::env::var("POSTA_SMTP_TEST").ok().and_then(|p| {
+            Some(SmtpServer { host: host.into(), port: p.parse().ok()?, security: Security::Plaintext })
+        }),
         password: user,
     })
 }
@@ -105,4 +109,55 @@ fn mil_mensagens_sincronizam_e_buscam_rapido() {
     assert!(list.as_millis() < 50 && search.as_millis() < 50);
     drop(store);
     let _ = std::fs::remove_file(&dir);
+}
+
+#[test]
+fn responde_por_smtp_guarda_em_enviados_e_marca_respondida() {
+    let (Some(eu), Some(ana)) = (account("eu"), account("ana")) else { return };
+    if eu.smtp.is_none() {
+        return;
+    }
+    let original = format!(
+        "From: {}\r\nTo: {}\r\nSubject: Translado sexta\r\nMessage-ID: <orig@exemplo.com>\r\n\
+         Date: Sat, 7 Nov 2026 10:00:00 -0300\r\n\r\nConfirma o horário?\r\n",
+        ana.username, eu.username
+    );
+    session(&eu).append("INBOX", original.as_bytes()).finish().unwrap();
+    let mut mine = Store::open_in_memory().unwrap();
+    imap_sync::sync_mailbox(&eu, &mut mine, "INBOX").unwrap();
+    let id = mine.list("INBOX", 1, 0).unwrap()[0].id;
+    let reply = mine.reply_ref(id).unwrap().unwrap();
+    assert_eq!(mine.get(id).unwrap().unwrap().reply_addr, ana.username);
+
+    let out = Outgoing {
+        to: ana.username.clone(),
+        subject: "Re: Translado sexta".into(),
+        body: "Confirmado: 7h40 no saguão.".into(),
+    };
+    let report = send::send(&eu, &out, Some(&reply)).unwrap();
+    assert_eq!(report.warning, None);
+    assert!(report.saved_to_sent);
+
+    // Ana recebe a resposta encadeada na conversa.
+    let mut theirs = Store::open_in_memory().unwrap();
+    let mut got = None;
+    for _ in 0..20 {
+        imap_sync::sync_mailbox(&ana, &mut theirs, "INBOX").unwrap();
+        got = theirs.search("saguao", 5).unwrap().into_iter().next();
+        if got.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let got = got.expect("resposta chegou");
+    assert_eq!(got.subject, "Re: Translado sexta");
+    assert_eq!(theirs.reply_ref(got.id).unwrap().unwrap().refs, "orig@exemplo.com");
+
+    // Cópia em Enviados e original marcada como respondida.
+    let mut s = session(&eu);
+    let sent = s.select("Sent").unwrap();
+    assert_eq!(sent.exists, 1);
+    s.select("INBOX").unwrap();
+    let f = s.uid_fetch(reply.uid.to_string(), "FLAGS").unwrap();
+    assert!(f.iter().next().unwrap().flags().iter().any(|f| matches!(f, imap::types::Flag::Answered)));
 }

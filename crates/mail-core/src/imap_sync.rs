@@ -26,9 +26,33 @@ pub struct ImapAccount {
     pub port: u16,
     pub security: Security,
     pub username: String,
+    /// Servidor de envio. Contas antigas sem ele usam o padrão do provedor.
+    #[serde(default)]
+    pub smtp: Option<SmtpServer>,
     /// Nunca vai para disco nem para a UI: fica no cofre do sistema.
     #[serde(skip_serializing, default)]
     pub password: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SmtpServer {
+    pub host: String,
+    pub port: u16,
+    pub security: Security,
+}
+
+impl ImapAccount {
+    /// SMTP configurado, ou o palpite usual: imap.x → smtp.x na porta 465.
+    pub fn smtp(&self) -> SmtpServer {
+        self.smtp.clone().unwrap_or_else(|| SmtpServer {
+            host: match self.host.strip_prefix("imap.") {
+                Some(rest) => format!("smtp.{rest}"),
+                None => self.host.clone(),
+            },
+            port: 465,
+            security: Security::Tls,
+        })
+    }
 }
 
 #[derive(Debug, Default, Serialize, PartialEq, Eq)]
@@ -40,9 +64,9 @@ pub struct SyncReport {
 /// Quantas mensagens completas buscar por comando FETCH.
 const BATCH: usize = 50;
 
-type ImapSession = Session<imap::Connection>;
+pub(crate) type ImapSession = Session<imap::Connection>;
 
-fn connect(acc: &ImapAccount) -> Result<ImapSession> {
+pub(crate) fn connect(acc: &ImapAccount) -> Result<ImapSession> {
     let mode = match acc.security {
         Security::Tls => ConnectionMode::Tls,
         Security::StartTls => ConnectionMode::StartTls,
@@ -55,10 +79,18 @@ fn connect(acc: &ImapAccount) -> Result<ImapSession> {
 fn parse(uid: u32, raw: &[u8], seen: bool, fallback_date: i64) -> NewMessage {
     let msg = MessageParser::default().parse(raw);
     let from = msg.as_ref().and_then(|m| m.from()).and_then(|f| f.first());
+    let from_addr = from.and_then(|f| f.address()).unwrap_or_default().to_string();
+    let reply_addr = msg
+        .as_ref()
+        .and_then(|m| m.reply_to())
+        .and_then(|r| r.first())
+        .and_then(|r| r.address())
+        .map(str::to_string)
+        .unwrap_or_else(|| from_addr.clone());
     NewMessage {
         uid,
         from_name: from.and_then(|f| f.name()).unwrap_or_default().to_string(),
-        from_addr: from.and_then(|f| f.address()).unwrap_or_default().to_string(),
+        from_addr,
         subject: msg.as_ref().and_then(|m| m.subject()).unwrap_or_default().to_string(),
         date: msg
             .as_ref()
@@ -71,6 +103,13 @@ fn parse(uid: u32, raw: &[u8], seen: bool, fallback_date: i64) -> NewMessage {
             .map(|b| b.into_owned())
             .unwrap_or_default(),
         seen,
+        message_id: msg.as_ref().and_then(|m| m.message_id()).unwrap_or_default().to_string(),
+        refs: msg
+            .as_ref()
+            .and_then(|m| m.references())
+            .map(|r| r.iter().collect::<Vec<_>>().join(" "))
+            .unwrap_or_default(),
+        reply_addr,
     }
 }
 
