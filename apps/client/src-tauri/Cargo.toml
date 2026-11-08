@@ -1,0 +1,18 @@
+[package]
+name = "posta"
+version = "0.0.0"
+edition = "2021"
+
+[lib]
+name = "posta_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.7", features = [] }
+
+[dependencies]
+tauri = { version = "2.12", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+keyring = "4.2"
+mail-core = { path = "../../../crates/mail-core" }

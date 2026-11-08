@@ -1,0 +1,4 @@
+[workspace]
+resolver = "2"
+members = ["crates/mail-core", "apps/client/src-tauri"]
+default-members = ["crates/mail-core", "apps/client/src-tauri"]

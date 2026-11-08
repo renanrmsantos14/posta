@@ -1,0 +1,11 @@
+{
+  "name": "posta",
+  "private": true,
+  "packageManager": "pnpm@12.18.0",
+  "scripts": {
+    "dev": "pnpm --filter client dev",
+    "build": "pnpm --filter client build",
+    "test": "cargo test -p mail-core",
+    "test:imap": "sh scripts/test-imap.sh"
+  }
+}
