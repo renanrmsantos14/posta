@@ -16,6 +16,7 @@ Depois de instalado, o Posta se atualiza sozinho: procura versão nova ao abrir 
 - `crates/mail-core`: sincroniza IMAP para um SQLite local (WAL + busca FTS5 sem acento). A UI só lê o banco local, por isso abre e busca na hora.
 - `apps/client`: interface React. Fora do Tauri (`pnpm dev` no navegador) usa dados de exemplo de `src/mock.ts`.
 - `apps/client/src-tauri`: comandos Tauri. Contas ficam em `accounts.json` na pasta de dados do app; senhas e refresh tokens OAuth no cofre do sistema (crate `keyring`).
+- Chegada instantânea: no backend, uma thread por conta mantém IMAP IDLE na Caixa de entrada (renova a cada 25 min, reconecta com espera crescente de 5 s a 5 min). Ao receber aviso, sincroniza a INBOX e emite o evento `mail-changed`, que a UI escuta para recarregar. Servidor sem IDLE: a mesma thread faz polling a cada 60 s. A UI mantém um sync de segurança a cada 5 min.
 
 ## Comandos
 
@@ -52,7 +53,7 @@ SMTP com servidor e porta sugeridos pelo domínio (465 = TLS, outras = STARTTLS)
 
 1. ~~Responder, escrever e enviar (SMTP).~~ Feito.
 2. Arquivar e excluir; pastas além da caixa de entrada.
-3. IMAP IDLE para chegada instantânea, no lugar do intervalo de 60 s.
+3. ~~IMAP IDLE para chegada instantânea.~~ Feito.
 4. ~~OAuth (Google e Microsoft).~~ Feito, sem Graph/Gmail API: IMAP/SMTP com XOAUTH2. Falta validar com contas reais (veja `docs/oauth.md`).
 5. Android: guardar a senha no Keystore (o `keyring` padrão não cobre Android) e sincronizar em segundo plano.
 6. ~~Emails em HTML, exibidos em iframe isolado.~~ Feito: sem scripts, imagens remotas só com "Mostrar imagens", links no navegador do sistema.

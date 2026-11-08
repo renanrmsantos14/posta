@@ -1,10 +1,10 @@
 //! Ponte entre a UI e o mail-core. Leituras vêm do SQLite local; rede só em sync e flags.
 
 use mail_core::oauth::{self, Provider};
-use mail_core::{imap_sync, send, AuthMode, ImapAccount, MessageDetail, MessageSummary, Outgoing, ReplyRef, Role, SendReport, Store};
+use mail_core::{imap_sync, send, AuthMode, IdleEnd, ImapAccount, MessageDetail, MessageSummary, Outgoing, ReplyRef, Role, SendReport, Store};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, fs, path::PathBuf, sync::Mutex, time::{Duration, Instant}};
-use tauri::{AppHandle, Manager, State};
+use std::{collections::{HashMap, HashSet}, fs, path::PathBuf, sync::Mutex, time::{Duration, Instant}};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 const KEYRING_SERVICE: &str = "posta";
 
@@ -15,6 +15,8 @@ struct AppState {
     syncing: Mutex<()>,
     /// Access tokens OAuth por conta, só em memória, com o instante em que vencem.
     tokens: Mutex<HashMap<String, (String, Instant)>>,
+    /// Contas que já têm thread de IDLE.
+    watching: Mutex<HashSet<String>>,
 }
 
 type CmdResult<T> = Result<T, String>;
@@ -118,6 +120,62 @@ impl AppState {
     }
 }
 
+/// Renovação do IDLE (o RFC 2177 pede menos de 29 min).
+const IDLE_RENEW: Duration = Duration::from_secs(25 * 60);
+/// Servidor sem IDLE: volta ao polling neste intervalo.
+const POLL_EVERY: Duration = Duration::from_secs(60);
+const BACKOFF_MAX: Duration = Duration::from_secs(5 * 60);
+
+/// Sincroniza a INBOX de uma conta, respeitando `syncing`, e devolve quantas mensagens vieram.
+fn sync_account_inbox(st: &AppState, id: &str) -> CmdResult<usize> {
+    let acc = st.account_with_password(id)?;
+    let _guard = st.syncing.lock().unwrap_or_else(|p| p.into_inner());
+    let mut store = Store::open(st.db_path()).map_err(err)?;
+    st.ensure_folders(&mut store, &acc)?;
+    Ok(imap_sync::sync_mailbox(&acc, &mut store, "INBOX", None).map_err(err)?.fetched)
+}
+
+/// Um ciclo: espera o IDLE e sincroniza ao fim. Também sincroniza no prazo (`TimedOut`): o que chegou
+/// entre o fim do IDLE anterior e este SELECT não gera aviso, então o ciclo renovado serve de varredura.
+fn idle_cycle(app: &AppHandle, id: &str) -> CmdResult<()> {
+    let st = app.state::<AppState>();
+    let acc = st.account_with_password(id)?;
+    let changed = match imap_sync::idle_wait(&acc, "INBOX", IDLE_RENEW).map_err(err)? {
+        IdleEnd::Changed => true,
+        IdleEnd::TimedOut => false,
+        IdleEnd::Unsupported => {
+            std::thread::sleep(POLL_EVERY);
+            true
+        }
+    };
+    let fetched = sync_account_inbox(&st, id)?;
+    if changed || fetched > 0 {
+        app.emit("mail-changed", fetched).ok();
+    }
+    Ok(())
+}
+
+/// Uma thread por conta: mantém IDLE na INBOX e avisa a UI (`mail-changed`) quando algo muda.
+fn watch_inbox(app: &AppHandle, id: String) {
+    if !app.state::<AppState>().watching.lock().unwrap().insert(id.clone()) {
+        return;
+    }
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let mut backoff = Duration::from_secs(5);
+        loop {
+            match idle_cycle(&app, &id) {
+                Ok(()) => backoff = Duration::from_secs(5),
+                Err(e) => {
+                    eprintln!("IDLE de {id}: {e}");
+                    std::thread::sleep(backoff);
+                    backoff = (backoff * 2).min(BACKOFF_MAX);
+                }
+            }
+        }
+    });
+}
+
 /// Roda trabalho de rede/disco fora da thread da janela.
 async fn blocking<T: Send + 'static>(
     app: AppHandle,
@@ -130,7 +188,8 @@ async fn blocking<T: Send + 'static>(
 
 #[tauri::command]
 async fn add_imap_account(app: AppHandle, mut account: ImapAccount) -> CmdResult<ImapAccount> {
-    blocking(app, move |st| {
+    let handle = app.clone();
+    let account = blocking(app, move |st| {
         imap_sync::check_login(&account).map_err(err)?;
         account.id = format!("{}@{}", account.username, account.host);
         keyring::Entry::new(KEYRING_SERVICE, &account.id)
@@ -139,7 +198,9 @@ async fn add_imap_account(app: AppHandle, mut account: ImapAccount) -> CmdResult
         st.save_account(&account)?;
         Ok(account)
     })
-    .await
+    .await?;
+    watch_inbox(&handle, account.id.clone());
+    Ok(account)
 }
 
 fn refresh_key(id: &str) -> String {
@@ -165,7 +226,8 @@ fn oauth_providers() -> Vec<Provider> {
 /// Entra com Google/Microsoft no navegador do sistema e adiciona a conta (até 3 min de espera).
 #[tauri::command]
 async fn oauth_login(app: AppHandle, provider: Provider) -> CmdResult<ImapAccount> {
-    blocking(app, move |st| {
+    let handle = app.clone();
+    let account = blocking(app, move |st| {
         let client = oauth_client(provider).ok_or_else(|| "login OAuth não configurado nesta versão do Posta".to_string())?;
         let listener = std::net::TcpListener::bind("127.0.0.1:0").map_err(err)?;
         let redirect = provider.redirect_uri(listener.local_addr().map_err(err)?.port());
@@ -202,7 +264,9 @@ async fn oauth_login(app: AppHandle, provider: Provider) -> CmdResult<ImapAccoun
         st.save_account(&account)?;
         Ok(account)
     })
-    .await
+    .await?;
+    watch_inbox(&handle, account.id.clone());
+    Ok(account)
 }
 
 #[tauri::command]
@@ -415,7 +479,11 @@ pub fn run() {
             let dir = app.path().app_data_dir()?;
             fs::create_dir_all(&dir)?;
             let store = Store::open(dir.join("mail.sqlite"))?;
-            app.manage(AppState { dir, store: Mutex::new(store), syncing: Mutex::new(()), tokens: Mutex::new(HashMap::new()) });
+            app.manage(AppState { dir, store: Mutex::new(store), syncing: Mutex::new(()), tokens: Mutex::new(HashMap::new()), watching: Mutex::new(HashSet::new()) });
+            let st = app.state::<AppState>();
+            for acc in st.accounts().unwrap_or_default() {
+                watch_inbox(app.handle(), acc.id);
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
