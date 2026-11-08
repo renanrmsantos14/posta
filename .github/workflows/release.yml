@@ -1,16 +1,48 @@
-# Gera instaladores de Windows e Linux para cada tag v* e publica no Releases,
-# com o latest.json assinado que o app usa para se atualizar sozinho.
+# Cada push no master (exceto só documentação) sobe o PATCH, cria a tag e publica
+# o release. Tags v* enviadas por `pnpm release` também publicam.
+# Gera instaladores de Windows e Linux e o latest.json assinado que o app usa para se atualizar.
 name: Release
 
 on:
   push:
+    branches: [master]
+    paths-ignore: ["**.md", "docs/**", ".claude/**"]
     tags: ["v*"]
 
 permissions:
   contents: write
 
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
+  versao:
+    # O commit "Lança vX" é feito com GITHUB_TOKEN, que não dispara outro workflow: sem laço.
+    if: github.ref_type == 'branch' && !startsWith(github.event.head_commit.message, 'Lança v')
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - id: tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          node apps/client/scripts/bump-version.mjs
+          TAG="v$(node -p "require('./apps/client/package.json').version")"
+          git add apps/client/package.json apps/client/src/version.json apps/client/src-tauri/tauri.conf.json
+          git commit -m "Lança $TAG"
+          git tag -a "$TAG" -m "$TAG"
+          git push origin HEAD:master "refs/tags/$TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: versao
+    if: always() && (needs.versao.result == 'success' || github.ref_type == 'tag')
     strategy:
       fail-fast: false
       matrix:
@@ -20,6 +52,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.versao.outputs.tag || github.ref }}
 
       - name: Dependências do Linux
         if: runner.os == 'Linux'
@@ -47,8 +81,8 @@ jobs:
           POSTA_MS_CLIENT_ID: ${{ secrets.POSTA_MS_CLIENT_ID }}
         with:
           projectPath: apps/client
-          tagName: ${{ github.ref_name }}
-          releaseName: Posta ${{ github.ref_name }}
+          tagName: ${{ needs.versao.outputs.tag || github.ref_name }}
+          releaseName: Posta ${{ needs.versao.outputs.tag || github.ref_name }}
           releaseBody: |
             Baixe o instalador do seu sistema em **Assets**:
             - **Windows**: `Posta_*_x64-setup.exe`

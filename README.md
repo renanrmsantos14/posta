@@ -23,7 +23,7 @@ Depois de instalado, o Posta se atualiza sozinho: procura versão nova ao abrir 
 | --- | --- |
 | `pnpm dev` | UI no navegador em http://localhost:36480 com dados de exemplo |
 | `pnpm --filter client tauri dev` | App desktop real (precisa das dependências do Tauri no sistema) |
-| `pnpm release [versão]` | Sobe a versão (PATCH, ou a informada), cria commit e tag `vX.Y.Z` e envia; o GitHub Actions gera os instaladores e publica o release |
+| `pnpm release [versão]` | Lança uma versão específica (MINOR/MAJOR) na hora: sobe a versão, cria commit e tag `vX.Y.Z` e envia |
 | `pnpm --filter client tauri build` | Instalador local (exige `TAURI_SIGNING_PRIVATE_KEY` com a chave de assinatura) |
 | `pnpm test` | Testes do núcleo (banco local) |
 | `pnpm test:imap` | Sobe Greenmail no Docker e testa IMAP real (1.000 mensagens) e resposta por SMTP |
@@ -32,7 +32,7 @@ Linux precisa de `libwebkit2gtk-4.1-dev`, `libgtk-3-dev`, `librsvg2-dev` e de um
 
 ## Publicar versão
 
-`pnpm release` no `master` limpo. O workflow `.github/workflows/release.yml` compila Windows e Linux, assina as atualizações e publica o `latest.json` que o app consulta.
+Automático: cada merge no `master` (exceto mudança só em documentação) sobe o PATCH, cria a tag e publica o release. Para outra versão, `pnpm release 0.2.0` no `master` limpo. O workflow `.github/workflows/release.yml` compila Windows e Linux, assina as atualizações e publica o `latest.json` que o app consulta.
 
 A chave de assinatura fica em `~/.tauri/posta.key` (senha em `~/.tauri/posta.key.password`) e nos secrets `TAURI_SIGNING_PRIVATE_KEY`/`TAURI_SIGNING_PRIVATE_KEY_PASSWORD` do GitHub. **Guarde cópia dos dois arquivos**: sem eles, quem já instalou não recebe mais atualizações automáticas.
 
