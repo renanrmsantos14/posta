@@ -1,9 +1,11 @@
 //! Núcleo do Posta: sincronização de email e cópia local pesquisável.
 
+pub mod folders;
 pub mod imap_sync;
 pub mod send;
 pub mod store;
 
+pub use folders::{Folder, Role};
 pub use imap_sync::{ImapAccount, Security, SmtpServer, SyncReport};
 pub use send::{Outgoing, SendReport};
 pub use store::{MessageDetail, MessageSummary, ReplyRef, Store};
