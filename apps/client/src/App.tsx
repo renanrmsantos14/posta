@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, ArrowBendUpLeft, ArrowsClockwise, MagnifyingGlass, NotePencil, Plus, Tray, EnvelopeSimple } from "@phosphor-icons/react";
+import { ArrowLeft, ArrowBendUpLeft, ArrowsClockwise, MagnifyingGlass, NotePencil, Plus, Tray, EnvelopeSimple, GearSix } from "@phosphor-icons/react";
 import { api, type Account, type MessageDetail, type MessageSummary } from "./api";
 import { AccountDialog } from "./AccountDialog";
 import { Composer, type ComposeInit } from "./Composer";
 import { Toaster, toast } from "./toast";
+import { SettingsDialog } from "./SettingsDialog";
+import { UpdateDialog } from "./UpdateDialog";
+import { autoCheck, checkUpdate, CHECK_EVERY_MS, skip, skipped, type Update } from "./updater";
 import build from "./version.json";
 
 const PAGE = 100;
@@ -46,6 +49,8 @@ export default function App() {
   const [dialog, setDialog] = useState(false);
   const [readerOpen, setReaderOpen] = useState(false);
   const [compose, setCompose] = useState<ComposeInit | null>(null);
+  const [settings, setSettings] = useState(false);
+  const [update, setUpdate] = useState<Update | null>(null);
   /** Remonta o painel a cada abertura, mesmo com o mesmo rascunho. */
   const [composeKey, setComposeKey] = useState(0);
   /** Ids que chegaram depois da primeira carga: entram com destaque. */
@@ -173,10 +178,23 @@ export default function App() {
     setHasMore(more.length === PAGE);
   }
 
+  // Atualização: procura ao abrir e a cada 6 h, em silêncio; só avisa se houver versão nova não adiada.
+  useEffect(() => {
+    const run = () => {
+      if (!autoCheck()) return;
+      checkUpdate()
+        .then((u) => u && u.version !== skipped() && setUpdate(u))
+        .catch((e) => console.warn("procurar atualização falhou:", e));
+    };
+    run();
+    const timer = setInterval(run, CHECK_EVERY_MS);
+    return () => clearInterval(timer);
+  }, []);
+
   // Atalhos: j/k ou setas navegam, / busca, r responde, c escreve, u sincroniza, Esc limpa a busca ou volta.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (dialog || compose) return;
+      if (dialog || compose || settings || update) return;
       const t = e.target;
       const typing = t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement || t instanceof HTMLSelectElement;
       if (e.key === "Escape") {
@@ -250,6 +268,9 @@ export default function App() {
           <span><kbd>c</kbd> escrever</span>
           <span><kbd>u</kbd> sincronizar</span>
         </div>
+        <button className="btn ghost small settings-btn" onClick={() => setSettings(true)} aria-label="Configurações">
+          <GearSix size={15} weight="bold" /> <span>Configurações</span>
+        </button>
       </aside>
 
       <section className="list-pane">
@@ -266,6 +287,9 @@ export default function App() {
           </button>
           <button className="icon-btn mobile-only" onClick={() => setDialog(true)} aria-label="Adicionar conta">
             <Plus size={16} weight="bold" />
+          </button>
+          <button className="icon-btn mobile-only" onClick={() => setSettings(true)} aria-label="Configurações">
+            <GearSix size={16} weight="bold" />
           </button>
         </div>
         {results && (
@@ -344,7 +368,11 @@ export default function App() {
       {compose && accounts && (
         <Composer key={composeKey} init={compose} accounts={accounts} onSend={send} onDiscard={() => setCompose(null)} />
       )}
-      {!compose && !dialog && (
+      {settings && <SettingsDialog onClose={() => setSettings(false)} onUpdate={setUpdate} />}
+      {update && (
+        <UpdateDialog update={update} onLater={() => { skip(update.version); setUpdate(null); }} />
+      )}
+      {!compose && !dialog && !settings && !update && (
         <button className="fab mobile-only" onClick={writeNew} aria-label="Escrever">
           <NotePencil size={22} weight="bold" />
         </button>

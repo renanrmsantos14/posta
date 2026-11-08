@@ -1,10 +1,12 @@
-// Incrementa o PATCH a cada build de publicação e grava data/hora de São Paulo.
+// Sobe a versão de publicação (PATCH, ou a versão passada como argumento) e grava data/hora de São Paulo.
 import { readFileSync, writeFileSync } from "node:fs";
 
 const pkgUrl = new URL("../package.json", import.meta.url);
 const pkg = JSON.parse(readFileSync(pkgUrl, "utf8"));
 const [major, minor, patch] = pkg.version.split(".").map(Number);
-pkg.version = `${major}.${minor}.${patch + 1}`;
+const wanted = process.argv[2]?.replace(/^v/, "");
+if (wanted && !/^\d+\.\d+\.\d+$/.test(wanted)) throw new Error(`versão inválida: ${wanted}`);
+pkg.version = wanted ?? `${major}.${minor}.${patch + 1}`;
 writeFileSync(pkgUrl, JSON.stringify(pkg, null, 2) + "\n");
 
 const builtAt = new Intl.DateTimeFormat("pt-BR", {
