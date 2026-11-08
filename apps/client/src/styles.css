@@ -209,8 +209,12 @@ kbd {
   cursor: default;
   transition: background-color 120ms ease;
 }
-.row + .row { box-shadow: 0 -1px 0 var(--line); }
-.row[aria-selected="true"], .row[aria-selected="true"] + .row { box-shadow: none; }
+/* Divisória como linha reta: box-shadow seguia o border-radius e desenhava uma "casca" curva. */
+.row { position: relative; }
+.row + .row::before {
+  content: ""; position: absolute; top: 0; left: 10px; right: 10px; height: 1px; background: var(--line);
+}
+.row[aria-selected="true"]::before, .row[aria-selected="true"] + .row::before { display: none; }
 .row[aria-selected="true"] { background: var(--selected); }
 .dot {
   grid-area: dot; align-self: center;
@@ -521,6 +525,9 @@ kbd {
 .folder-tabs .btn { flex: none; white-space: nowrap; }
 .folder-tabs .btn[aria-current="page"] { background: var(--selected); color: var(--strong); }
 .actions { flex-wrap: wrap; }
+/* Leitor estreito: atalhos saem dos botões para as ações caberem numa linha. */
+.message { container-type: inline-size; }
+@container (max-width: 600px) { .actions kbd { display: none; } }
 /* Confirmação de exclusão: cobre a janela; clicar fora cancela. */
 .confirm.scrim {
   position: fixed; z-index: 30; align-items: center; border-radius: 0;

@@ -75,6 +75,8 @@ export default function App() {
   const folderRef = useRef(folder);
   folderRef.current = folder;
   const loadingMore = useRef(false);
+  /** Mensagens no intervalo do "Desfazer": ainda estão no banco local, mas não devem voltar à lista. */
+  const pendingMove = useRef<Set<number>>(new Set());
   const searchRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLUListElement>(null);
 
@@ -87,8 +89,9 @@ export default function App() {
   const canTrash = folder === "trash" || folderList.includes("trash");
 
   const reload = useCallback(async (count = PAGE) => {
-    const list = await api.list(folder, Math.max(count, PAGE), 0);
+    const all = await api.list(folder, Math.max(count, PAGE), 0);
     if (folderRef.current !== folder) return;
+    const list = all.filter((m) => !pendingMove.current.has(m.id));
     if (known.current) {
       const fresh = list.filter((m) => !known.current!.has(m.id)).map((m) => m.id);
       if (fresh.length) {
@@ -98,13 +101,15 @@ export default function App() {
     }
     known.current = new Set(list.map((m) => m.id));
     setMessages(list);
-    setHasMore(list.length >= Math.max(count, PAGE));
+    setHasMore(all.length >= Math.max(count, PAGE));
   }, [folder]);
 
   const syncFolder = useCallback(async (role: Role, window: number) => {
     const r = await api.syncFolder(role, window);
     r.errors.forEach((e) => toast(e, "error"));
-    if (folderRef.current === role) setServerTotal(r.total);
+    // Outra sincronização em andamento: não há total confiável (0 esconderia "carregar mais").
+    if (!r.skipped && folderRef.current === role) setServerTotal(r.total);
+    return !r.skipped;
   }, []);
 
   const sync = useCallback(async (manual: boolean) => {
@@ -151,7 +156,10 @@ export default function App() {
         await reload();
         if (alive && folder !== "inbox") {
           setSyncing(true);
-          await syncFolder(folder, KEEP);
+          // A sincronização periódica da Caixa de entrada pode estar rodando: espera a vez em vez de mostrar a pasta vazia.
+          for (let i = 0; i < 8 && alive && !(await syncFolder(folder, KEEP)); i++) {
+            await new Promise((r) => setTimeout(r, 1500));
+          }
           if (alive) await reload();
         }
       } catch (e) {
@@ -168,8 +176,13 @@ export default function App() {
   }, [reload, syncFolder, folder]);
 
   useEffect(() => {
-    if (folder === "inbox") setInboxUnread(unread);
-  }, [folder, unread]);
+    if (folder === "inbox" && !loadingFolder) setInboxUnread(unread);
+  }, [folder, unread, loadingFolder]);
+
+  // A mensagem do diálogo sumiu (ex.: excluída no servidor): fecha, senão os atalhos ficam bloqueados.
+  useEffect(() => {
+    if (confirmDelete && !current && !deleting) setConfirmDelete(false);
+  }, [confirmDelete, current, deleting]);
 
   const syncRef = useRef(sync);
   syncRef.current = sync;
@@ -197,6 +210,7 @@ export default function App() {
     setDetail(null);
     setReaderOpen(false);
     setIntro(false);
+    setLoadingFolder(true);
     setFolder(role);
   }
 
@@ -293,7 +307,9 @@ export default function App() {
 
   /** Sai da lista na hora; o servidor só recebe quando o "Desfazer" expira. */
   function moveOut(m: MessageSummary, to: Role) {
-    const restore = takeOut(m);
+    const undo = takeOut(m);
+    pendingMove.current.add(m.id);
+    const restore = () => { pendingMove.current.delete(m.id); undo(); };
     const text = to === "trash" ? "Movida para a Lixeira" : to === "inbox" ? "Movida para a Caixa de entrada" : "Arquivada";
     toast(text, "info", {
       action: { label: "Desfazer", onClick: restore },
@@ -302,6 +318,7 @@ export default function App() {
         if (reason === "action") return;
         try {
           await api.move(m.id, to);
+          pendingMove.current.delete(m.id);
         } catch (e) {
           restore();
           toast(`Não foi possível mover: ${e}`, "error");
@@ -465,7 +482,7 @@ export default function App() {
             <GearSix size={16} weight="bold" />
           </button>
         </div>
-        <div className="folder-tabs mobile-only" role="tablist" aria-label="Pastas">
+        <div className="folder-tabs mobile-only" role="group" aria-label="Pastas">
           {folderList.map((r) => {
             const Icon = FOLDERS[r].icon;
             return (
@@ -534,8 +551,9 @@ export default function App() {
               </button>
               {canArchive && (
                 <button className="btn" onClick={archive}>
-                  {archiveTo === "inbox" ? <Tray size={15} weight="bold" /> : <Archive size={15} weight="bold" />}
-                  {archiveTo === "inbox" ? "Mover para a entrada" : "Arquivar"} <kbd>e</kbd>
+                  {archiveTo === "inbox"
+                    ? <><Tray size={15} weight="bold" /> Mover para a entrada</>
+                    : <><Archive size={15} weight="bold" /> Arquivar</>} <kbd>e</kbd>
                 </button>
               )}
               <button className="btn" onClick={remove} disabled={!canTrash}
