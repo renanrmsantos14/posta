@@ -378,18 +378,35 @@ export default function App() {
     }
   }
 
+  // No desktop abre o diálogo com as novidades; no Android (APK) só um aviso discreto com "Atualizar".
+  const notified = useRef(""); // o aviso do APK é um toast: não repete a mesma versão (nem no StrictMode)
+  const showUpdate = useCallback((u: Update) => {
+    if (!u.apkUrl) return setUpdate(u);
+    toast(`Nova versão v${u.version} disponível`, "info", {
+      duration: 20000,
+      action: {
+        label: "Atualizar",
+        onClick: () => u.install(() => {}).catch((e) => toast(`Não consegui abrir o download: ${e}`, "error")),
+      },
+    });
+  }, []);
+
   // Atualização: procura ao abrir e a cada 6 h, em silêncio; só avisa se houver versão nova não adiada.
   useEffect(() => {
     const run = () => {
       if (!autoCheck()) return;
       checkUpdate()
-        .then((u) => u && u.version !== skipped() && setUpdate(u))
+        .then((u) => {
+          if (!u || u.version === skipped() || (u.apkUrl && u.version === notified.current)) return;
+          if (u.apkUrl) notified.current = u.version;
+          showUpdate(u);
+        })
         .catch((e) => console.warn("procurar atualização falhou:", e));
     };
     run();
     const timer = setInterval(run, CHECK_EVERY_MS);
     return () => clearInterval(timer);
-  }, []);
+  }, [showUpdate]);
 
   // Atalhos: j/k ou setas navegam, / busca, r responde, c escreve, u sincroniza, e arquiva, # exclui, Esc limpa a busca ou volta.
   useEffect(() => {
@@ -634,7 +651,7 @@ export default function App() {
       {compose && accounts && (
         <Composer key={composeKey} init={compose} accounts={accounts} onSend={send} onDiscard={() => setCompose(null)} />
       )}
-      {settings && <SettingsDialog onClose={() => setSettings(false)} onUpdate={setUpdate} />}
+      {settings && <SettingsDialog onClose={() => setSettings(false)} onUpdate={showUpdate} />}
       {update && (
         <UpdateDialog update={update} onLater={() => { skip(update.version); setUpdate(null); }} />
       )}

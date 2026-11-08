@@ -1,6 +1,7 @@
 # Cada push no master (exceto só documentação) sobe o PATCH, cria a tag e publica
 # o release. Tags v* enviadas por `pnpm release` também publicam.
-# Gera instaladores de Windows e Linux e o latest.json assinado que o app usa para se atualizar.
+# Gera instaladores de Windows e Linux e o latest.json assinado que o app usa para se atualizar,
+# e anexa o APK do Android (assinado com a chave estável dos secrets ANDROID_*).
 name: Release
 
 on:
@@ -92,3 +93,89 @@ jobs:
           releaseDraft: false
           prerelease: false
           includeUpdaterJson: true
+
+  android:
+    needs: versao
+    if: always() && (needs.versao.result == 'success' || github.ref_type == 'tag')
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      NDK_VERSION: 27.2.12479018
+      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+    steps:
+      # Chave de debug que muda entre builds impede instalar por cima da versão anterior: sem a chave estável, não publica.
+      - name: Confere os secrets de assinatura
+        run: |
+          missing=""
+          for v in ANDROID_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD; do
+            [ -n "${!v}" ] || missing="$missing $v"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error title=Faltam secrets do Android::Crie em Settings > Secrets and variables > Actions:$missing. Comando para gerar a chave: veja 'Android' no README."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.versao.outputs.tag || github.ref }}
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools ndk;27.2.12479018
+
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Compila o APK (sem assinatura)
+        env:
+          NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/${{ env.NDK_VERSION }}
+        working-directory: apps/client
+        run: pnpm tauri android build --apk --target aarch64 armv7 x86_64
+
+      - name: Alinha e assina com a chave estável
+        run: |
+          BT="$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)"
+          VERSION="$(node -p "require('./apps/client/package.json').version")"
+          UNSIGNED="$(find apps/client/src-tauri/gen/android -name '*-release-unsigned.apk' | head -1)"
+          test -n "$UNSIGNED"
+          KS="$RUNNER_TEMP/posta-release.keystore"
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$KS"
+          mkdir -p dist-android
+          "$BT/zipalign" -f -p 4 "$UNSIGNED" dist-android/aligned.apk
+          "$BT/apksigner" sign --ks "$KS" --ks-pass env:ANDROID_KEYSTORE_PASSWORD --key-pass env:ANDROID_KEY_PASSWORD \
+            --ks-key-alias "$ANDROID_KEY_ALIAS" --out "dist-android/Posta_${VERSION}_android.apk" dist-android/aligned.apk
+          rm -f dist-android/aligned.apk dist-android/*.idsig "$KS"
+          "$BT/apksigner" verify --print-certs "dist-android/Posta_${VERSION}_android.apk" | head -3
+
+      - name: Anexa ao release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.versao.outputs.tag || github.ref_name }}
+        run: |
+          # O tauri-action cria o release no job build; espera ele existir (até 30 min).
+          for i in $(seq 1 60); do
+            gh release view "$TAG" >/dev/null 2>&1 && break
+            sleep 30
+          done
+          gh release view "$TAG" >/dev/null
+          gh release upload "$TAG" dist-android/*.apk --clobber

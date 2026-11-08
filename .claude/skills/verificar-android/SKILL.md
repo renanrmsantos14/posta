@@ -14,3 +14,7 @@ Sem Android SDK local: a prova do build é o CI.
 5. Segredo: `src-tauri/src/secret.rs` usa `keyring` fora do Android e `android-native-keyring-store` no Android. Nunca imprima senhas.
 
 Limites: instalar o APK e testar o Keystore/TLS exige aparelho ou emulador (não disponível no CI); registre como não validado em dispositivo.
+
+## Aviso de versão nova (Android)
+
+`pnpm -C apps/client dev` e abra `http://localhost:36480/?update=android`: aparece o toast "Nova versão v0.1.2 disponível" com o botão Atualizar. No aparelho, o app consulta `releases/latest` do GitHub (CSP `connect-src` em `tauri.conf.json`), compara com `src/version.json` e o Atualizar abre o `.apk` do release pelo plugin opener. Só vale a pena validar no aparelho depois de existir um release com o APK assinado.
