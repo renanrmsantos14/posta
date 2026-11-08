@@ -1,5 +1,5 @@
 // Dados de exemplo para rodar a UI no navegador (pnpm dev), sem Tauri e sem rede.
-import type { Account, Draft, MessageDetail, MessageSummary, NewAccount, Role, SendReport, SyncResult } from "./api";
+import type { Account, Draft, Provider, MessageDetail, MessageSummary, NewAccount, Role, SendReport, SyncResult } from "./api";
 
 const now = Math.floor(Date.now() / 1000);
 const H = 3600;
@@ -72,6 +72,16 @@ export const mockApi = {
     await wait(900);
     if (a.password.length < 3) throw "LOGIN failed. Invalid login/password";
     const acc = { id: `${a.username}@${a.host}`, host: a.host, port: a.port, security: a.security, username: a.username, smtp: a.smtp };
+    accounts = [...accounts.filter((x) => x.id !== acc.id), acc];
+    return acc;
+  },
+  async oauthProviders(): Promise<Provider[]> {
+    return ["google", "microsoft"];
+  },
+  async oauthLogin(provider: Provider): Promise<Account> {
+    await wait(1200);
+    const host = provider === "google" ? "imap.gmail.com" : "outlook.office365.com";
+    const acc: Account = { id: `voce@${host}`, host, port: 993, security: "tls", username: "voce@exemplo.com", auth: provider };
     accounts = [...accounts.filter((x) => x.id !== acc.id), acc];
     return acc;
   },

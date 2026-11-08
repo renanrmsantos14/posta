@@ -15,7 +15,7 @@ Depois de instalado, o Posta se atualiza sozinho: procura versão nova ao abrir 
 
 - `crates/mail-core`: sincroniza IMAP para um SQLite local (WAL + busca FTS5 sem acento). A UI só lê o banco local, por isso abre e busca na hora.
 - `apps/client`: interface React. Fora do Tauri (`pnpm dev` no navegador) usa dados de exemplo de `src/mock.ts`.
-- `apps/client/src-tauri`: comandos Tauri. Contas ficam em `accounts.json` na pasta de dados do app; senhas no cofre do sistema (crate `keyring`).
+- `apps/client/src-tauri`: comandos Tauri. Contas ficam em `accounts.json` na pasta de dados do app; senhas e refresh tokens OAuth no cofre do sistema (crate `keyring`).
 
 ## Comandos
 
@@ -44,11 +44,15 @@ A chave de assinatura fica em `~/.tauri/posta.key` (senha em `~/.tauri/posta.key
 
 SMTP com servidor e porta sugeridos pelo domínio (465 = TLS, outras = STARTTLS). Depois de clicar em Enviar há 4 s para desfazer; se o envio falhar, o rascunho volta intacto. Respostas levam `In-Reply-To`/`References`, a original ganha `\Answered` e uma cópia vai para Enviados (exceto Gmail, que já guarda sozinho; Outlook pode duplicar).
 
+## Entrar com Google e Microsoft
+
+"Adicionar conta" tem os botões **Entrar com Google** e **Entrar com Microsoft**: login no navegador do sistema (Authorization Code + PKCE, redirect em loopback), sem senha de app. O mesmo IMAP/SMTP, autenticado por XOAUTH2; o refresh token fica no cofre do sistema e o access token é renovado ao expirar. Os aplicativos OAuth precisam estar registrados e embutidos no build (`POSTA_GOOGLE_CLIENT_ID`, `POSTA_GOOGLE_CLIENT_SECRET`, `POSTA_MS_CLIENT_ID`); sem eles os botões ficam desabilitados. Passo a passo e secrets do release em [`docs/oauth.md`](docs/oauth.md). Contas antigas (senha) continuam iguais.
+
 ## Próximos passos
 
 1. ~~Responder, escrever e enviar (SMTP).~~ Feito.
 2. Arquivar e excluir; pastas além da caixa de entrada.
 3. IMAP IDLE para chegada instantânea, no lugar do intervalo de 60 s.
-4. OAuth: Microsoft Graph e Gmail API.
+4. ~~OAuth (Google e Microsoft).~~ Feito, sem Graph/Gmail API: IMAP/SMTP com XOAUTH2. Falta validar com contas reais (veja `docs/oauth.md`).
 5. Android: guardar a senha no Keystore (o `keyring` padrão não cobre Android) e sincronizar em segundo plano.
 6. Emails em HTML, exibidos em iframe isolado.

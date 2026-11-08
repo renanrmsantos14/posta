@@ -2,12 +2,12 @@
 
 use imap::types::Flag;
 use lettre::message::{header, Mailbox, Mailboxes};
-use lettre::transport::smtp::authentication::Credentials;
+use lettre::transport::smtp::authentication::{Credentials, Mechanism};
 use lettre::{Message, SmtpTransport, Transport};
 use serde::{Deserialize, Serialize};
 
 use crate::folders::{pick, Role};
-use crate::imap_sync::{connect, ImapAccount, ImapSession, Security};
+use crate::imap_sync::{connect, AuthMode, ImapAccount, ImapSession, Security};
 use crate::store::ReplyRef;
 use crate::{Error, Result};
 
@@ -68,10 +68,12 @@ fn transport(acc: &ImapAccount) -> Result<SmtpTransport> {
         Security::StartTls => SmtpTransport::starttls_relay(&s.host)?,
         Security::Plaintext => SmtpTransport::builder_dangerous(&s.host),
     };
-    Ok(builder
-        .port(s.port)
-        .credentials(Credentials::new(acc.username.clone(), acc.password.clone()))
-        .build())
+    let builder = builder.port(s.port).credentials(Credentials::new(acc.username.clone(), acc.password.clone()));
+    Ok(match acc.auth {
+        AuthMode::Password => builder,
+        _ => builder.authentication(vec![Mechanism::Xoauth2]),
+    }
+    .build())
 }
 
 /// O Gmail já guarda no Enviados o que passa pelo SMTP; copiar duplicaria.
@@ -129,6 +131,7 @@ mod tests {
             security: Security::Tls,
             username: "eu@exemplo.com".into(),
             smtp: None,
+            auth: AuthMode::Password,
             password: String::new(),
         }
     }

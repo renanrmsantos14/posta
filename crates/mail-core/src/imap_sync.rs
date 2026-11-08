@@ -7,6 +7,7 @@ use std::collections::HashSet;
 
 use imap_proto::NameAttribute;
 
+use crate::oauth::{Provider, XOauth2};
 use crate::folders::{archive_name, pick, Folder, Listed, Role};
 use crate::store::{NewMessage, Store};
 use crate::Result;
@@ -22,6 +23,35 @@ pub enum Security {
     Plaintext,
 }
 
+/// Como a conta se autentica. Contas salvas antes do OAuth não têm o campo: valem `Password`.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum AuthMode {
+    #[default]
+    Password,
+    Google,
+    Microsoft,
+}
+
+impl AuthMode {
+    pub fn provider(self) -> Option<Provider> {
+        match self {
+            AuthMode::Password => None,
+            AuthMode::Google => Some(Provider::Google),
+            AuthMode::Microsoft => Some(Provider::Microsoft),
+        }
+    }
+}
+
+impl From<Provider> for AuthMode {
+    fn from(p: Provider) -> Self {
+        match p {
+            Provider::Google => AuthMode::Google,
+            Provider::Microsoft => AuthMode::Microsoft,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImapAccount {
     pub id: String,
@@ -32,7 +62,10 @@ pub struct ImapAccount {
     /// Servidor de envio. Contas antigas sem ele usam o padrão do provedor.
     #[serde(default)]
     pub smtp: Option<SmtpServer>,
-    /// Nunca vai para disco nem para a UI: fica no cofre do sistema.
+    #[serde(default)]
+    pub auth: AuthMode,
+    /// Senha (modo `Password`) ou access token OAuth já renovado (demais modos).
+    /// Nunca vai para disco nem para a UI: senha e refresh token ficam no cofre do sistema.
     #[serde(skip_serializing, default)]
     pub password: String,
 }
@@ -76,7 +109,11 @@ pub(crate) fn connect(acc: &ImapAccount) -> Result<ImapSession> {
         Security::Plaintext => ConnectionMode::Plaintext,
     };
     let client = ClientBuilder::new(acc.host.as_str(), acc.port).mode(mode).connect()?;
-    client.login(&acc.username, &acc.password).map_err(|(e, _)| e.into())
+    match acc.auth {
+        AuthMode::Password => client.login(&acc.username, &acc.password),
+        _ => client.authenticate("XOAUTH2", &XOauth2::new(&acc.username, &acc.password)),
+    }
+    .map_err(|(e, _)| e.into())
 }
 
 fn parse(uid: u32, raw: &[u8], seen: bool, fallback_date: i64) -> NewMessage {

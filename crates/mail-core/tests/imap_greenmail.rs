@@ -21,6 +21,7 @@ fn account(tag: &str) -> Option<ImapAccount> {
         smtp: std::env::var("POSTA_SMTP_TEST").ok().and_then(|p| {
             Some(SmtpServer { host: host.into(), port: p.parse().ok()?, security: Security::Plaintext })
         }),
+        auth: mail_core::AuthMode::Password,
         password: user,
     })
 }

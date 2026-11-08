@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { mockApi } from "./mock";
 
 export type Security = "tls" | "starttls" | "plaintext";
+export type Provider = "google" | "microsoft";
 
 export interface SmtpServer {
   host: string;
@@ -17,6 +18,8 @@ export interface Account {
   security: Security;
   username: string;
   smtp?: SmtpServer | null;
+  /** Ausente em contas antigas = senha. */
+  auth?: "password" | Provider;
 }
 
 export interface NewAccount extends Omit<Account, "id"> {
@@ -73,6 +76,8 @@ export const api = isTauri
       listAccounts: () => invoke<Account[]>("list_accounts"),
       addAccount: (account: NewAccount) =>
         invoke<Account>("add_imap_account", { account: { ...account, id: "" } }),
+      oauthProviders: () => invoke<Provider[]>("oauth_providers"),
+      oauthLogin: (provider: Provider) => invoke<Account>("oauth_login", { provider }),
       folders: () => invoke<Role[]>("list_folders"),
       sync: () => invoke<SyncResult>("sync_inbox"),
       syncFolder: (role: Role, keep: number) => invoke<SyncResult>("sync_folder", { role, keep }),
