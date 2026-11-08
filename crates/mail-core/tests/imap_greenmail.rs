@@ -224,3 +224,16 @@ fn janela_baixa_so_as_mais_recentes() {
     // Ampliar a janela baixa só o que falta.
     assert_eq!(imap_sync::sync_mailbox(&acc, &mut store, "INBOX", Some(4)).unwrap().fetched, 2);
 }
+
+#[test]
+fn fetch_to_traz_o_primeiro_destinatario() {
+    let Some(eu) = account("eu") else { return };
+    let msg = "From: eu@exemplo.com\r\nTo: \"Ana Souza\" <ana@exemplo.com>, b@exemplo.com\r\n\
+               Subject: Enviada\r\n\r\ncorpo\r\n";
+    let mut s = session(&eu);
+    s.append("INBOX", msg.as_bytes()).finish().unwrap();
+    s.select("INBOX").unwrap();
+    let uid = *s.uid_search("ALL").unwrap().iter().next().unwrap();
+    assert_eq!(imap_sync::fetch_to(&eu, "INBOX", uid).unwrap().as_deref(), Some("ana@exemplo.com"));
+    assert_eq!(imap_sync::fetch_to(&eu, "INBOX", uid + 99).unwrap(), None);
+}

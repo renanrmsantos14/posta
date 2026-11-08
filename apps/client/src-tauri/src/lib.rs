@@ -340,31 +340,44 @@ async fn delete_forever(app: AppHandle, id: i64) -> CmdResult<()> {
 #[tauri::command]
 async fn open_message(app: AppHandle, id: i64) -> CmdResult<Option<MessageDetail>> {
     let st = app.state::<AppState>();
-    let detail = {
+    let (mut detail, loc) = {
         let store = st.store.lock().unwrap();
         let Some(mut d) = store.get(id).map_err(err)? else {
             return Ok(None);
         };
-        if d.summary.seen {
-            return Ok(Some(d));
+        let was_seen = d.summary.seen;
+        if !was_seen {
+            store.set_seen(id, true).map_err(err)?;
+            d.summary.seen = true;
         }
-        store.set_seen(id, true).map_err(err)?;
-        d.summary.seen = true;
-        let loc = store.reply_ref(id).map_err(err)?;
-        (d, loc)
+        (d, store.reply_ref(id).map_err(err)?.map(|l| (l, was_seen)))
     };
-    let (detail, loc) = detail;
-    let Some(loc) = loc else { return Ok(Some(detail)) };
+    let Some((loc, was_seen)) = loc else { return Ok(Some(detail)) };
     let (account, mailbox, uid) = (loc.account, loc.mailbox, loc.uid);
-    tauri::async_runtime::spawn_blocking(move || {
-        let st = app.state::<AppState>();
-        if let Err(e) = st
-            .account_with_password(&account)
-            .and_then(|a| imap_sync::set_seen(&a, &mailbox, uid, true).map_err(err))
-        {
-            eprintln!("marcar lida no servidor falhou ({account}/{uid}): {e}");
+    let acc = st.account_with_password(&account);
+    // Mensagem enviada por mim, baixada antes da correção: busca o destinatário real.
+    let own = acc.as_ref().ok().filter(|a| detail.reply_addr.eq_ignore_ascii_case(&a.username)).cloned();
+    if let Some(own) = own {
+        let mailbox = mailbox.clone();
+        let to = tauri::async_runtime::spawn_blocking(move || imap_sync::fetch_to(&own, &mailbox, uid))
+            .await
+            .map_err(err)?;
+        match to {
+            Ok(Some(to)) => {
+                st.store.lock().unwrap().set_reply_addr(id, &to).map_err(err)?;
+                detail.reply_addr = to;
+            }
+            Ok(None) => {}
+            Err(e) => eprintln!("buscar destinatário falhou ({account}/{uid}): {e}"),
         }
-    });
+    }
+    if !was_seen {
+        tauri::async_runtime::spawn_blocking(move || {
+            if let Err(e) = acc.and_then(|a| imap_sync::set_seen(&a, &mailbox, uid, true).map_err(err)) {
+                eprintln!("marcar lida no servidor falhou ({account}/{uid}): {e}");
+            }
+        });
+    }
     Ok(Some(detail))
 }
 
