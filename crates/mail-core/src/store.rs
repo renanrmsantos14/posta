@@ -342,6 +342,11 @@ impl Store {
             .optional()?)
     }
 
+    pub fn set_reply_addr(&self, id: i64, addr: &str) -> Result<()> {
+        self.conn.execute("UPDATE messages SET reply_addr = ?1 WHERE id = ?2", params![addr, id])?;
+        Ok(())
+    }
+
     pub fn set_folders(&mut self, account: &str, folders: &[Folder]) -> Result<()> {
         let tx = self.conn.transaction()?;
         tx.execute("DELETE FROM folders WHERE account = ?1", params![account])?;
@@ -489,6 +494,15 @@ mod tests {
         assert_eq!((r.uid, r.message_id.as_str()), (7, "7@exemplo.com"));
         assert_eq!(s.get(id).unwrap().unwrap().reply_addr, "ana@exemplo.com");
         assert!(s.reply_ref(999).unwrap().is_none());
+    }
+
+    #[test]
+    fn set_reply_addr_corrige_o_destinatario() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.insert_messages("a", "INBOX", &[msg(7, "x", "", 1)]).unwrap();
+        let id = s.list("INBOX", 1, 0).unwrap()[0].id;
+        s.set_reply_addr(id, "bia@exemplo.com").unwrap();
+        assert_eq!(s.get(id).unwrap().unwrap().reply_addr, "bia@exemplo.com");
     }
 
     fn folders_a() -> Vec<Folder> {

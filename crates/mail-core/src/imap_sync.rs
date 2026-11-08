@@ -116,7 +116,7 @@ pub(crate) fn connect(acc: &ImapAccount) -> Result<ImapSession> {
     .map_err(|(e, _)| e.into())
 }
 
-fn parse(uid: u32, raw: &[u8], seen: bool, fallback_date: i64) -> NewMessage {
+fn parse(uid: u32, raw: &[u8], seen: bool, fallback_date: i64, own_addr: &str) -> NewMessage {
     let msg = MessageParser::default().parse(raw);
     let from = msg.as_ref().and_then(|m| m.from()).and_then(|f| f.first());
     let from_addr = from.and_then(|f| f.address()).unwrap_or_default().to_string();
@@ -127,6 +127,12 @@ fn parse(uid: u32, raw: &[u8], seen: bool, fallback_date: i64) -> NewMessage {
         .and_then(|r| r.address())
         .map(str::to_string)
         .unwrap_or_else(|| from_addr.clone());
+    // Mensagem enviada por mim: responder vai para o destinatário, não para mim.
+    let reply_addr = if from_addr.eq_ignore_ascii_case(own_addr) {
+        msg.as_ref().and_then(first_to).unwrap_or(reply_addr)
+    } else {
+        reply_addr
+    };
     NewMessage {
         uid,
         from_name: from.and_then(|f| f.name()).unwrap_or_default().to_string(),
@@ -162,6 +168,10 @@ fn parse(uid: u32, raw: &[u8], seen: bool, fallback_date: i64) -> NewMessage {
             .unwrap_or_default(),
         reply_addr,
     }
+}
+
+fn first_to(msg: &mail_parser::Message) -> Option<String> {
+    msg.to()?.first()?.address().map(str::to_string)
 }
 
 fn is_seen(fetch: &imap::types::Fetch) -> bool {
@@ -202,7 +212,7 @@ pub fn sync_mailbox(acc: &ImapAccount, store: &mut Store, mailbox: &str, keep: O
             .iter()
             .filter_map(|f| {
                 let date = f.internal_date().map(|d| d.timestamp()).unwrap_or(0);
-                Some(parse(f.uid?, f.body()?, is_seen(f), date))
+                Some(parse(f.uid?, f.body()?, is_seen(f), date, &acc.username))
             })
             .collect();
         report.fetched += msgs.len();
@@ -298,6 +308,19 @@ pub fn set_seen(acc: &ImapAccount, mailbox: &str, uid: u32, seen: bool) -> Resul
     Ok(())
 }
 
+/// Primeiro endereço do cabeçalho To de uma mensagem, buscado só pelo cabeçalho.
+pub fn fetch_to(acc: &ImapAccount, mailbox: &str, uid: u32) -> Result<Option<String>> {
+    let mut session = connect(acc)?;
+    session.select(mailbox)?;
+    let fetches = session.uid_fetch(uid.to_string(), "BODY.PEEK[HEADER.FIELDS (TO)]")?;
+    let to = fetches.iter().find_map(|f| f.header()).and_then(|h| {
+        let msg = MessageParser::default().parse(h)?;
+        first_to(&msg)
+    });
+    session.logout().ok();
+    Ok(to)
+}
+
 /// Testa as credenciais sem sincronizar nada.
 pub fn check_login(acc: &ImapAccount) -> Result<()> {
     connect(acc)?.logout().ok();
@@ -314,7 +337,7 @@ mod tests {
 Content-Type: multipart/alternative; boundary=\"b\"\r\n\r\n\
 --b\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nol\xc3\xa1 texto\r\n\
 --b\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<p>ol\xc3\xa1 <b>html</b></p>\r\n--b--\r\n";
-        let m = parse(1, raw, false, 0);
+        let m = parse(1, raw, false, 0, "");
         assert_eq!(m.body_text.trim(), "olá texto");
         assert!(m.body_html.contains("<b>html</b>"), "{}", m.body_html);
     }
@@ -322,7 +345,7 @@ Content-Type: multipart/alternative; boundary=\"b\"\r\n\r\n\
     #[test]
     fn so_html_ainda_gera_texto_para_busca() {
         let raw = b"From: a@b.c\r\nSubject: x\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<p>so html</p>\r\n";
-        let m = parse(1, raw, false, 0);
+        let m = parse(1, raw, false, 0, "");
         assert!(m.body_html.contains("<p>so html</p>"));
         assert!(m.body_text.contains("so html"));
     }
@@ -330,8 +353,24 @@ Content-Type: multipart/alternative; boundary=\"b\"\r\n\r\n\
     #[test]
     fn so_texto_nao_vira_html() {
         let raw = b"From: a@b.c\r\nSubject: x\r\nContent-Type: text/plain\r\n\r\nsimples\r\n";
-        let m = parse(1, raw, false, 0);
+        let m = parse(1, raw, false, 0, "");
         assert_eq!(m.body_html, "");
         assert_eq!(m.body_text.trim(), "simples");
+    }
+
+    fn raw(from: &str, to: &str) -> Vec<u8> {
+        format!("From: {from}\r\nTo: {to}\r\nSubject: x\r\n\r\ncorpo\r\n").into_bytes()
+    }
+
+    #[test]
+    fn enviada_por_mim_responde_ao_destinatario() {
+        let m = parse(1, &raw("Eu@Exemplo.com", "Ana <ana@exemplo.com>, b@exemplo.com"), true, 0, "eu@exemplo.com");
+        assert_eq!(m.reply_addr, "ana@exemplo.com");
+    }
+
+    #[test]
+    fn recebida_responde_ao_remetente() {
+        let m = parse(1, &raw("ana@exemplo.com", "eu@exemplo.com"), true, 0, "eu@exemplo.com");
+        assert_eq!(m.reply_addr, "ana@exemplo.com");
     }
 }
