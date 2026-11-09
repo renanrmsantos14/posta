@@ -6,6 +6,7 @@ pub mod imap_sync;
 pub mod oauth;
 pub mod send;
 pub mod store;
+pub mod threads;
 
 pub use attachments::Attachment;
 pub use folders::{Folder, Role};

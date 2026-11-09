@@ -41,6 +41,10 @@ export interface MessageSummary {
   flagged: boolean;
   /** Papel da pasta onde a mensagem está. */
   role: Role | null;
+  /** Fio (conversa) da conta; 0 = sem fio. */
+  thread_id: number;
+  /** Mensagens do fio, em qualquer pasta. */
+  thread_count: number;
 }
 
 export interface Attachment {
@@ -98,7 +102,7 @@ export interface StoredDraft {
   updated: number;
 }
 
-/** Configurações: `signature:<id da conta>` e `notify` ("0" desliga as notificações). */
+/** Configurações: `signature:<id da conta>`, `notify` ("0" desliga as notificações) e `group` ("0" desliga o agrupamento por conversa). */
 export type Settings = Record<string, string>;
 
 export interface SendReport {
@@ -107,8 +111,8 @@ export interface SendReport {
 }
 
 export type Role = "inbox" | "sent" | "archive" | "trash" | "junk";
-/** O que a barra lateral mostra: pastas reais e a pasta virtual "Com estrela". */
-export type View = Role | "starred";
+/** O que a barra lateral mostra: pastas reais e as virtuais "Com estrela" e "Todas as caixas" (Entrada de todas as contas). */
+export type View = Role | "starred" | "all";
 /** Não lidas por pasta. */
 export type UnreadCounts = Partial<Record<Role, number>>;
 
@@ -135,11 +139,12 @@ export const api = isTauri
       list: (view: View, limit: number, offset: number) =>
         view === "starred"
           ? invoke<MessageSummary[]>("list_starred", { limit, offset })
-          : invoke<MessageSummary[]>("list_messages", { role: view, limit, offset }),
+          : invoke<MessageSummary[]>("list_messages", { role: view === "all" ? "inbox" : view, limit, offset }),
       search: (query: string, view: View) =>
         view === "starred"
           ? invoke<MessageSummary[]>("search_starred", { query })
-          : invoke<MessageSummary[]>("search_messages", { query, role: view }),
+          : invoke<MessageSummary[]>("search_messages", { query, role: view === "all" ? "inbox" : view }),
+      thread: (id: number) => invoke<MessageSummary[]>("thread_messages", { id }),
       move: (id: number, role: Role) => invoke<void>("move_message", { id, role }),
       moveMany: (ids: number[], role: Role) => invoke<void>("move_messages", { ids, role }),
       deleteForever: (id: number) => invoke<void>("delete_forever", { id }),

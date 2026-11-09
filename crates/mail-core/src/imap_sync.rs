@@ -193,10 +193,18 @@ fn parse(uid: u32, raw: &[u8], seen: bool, flagged: bool, fallback_date: i64, ow
         seen,
         flagged,
         message_id: msg.as_ref().and_then(|m| m.message_id()).unwrap_or_default().to_string(),
+        // References, mais In-Reply-To quando o cliente de origem só mandou ele (serve ao agrupamento em conversas).
         refs: msg
             .as_ref()
-            .and_then(|m| m.references())
-            .map(|r| r.iter().collect::<Vec<_>>().join(" "))
+            .map(|m| {
+                let mut ids: Vec<&str> = m.references().map(|r| r.iter().collect()).unwrap_or_default();
+                for id in m.in_reply_to().map(|r| r.iter().collect::<Vec<_>>()).unwrap_or_default() {
+                    if !ids.contains(&id) {
+                        ids.push(id);
+                    }
+                }
+                ids.join(" ")
+            })
             .unwrap_or_default(),
         reply_addr,
         to_addrs: msg.as_ref().map(|m| addresses(m.to())).unwrap_or_default(),
