@@ -450,3 +450,64 @@ fn hub_reconecta_quando_a_conexao_cai() {
     assert!(t.elapsed() < std::time::Duration::from_secs(5));
     drop(srv);
 }
+
+#[test]
+fn operacoes_concorrentes_dividem_a_mesma_sessao_sem_se_misturar() {
+    let (acc, srv, count) = start("IDLE CONDSTORE ENABLE");
+    srv.lock().unwrap().add(0);
+    srv.lock().unwrap().add(0);
+    let mut store = Store::open_in_memory().unwrap();
+    let hub = Hub::new();
+    hub.with(&acc, Kind::Cmd, |l| imap_sync::sync_on(l, &acc, &mut store, "INBOX", None)).unwrap();
+    std::thread::scope(|sc| {
+        for i in 0..6u32 {
+            let (hub, acc) = (&hub, &acc);
+            sc.spawn(move || {
+                for _ in 0..5 {
+                    if i % 2 == 0 {
+                        let raw = hub.with(acc, Kind::Cmd, |l| imap_sync::fetch_raw_on(l, "INBOX", 1)).unwrap();
+                        assert!(raw.is_some_and(|r| !r.is_empty()));
+                    } else {
+                        hub.with(acc, Kind::Cmd, |l| imap_sync::set_flag_on(l, "INBOX", &[2], imap_sync::MsgFlag::Seen, true)).unwrap();
+                    }
+                }
+            });
+        }
+    });
+    // Tudo passou pela mesma conexão: nenhuma segunda sessão foi aberta.
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+    let log = cmds(&srv);
+    assert!(log.iter().any(|c| c.starts_with("UID STORE 2 +FLAGS.SILENT (\\Seen)")), "{log:?}");
+}
+
+#[test]
+fn corpo_sob_demanda_sem_rede_da_erro_de_rede_e_nao_marca_como_carregado() {
+    let (acc, srv, _) = start("IDLE");
+    srv.lock().unwrap().add(600);
+    let mut store = Store::open_in_memory().unwrap();
+    let hub = Hub::new();
+    let r = hub.with(&acc, Kind::Cmd, |l| imap_sync::sync_on(l, &acc, &mut store, "INBOX", None)).unwrap();
+    let id = r.delta.inserted[0];
+    assert!(!store.get(id).unwrap().unwrap().body_loaded);
+
+    let off = ImapAccount { port: 1, ..acc.clone() };
+    let hub2 = Hub::new();
+    let e = imap_sync::load_body(&hub2, &off, &mut store, id).unwrap_err();
+    assert!(e.is_network(), "{e}");
+    // Continua sem corpo (a UI mostra o erro, não uma tela vazia) e volta a funcionar com rede.
+    assert!(!store.get(id).unwrap().unwrap().body_loaded);
+    assert!(imap_sync::load_body(&hub, &acc, &mut store, id).unwrap());
+    assert!(store.get(id).unwrap().unwrap().body_loaded);
+}
+
+#[test]
+fn fila_offline_aplica_pela_sessao_do_hub() {
+    use mail_core::outbox::{self, OpKind};
+    let (acc, srv, count) = start("IDLE");
+    srv.lock().unwrap().add(0);
+    let hub = Hub::new();
+    outbox::apply_op_via(&hub, &acc, "INBOX", &[1], OpKind::Seen, "").unwrap();
+    outbox::apply_op_via(&hub, &acc, "INBOX", &[1], OpKind::Seen, "").unwrap();
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+    assert!(cmds(&srv).iter().any(|c| c.starts_with("UID STORE 1")));
+}

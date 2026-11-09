@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::imap_sync::{self, ImapAccount, MsgFlag};
 use crate::send::{self, Outgoing};
 use crate::store::{ReplyRef, Store};
+use crate::session::{Hub, Kind, Live};
 use crate::{Error, Result};
 
 /// O que a ação faz no servidor.
@@ -186,11 +187,21 @@ impl Store {
 
 /// Aplica no servidor uma ação sobre UIDs da mesma pasta.
 pub fn apply_op(acc: &ImapAccount, mailbox: &str, uids: &[u32], kind: OpKind, arg: &str) -> Result<()> {
+    Live::once(acc, |l| apply_op_on(l, mailbox, uids, kind, arg))
+}
+
+/// `apply_op` numa sessão já aberta.
+pub fn apply_op_on(live: &mut Live, mailbox: &str, uids: &[u32], kind: OpKind, arg: &str) -> Result<()> {
     match kind.flag() {
-        Some((flag, on)) => imap_sync::set_flag(acc, mailbox, uids, flag, on),
-        None if kind == OpKind::Move => imap_sync::move_messages(acc, mailbox, uids, arg),
-        None => imap_sync::delete_forever_many(acc, mailbox, uids),
+        Some((flag, on)) => imap_sync::set_flag_on(live, mailbox, uids, flag, on),
+        None if kind == OpKind::Move => imap_sync::move_messages_on(live, mailbox, uids, arg),
+        None => imap_sync::delete_forever_on(live, mailbox, uids),
     }
+}
+
+/// `apply_op` pela sessão persistente da conta (reconecta se a conexão caiu).
+pub fn apply_op_via(hub: &Hub, acc: &ImapAccount, mailbox: &str, uids: &[u32], kind: OpKind, arg: &str) -> Result<()> {
+    hub.with(acc, Kind::Cmd, |l| apply_op_on(l, mailbox, uids, kind, arg))
 }
 
 /// Reaplica a fila no servidor: primeiro as ações, depois os envios, cada um na ordem em que foi feito.
@@ -198,6 +209,11 @@ pub fn apply_op(acc: &ImapAccount, mailbox: &str, uids: &[u32], kind: OpKind, ar
 /// `Err` = não deu para obter as credenciais agora (a fila dela espera).
 /// Falha de rede interrompe tudo e preserva o resto; recusa do servidor descarta só o item afetado.
 pub fn flush(store: &Store, resolve: &mut dyn FnMut(&str) -> Result<Option<ImapAccount>>) -> Result<FlushReport> {
+    flush_via(&Hub::new(), store, resolve)
+}
+
+/// `flush` usando as sessões persistentes do `hub` para as ações no servidor.
+pub fn flush_via(hub: &Hub, store: &Store, resolve: &mut dyn FnMut(&str) -> Result<Option<ImapAccount>>) -> Result<FlushReport> {
     let mut report = FlushReport::default();
     let mut blocked: Vec<String> = Vec::new();
 
@@ -229,7 +245,7 @@ pub fn flush(store: &Store, resolve: &mut dyn FnMut(&str) -> Result<Option<ImapA
             }
         };
         let uids: Vec<u32> = group.iter().map(|o| o.uid).collect();
-        match apply_op(&acc, &first.mailbox, &uids, first.kind, &first.arg) {
+        match apply_op_via(hub, &acc, &first.mailbox, &uids, first.kind, &first.arg) {
             Ok(()) => {
                 store.drop_ops(&ids)?;
                 report.applied += n;

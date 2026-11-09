@@ -170,7 +170,7 @@ const FTS_CREATE: &str = "CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING 
   subject, from_name, from_addr, body_text,
   content = 'messages', content_rowid = 'id',
   tokenize = 'unicode61 remove_diacritics 2',
-  prefix = '2 3'
+  prefix = '2'
 );";
 
 /// Revisão das colunas/índices/tabelas adicionadas sem recriar o banco (guardada em `application_id`).
@@ -2291,6 +2291,43 @@ mod tests {
         // Janela: só mexe de `lo` para cima.
         let d = s.apply_server_state_from("a", "INBOX", 3, &[]).unwrap();
         assert_eq!((d.removed, s.local_uids("a", "INBOX").unwrap()), (vec![ids[2]], vec![1]));
+    }
+
+    #[test]
+    fn migracao_de_banco_grande_do_master_termina_rapido_e_fica_consistente() {
+        // 30 mil mensagens no schema do master, com respostas encadeadas e corpos: o backfill (fios, FTS,
+        // contatos, referências) roda uma vez, em poucos segundos, e a segunda abertura não refaz nada.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(MASTER).unwrap();
+        conn.execute_batch(
+            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 30000)
+             INSERT INTO messages (account, mailbox, uid, from_name, from_addr, subject, date, message_id, refs, to_addrs, cc_addrs, seen, body_text)
+             SELECT 'a', 'INBOX', i, 'Pessoa ' || (i % 200), 'p' || (i % 200) || '@ex.com',
+                    CASE WHEN i % 3 = 0 THEN 'Re: Assunto ' || (i % 500) ELSE 'Assunto ' || (i % 500) END,
+                    1000000 + i, 'm' || i, CASE WHEN i % 5 = 0 THEN 'm' || (i - 1) ELSE '' END,
+                    'eu@ex.com', 'c' || (i % 50) || '@ex.com', i % 4 = 0, 'texto do corpo ' || i || ' translado'
+             FROM n;",
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", SCHEMA_VERSION).unwrap();
+
+        let t = std::time::Instant::now();
+        let s = Store::init(conn).unwrap();
+        let took = t.elapsed();
+        assert!(took < std::time::Duration::from_secs(60), "backfill lento: {took:?}");
+        let total: i64 = s.conn.query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0)).unwrap();
+        assert_eq!(total, 30000);
+        assert_eq!(s.search("translado", 10).unwrap().len(), 10, "FTS cobre as mensagens antigas");
+        assert!(!s.suggest_contacts("p12", 5).unwrap().is_empty());
+        let zero_threads: i64 = s.conn.query_row("SELECT COUNT(*) FROM messages WHERE thread_id = 0", [], |r| r.get(0)).unwrap();
+        assert_eq!(zero_threads, 0, "todo mundo tem fio depois do backfill");
+        let before = thread_ids(&s, "a");
+        s.rebuild_threads("a").unwrap();
+        assert_eq!(before, thread_ids(&s, "a"), "fios do backfill = recálculo completo");
+        let t = std::time::Instant::now();
+        let again = Store::init(s.conn).unwrap();
+        assert!(t.elapsed() < std::time::Duration::from_millis(500), "reabrir não pode refazer o backfill");
+        assert_eq!(again.list("INBOX", 5, 0).unwrap().len(), 5);
     }
 
     #[test]

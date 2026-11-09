@@ -125,6 +125,8 @@ impl AppState {
         all.retain(|a| a.id != account.id);
         all.push(account.clone());
         self.save_accounts(&all)?;
+        // Senha ou servidor podem ter mudado: a sessão guardada não vale mais.
+        self.hub.drop_account(&account.id);
         if let Ok(f) = imap_sync::discover_folders(account) {
             self.store.lock().unwrap().set_folders(&account.id, &f).ok();
         }
@@ -191,7 +193,7 @@ fn flush_pending(st: &AppState) -> FlushReport {
     let Ok(_guard) = st.flushing.try_lock() else { return FlushReport::default() };
     let Ok(store) = Store::open(st.db_path()) else { return FlushReport::default() };
     let accounts = st.accounts().unwrap_or_default();
-    outbox::flush(&store, &mut |id| {
+    outbox::flush_via(&st.hub, &store, &mut |id| {
         if accounts.iter().any(|a| a.id == id) {
             st.account_with_password(id).map(Some).map_err(mail_core::Error::Invalid)
         } else {
@@ -211,7 +213,7 @@ fn run_op(st: &AppState, account: &str, mailbox: &str, uids: &[u32], kind: OpKin
     if pending()? == 0 {
         let done = st
             .account_with_password(account)
-            .and_then(|a| outbox::apply_op(&a, mailbox, uids, kind, arg).map_err(err));
+            .and_then(|a| outbox::apply_op_via(&st.hub, &a, mailbox, uids, kind, arg).map_err(err));
         match done {
             Ok(()) => return Ok(true),
             Err(e) if reachable(st, account) => return Err(e),
@@ -729,15 +731,40 @@ async fn delete_forever(app: AppHandle, id: i64) -> CmdResult<()> {
     .await
 }
 
+/// Baixa o corpo de uma mensagem que está só com cabeçalho no cache e devolve o detalhe completo.
+async fn load_body_now(app: &AppHandle, id: i64) -> CmdResult<MessageDetail> {
+    let handle = app.clone();
+    let done = tauri::async_runtime::spawn_blocking(move || -> CmdResult<Option<MessageDetail>> {
+        let st = handle.state::<AppState>();
+        let loc = st.locate(id)?;
+        let acc = st.account_with_password(&loc.account)?;
+        let mut store = Store::open(st.db_path()).map_err(err)?;
+        match imap_sync::load_body(&st.hub, &acc, &mut store, id) {
+            Ok(_) => st.store.lock().unwrap().get(id).map_err(err),
+            Err(_) if !reachable(&st, &loc.account) => Err("Sem conexão: o corpo desta mensagem ainda não foi baixado.".to_string()),
+            Err(e) => Err(format!("Não consegui baixar o corpo da mensagem: {e}")),
+        }
+    })
+    .await
+    .map_err(err)??;
+    match done {
+        Some(d) if d.body_loaded => Ok(d),
+        _ => Err("A mensagem não está mais no servidor e o corpo não foi baixado.".to_string()),
+    }
+}
+
 /// Abre a mensagem e, se estava não lida, marca como lida aqui e no servidor.
 #[tauri::command]
 async fn open_message(app: AppHandle, id: i64) -> CmdResult<Option<MessageDetail>> {
     let st = app.state::<AppState>();
+    let cached = st.store.lock().unwrap().get(id).map_err(err)?;
+    let Some(cached) = cached else { return Ok(None) };
+    // Só cabeçalho no cache: baixa o corpo agora, pela sessão persistente. Sem corpo e sem como baixar,
+    // o erro é explícito (a mensagem continua não lida) em vez de abrir uma tela vazia.
+    let cached = if cached.body_loaded { cached } else { load_body_now(&app, id).await? };
     let (mut detail, loc) = {
         let store = st.store.lock().unwrap();
-        let Some(mut d) = store.get(id).map_err(err)? else {
-            return Ok(None);
-        };
+        let mut d = cached;
         let was_seen = d.summary.seen;
         if !was_seen {
             store.set_seen(id, true).map_err(err)?;
@@ -747,38 +774,18 @@ async fn open_message(app: AppHandle, id: i64) -> CmdResult<Option<MessageDetail
     };
     let Some((loc, was_seen)) = loc else { return Ok(Some(detail)) };
     let (account, mailbox, uid) = (loc.account, loc.mailbox, loc.uid);
-    // Só cabeçalho no cache: baixa o corpo agora (pela sessão persistente). Sem rede, abre com a prévia.
-    if !detail.body_loaded {
-        let loader = app.clone();
-        let acct = account.clone();
-        let loaded = tauri::async_runtime::spawn_blocking(move || -> CmdResult<Option<MessageDetail>> {
-            let st = loader.state::<AppState>();
-            let acc = st.account_with_password(&acct)?;
-            let mut store = Store::open(st.db_path()).map_err(err)?;
-            if imap_sync::load_body(&st.hub, &acc, &mut store, id).map_err(err)? {
-                return st.store.lock().unwrap().get(id).map_err(err);
-            }
-            Ok(None)
-        })
-        .await
-        .map_err(err)?;
-        match loaded {
-            Ok(Some(mut d)) => {
-                d.summary.seen = true;
-                detail = d;
-            }
-            Ok(None) => {}
-            Err(e) => eprintln!("corpo sob demanda falhou ({account}/{uid}): {e}"),
-        }
-    }
     let handle = app.clone();
     let acc = st.account_with_password(&account);
     // Mensagem enviada por mim, baixada antes da correção: busca o destinatário real.
     let own = acc.as_ref().ok().filter(|a| detail.reply_addr.eq_ignore_ascii_case(&a.username)).cloned();
     if let Some(own) = own {
         let mailbox = mailbox.clone();
-        let to = tauri::async_runtime::spawn_blocking(move || imap_sync::fetch_to(&own, &mailbox, uid))
-            .await
+        let loader = app.clone();
+        let to = tauri::async_runtime::spawn_blocking(move || {
+            let hub = &loader.state::<AppState>().hub;
+            hub.with(&own, Kind::Cmd, |l| imap_sync::fetch_to_on(l, &mailbox, uid))
+        })
+        .await
             .map_err(err)?;
         match to {
             Ok(Some(to)) => {
@@ -824,7 +831,7 @@ fn fetch_raw_online(st: &AppState, id: i64) -> CmdResult<Vec<u8>> {
     let loc = st.locate(id)?;
     let fetched = st
         .account_with_password(&loc.account)
-        .and_then(|a| imap_sync::fetch_raw(&a, &loc.mailbox, loc.uid).map_err(err));
+        .and_then(|a| st.hub.with(&a, Kind::Cmd, |l| imap_sync::fetch_raw_on(l, &loc.mailbox, loc.uid)).map_err(err));
     match fetched {
         Ok(raw) => raw.ok_or_else(|| "mensagem não encontrada no servidor".to_string()),
         Err(_) if !reachable(st, &loc.account) => Err("Sem conexão: o anexo ainda não foi baixado.".to_string()),
@@ -867,7 +874,9 @@ async fn save_eml(app: AppHandle, id: i64) -> CmdResult<String> {
         let subject = st.store.lock().unwrap().get(id).map_err(err)?.map(|d| d.summary.subject).unwrap_or_default();
         let loc = st.locate(id)?;
         let acc = st.account_with_password(&loc.account)?;
-        let raw = imap_sync::fetch_raw(&acc, &loc.mailbox, loc.uid)
+        let raw = st
+            .hub
+            .with(&acc, Kind::Cmd, |l| imap_sync::fetch_raw_on(l, &loc.mailbox, loc.uid))
             .map_err(err)?
             .ok_or_else(|| "mensagem não encontrada no servidor".to_string())?;
         let title: String = subject.trim().chars().take(80).collect();
@@ -942,6 +951,7 @@ async fn remove_account(app: AppHandle, id: String) -> CmdResult<()> {
         accounts.retain(|a| a.id != id);
         st.save_accounts(&accounts)?;
         st.tokens.lock().unwrap().remove(&id);
+        st.hub.drop_account(&id);
         st.store.lock().unwrap().remove_account(&id).map_err(err)
     })
     .await
@@ -1287,7 +1297,7 @@ fn auto_reply(st: &AppState, acc: &ImapAccount, new: &[Candidate]) {
         if st.store.lock().unwrap().vacation_replied(&acc.id, addr, since).unwrap_or(true) {
             continue;
         }
-        let Ok(Some(raw)) = imap_sync::fetch_raw(acc, "INBOX", c.uid) else { continue };
+        let Ok(Some(raw)) = st.hub.with(acc, Kind::Cmd, |l| imap_sync::fetch_raw_on(l, "INBOX", c.uid)) else { continue };
         if vacation::is_automatic(&raw) {
             continue;
         }

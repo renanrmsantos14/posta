@@ -631,23 +631,24 @@ fn uid_set(uids: &[u32]) -> String {
 
 /// Move vários UIDs da mesma pasta numa só conexão.
 pub fn move_messages(acc: &ImapAccount, from: &str, uids: &[u32], to: &str) -> Result<()> {
+    Live::once(acc, |l| move_messages_on(l, from, uids, to))
+}
+
+/// `move_messages` numa sessão já aberta.
+pub fn move_messages_on(live: &mut Live, from: &str, uids: &[u32], to: &str) -> Result<()> {
     if uids.is_empty() {
         return Ok(());
     }
-    let mut session = connect(acc)?;
-    let caps = session.capabilities()?;
-    let (has_move, uidplus) = (caps.has_str("MOVE"), caps.has_str("UIDPLUS"));
-    drop(caps);
-    session.select(from)?;
+    let (has_move, uidplus) = (live.has_move, live.uidplus);
+    live.s.select(from)?;
     let set = uid_set(uids);
     if has_move {
-        session.uid_mv(&set, to)?;
+        live.s.uid_mv(&set, to)?;
     } else {
-        session.uid_copy(&set, to)?;
-        session.uid_store(&set, "+FLAGS.SILENT (\\Deleted)")?;
-        if uidplus { session.uid_expunge(&set)?; } else { session.expunge()?; }
+        live.s.uid_copy(&set, to)?;
+        live.s.uid_store(&set, "+FLAGS.SILENT (\\Deleted)")?;
+        if uidplus { live.s.uid_expunge(&set)?; } else { live.s.expunge()?; }
     }
-    session.logout().ok();
     Ok(())
 }
 
@@ -657,16 +658,19 @@ pub fn delete_forever(acc: &ImapAccount, mailbox: &str, uid: u32) -> Result<()> 
 }
 
 pub fn delete_forever_many(acc: &ImapAccount, mailbox: &str, uids: &[u32]) -> Result<()> {
+    Live::once(acc, |l| delete_forever_on(l, mailbox, uids))
+}
+
+/// `delete_forever_many` numa sessão já aberta.
+pub fn delete_forever_on(live: &mut Live, mailbox: &str, uids: &[u32]) -> Result<()> {
     if uids.is_empty() {
         return Ok(());
     }
-    let mut session = connect(acc)?;
-    let uidplus = session.capabilities()?.has_str("UIDPLUS");
-    session.select(mailbox)?;
+    let uidplus = live.uidplus;
+    live.s.select(mailbox)?;
     let set = uid_set(uids);
-    session.uid_store(&set, "+FLAGS.SILENT (\\Deleted)")?;
-    if uidplus { session.uid_expunge(&set)?; } else { session.expunge()?; }
-    session.logout().ok();
+    live.s.uid_store(&set, "+FLAGS.SILENT (\\Deleted)")?;
+    if uidplus { live.s.uid_expunge(&set)?; } else { live.s.expunge()?; }
     Ok(())
 }
 
@@ -681,6 +685,11 @@ pub enum MsgFlag {
 
 /// Liga/desliga a flag em vários UIDs da mesma pasta. A UI já atualizou o banco local antes ou depois.
 pub fn set_flag(acc: &ImapAccount, mailbox: &str, uids: &[u32], flag: MsgFlag, on: bool) -> Result<()> {
+    Live::once(acc, |l| set_flag_on(l, mailbox, uids, flag, on))
+}
+
+/// `set_flag` numa sessão já aberta.
+pub fn set_flag_on(live: &mut Live, mailbox: &str, uids: &[u32], flag: MsgFlag, on: bool) -> Result<()> {
     if uids.is_empty() {
         return Ok(());
     }
@@ -688,10 +697,8 @@ pub fn set_flag(acc: &ImapAccount, mailbox: &str, uids: &[u32], flag: MsgFlag, o
         MsgFlag::Seen => "\\Seen",
         MsgFlag::Flagged => "\\Flagged",
     };
-    let mut session = connect(acc)?;
-    session.select(mailbox)?;
-    session.uid_store(uid_set(uids), format!("{}FLAGS.SILENT ({name})", if on { "+" } else { "-" }))?;
-    session.logout().ok();
+    live.s.select(mailbox)?;
+    live.s.uid_store(uid_set(uids), format!("{}FLAGS.SILENT ({name})", if on { "+" } else { "-" }))?;
     Ok(())
 }
 
@@ -702,28 +709,32 @@ pub fn set_seen(acc: &ImapAccount, mailbox: &str, uid: u32, seen: bool) -> Resul
 
 /// Primeiro endereço do cabeçalho To de uma mensagem, buscado só pelo cabeçalho.
 pub fn fetch_to(acc: &ImapAccount, mailbox: &str, uid: u32) -> Result<Option<String>> {
-    let mut session = connect(acc)?;
-    session.select(mailbox)?;
-    let fetches = session.uid_fetch(uid.to_string(), "BODY.PEEK[HEADER.FIELDS (TO)]")?;
-    let to = fetches.iter().find_map(|f| f.header()).and_then(|h| {
+    Live::once(acc, |l| fetch_to_on(l, mailbox, uid))
+}
+
+/// `fetch_to` numa sessão já aberta.
+pub fn fetch_to_on(live: &mut Live, mailbox: &str, uid: u32) -> Result<Option<String>> {
+    live.s.select(mailbox)?;
+    let fetches = live.s.uid_fetch(uid.to_string(), "BODY.PEEK[HEADER.FIELDS (TO)]")?;
+    Ok(fetches.iter().find_map(|f| f.header()).and_then(|h| {
         let msg = MessageParser::default().parse(h)?;
         first_to(&msg)
-    });
-    session.logout().ok();
-    Ok(to)
+    }))
+}
+
+/// Mensagem completa (para extrair um anexo sob demanda).
+pub fn fetch_raw(acc: &ImapAccount, mailbox: &str, uid: u32) -> Result<Option<Vec<u8>>> {
+    Live::once(acc, |l| fetch_raw_on(l, mailbox, uid))
+}
+
+/// `fetch_raw` numa sessão já aberta.
+pub fn fetch_raw_on(live: &mut Live, mailbox: &str, uid: u32) -> Result<Option<Vec<u8>>> {
+    live.s.select(mailbox)?;
+    let fetches = live.s.uid_fetch(uid.to_string(), "BODY.PEEK[]")?;
+    Ok(fetches.iter().find_map(|f| f.body().map(<[u8]>::to_vec)))
 }
 
 /// Testa as credenciais sem sincronizar nada.
-/// Mensagem completa (para extrair um anexo sob demanda).
-pub fn fetch_raw(acc: &ImapAccount, mailbox: &str, uid: u32) -> Result<Option<Vec<u8>>> {
-    let mut session = connect(acc)?;
-    session.select(mailbox)?;
-    let fetches = session.uid_fetch(uid.to_string(), "BODY.PEEK[]")?;
-    let raw = fetches.iter().find_map(|f| f.body().map(<[u8]>::to_vec));
-    session.logout().ok();
-    Ok(raw)
-}
-
 pub fn check_login(acc: &ImapAccount) -> Result<()> {
     connect(acc)?.logout().ok();
     Ok(())

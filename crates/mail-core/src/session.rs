@@ -18,6 +18,10 @@ pub struct Live {
     pub condstore: bool,
     /// QRESYNC ativo: o servidor informa também as exclusões (`VANISHED`).
     pub qresync: bool,
+    /// MOVE (RFC 6851) anunciado.
+    pub(crate) has_move: bool,
+    /// UIDPLUS anunciado (EXPUNGE só dos UIDs pedidos).
+    pub(crate) uidplus: bool,
 }
 
 impl Live {
@@ -36,11 +40,21 @@ impl Live {
                 q_on = qresync;
             }
         }
-        Ok(Live { s, idle, condstore: cond_on, qresync: q_on })
+        let (has_move, uidplus) = (caps.has_str("MOVE"), caps.has_str("UIDPLUS"));
+        drop(caps);
+        Ok(Live { s, idle, condstore: cond_on, qresync: q_on, has_move, uidplus })
     }
 
     pub fn logout(mut self) {
         self.s.logout().ok();
+    }
+
+    /// Conexão avulsa: abre, roda `f` e encerra. Para chamadores sem `Hub` (testes, ferramentas).
+    pub fn once<T>(acc: &ImapAccount, f: impl FnOnce(&mut Live) -> Result<T>) -> Result<T> {
+        let mut live = Live::open(acc)?;
+        let r = f(&mut live);
+        live.logout();
+        r
     }
 }
 
