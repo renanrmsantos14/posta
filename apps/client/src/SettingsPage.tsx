@@ -1,9 +1,11 @@
 // Configurações em página inteira: menu de seções à esquerda; voltar (botão ou Esc) devolve a caixa de entrada.
 import { useEffect, useState } from "react";
-import { AirplaneTilt, ArrowLeft, ArrowsClockwise, Bell, ChatTeardropText, FunnelSimple, Gauge, Keyboard, PencilSimple, Plus, Tag, Trash, UserCircle, Layout, Desktop, WifiSlash, X } from "@phosphor-icons/react";
+import { AirplaneTilt, ArrowLeft, ArrowsClockwise, Bell, ChatTeardropText, FunnelSimple, Gauge, Keyboard, PencilSimple, Plus, Tag, Trash, UserCircle, Layout, Desktop, Palette, WifiSlash, X } from "@phosphor-icons/react";
 import { api, providerOf, PROVIDER_LABEL, type Account, type Settings } from "./api";
 import { OauthAdvanced } from "./OauthSettings";
 import { AccountEditDialog } from "./AccountEditDialog";
+import { Row, Segmented } from "./SettingsParts";
+import { AppearanceSection } from "./AppearanceSettings";
 import { RulesSection, TemplatesSection, VacationSection } from "./ProductivitySettings";
 import { MAX_CATEGORIES, PALETTE, parseCategories } from "./Categories";
 import { autoCheck, checkUpdate, setAutoCheck, type Update } from "./updater";
@@ -24,6 +26,10 @@ interface Props {
   onUpdate: (u: Update) => void;
   /** "Aplicar agora à Entrada": roda as regras e atualiza a lista. */
   onApplyRules: () => Promise<void>;
+  /** Muda só na tela (arrasto da cor de destaque); `onSetting` grava. */
+  onPreview: (key: string, value: string) => void;
+  /** O destaque próprio foi ajustado para manter o contraste do tema. */
+  accentAdjusted: boolean;
 }
 
 const SECTIONS = [
@@ -32,6 +38,7 @@ const SECTIONS = [
   { id: "rules", label: "Regras", icon: FunnelSimple },
   { id: "templates", label: "Respostas prontas", icon: ChatTeardropText },
   { id: "vacation", label: "Férias", icon: AirplaneTilt },
+  { id: "appearance", label: "Aparência", icon: Palette },
   { id: "layout", label: "Leitura e layout", icon: Layout },
   { id: "write", label: "Escrita", icon: PencilSimple },
   { id: "notify", label: "Notificações", icon: Bell },
@@ -59,33 +66,7 @@ const SWIPE_OPTIONS: [string, string][] = [["archive", "Arquivar"], ["trash", "E
 const DESKTOP = !/Android/i.test(navigator.userAgent);
 const OFFLINE_OPTIONS = ["50", "200", "500", "1000"];
 
-/** Grupo de opções exclusivas; valor ausente ou desconhecido cai no `fallback`. */
-function Segmented({ label, value, fallback, options, onChange }: {
-  label: string; value: string | undefined; fallback: string; options: [string, string][]; onChange: (v: string) => void;
-}) {
-  const current = options.some(([v]) => v === value) ? value : fallback;
-  return (
-    <div className="seg" role="radiogroup" aria-label={label}>
-      {options.map(([v, text]) => (
-        <button key={v} type="button" role="radio" aria-checked={v === current} onClick={() => onChange(v)}>{text}</button>
-      ))}
-    </div>
-  );
-}
-
-function Row({ title, sub, children }: { title: string; sub?: string; children: React.ReactNode }) {
-  return (
-    <div className="settings-row">
-      <div>
-        <div className="settings-strong">{title}</div>
-        {sub && <div className="settings-sub">{sub}</div>}
-      </div>
-      {children}
-    </div>
-  );
-}
-
-export function SettingsPage({ accounts, settings, onSetting, onRemoveAccount, onAddAccount, onAccountSaved, onClose, onUpdate, onApplyRules }: Props) {
+export function SettingsPage({ accounts, settings, onSetting, onRemoveAccount, onAddAccount, onAccountSaved, onClose, onUpdate, onApplyRules, onPreview, accentAdjusted }: Props) {
   const [section, setSection] = useState<SectionId>("accounts");
   const [auto, setAuto] = useState(autoCheck);
   const [checking, setChecking] = useState(false);
@@ -244,20 +225,10 @@ export function SettingsPage({ accounts, settings, onSetting, onRemoveAccount, o
           {section === "templates" && <TemplatesSection settings={settings} onSetting={onSetting} />}
           {section === "vacation" && <VacationSection settings={settings} onSetting={onSetting} />}
 
+          {section === "appearance" && <AppearanceSection settings={settings} onSetting={onSetting} onPreview={onPreview} accentAdjusted={accentAdjusted} />}
+
           {section === "layout" && (
             <section className="settings-group" aria-label="Leitura e layout">
-              <Row title="Tema" sub="Sistema segue a aparência do aparelho">
-                <Segmented label="Tema" value={settings.theme} fallback="system" onChange={(v) => onSetting("theme", v)}
-                  options={[["system", "Sistema"], ["light", "Claro"], ["dark", "Escuro"]]} />
-              </Row>
-              <Row title="Tamanho da fonte" sub="Lista de mensagens e texto simples; emails em HTML mantêm o estilo de origem">
-                <Segmented label="Tamanho da fonte" value={settings.size} fallback="m" onChange={(v) => onSetting("size", v)}
-                  options={[["s", "P"], ["m", "M"], ["l", "G"]]} />
-              </Row>
-              <Row title="Densidade da lista">
-                <Segmented label="Densidade da lista" value={settings.density} fallback="medium" onChange={(v) => onSetting("density", v)}
-                  options={[["compact", "Compacta"], ["medium", "Média"], ["comfortable", "Confortável"]]} />
-              </Row>
               <Row title="Foco e Outros" sub="Separa a Caixa de entrada em Foco (pessoas e conversas suas) e Outros (newsletters e avisos automáticos)">
                 <Segmented label="Foco e Outros" value={settings.focusTabs} fallback="1" onChange={(v) => onSetting("focusTabs", v)}
                   options={[["1", "Ligado"], ["0", "Desligado"]]} />

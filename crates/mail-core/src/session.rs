@@ -3,7 +3,7 @@
 //! Abrir conexão (TCP, TLS, login, CAPABILITY, ENABLE) custa centenas de milissegundos. Em vez de pagar isso
 //! a cada sync, marcação ou busca de corpo, o `Hub` guarda a sessão e só reconecta quando ela cai.
 
-use crate::imap_sync::{connect, ImapAccount, ImapSession};
+use crate::imap_sync::{connect, idle_until, IdleEnd, ImapAccount, ImapSession};
 use crate::{Error, Result};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -61,8 +61,11 @@ impl Live {
 /// Para que serve a conexão. IDLE ocupa a sua por inteiro, então não divide com as operações.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Kind {
-    /// Sync, marcações, corpos sob demanda.
+    /// Sync, marcações, fila offline, pré-busca.
     Cmd,
+    /// Leitura sob demanda (corpo, anexo, destinatário): sessão própria para abrir um email não esperar um sync
+    /// longo, que segura a `Cmd`.
+    Read,
     /// Espera de novidades (IDLE) e sync disparada por ela.
     Idle,
 }
@@ -73,7 +76,11 @@ type Slot = Arc<Mutex<Option<Live>>>;
 #[derive(Default)]
 pub struct Hub {
     slots: Mutex<HashMap<(String, Kind), Slot>>,
+    /// Geração por conta: `drop_account` incrementa, e o IDLE em curso percebe e encerra.
+    gens: Mutex<HashMap<String, u64>>,
 }
+
+const KINDS: [Kind; 3] = [Kind::Cmd, Kind::Read, Kind::Idle];
 
 /// Espera antes de recomeçar a tentativa `n` (0 = a conexão guardada pode só ter caído: tenta já).
 fn backoff(n: usize) -> Duration {
@@ -122,20 +129,39 @@ impl Hub {
         Err(last.unwrap_or_else(|| Error::Invalid("sem conexão com o servidor".into())))
     }
 
+    fn generation(&self, id: &str) -> u64 {
+        self.gens.lock().unwrap_or_else(|p| p.into_inner()).get(id).copied().unwrap_or(0)
+    }
+
     /// Esquece as sessões da conta (senha trocada, conta removida): a próxima operação reconecta.
+    /// Sessões livres fecham na hora; um IDLE em curso percebe em até `imap_sync::IDLE_SLICE` e fecha a sua.
     pub fn drop_account(&self, id: &str) {
+        *self.gens.lock().unwrap_or_else(|p| p.into_inner()).entry(id.to_string()).or_default() += 1;
         let slots: Vec<Slot> = {
             let map = self.slots.lock().unwrap_or_else(|p| p.into_inner());
-            [Kind::Cmd, Kind::Idle].iter().filter_map(|k| map.get(&(id.to_string(), *k)).cloned()).collect()
+            KINDS.iter().filter_map(|k| map.get(&(id.to_string(), *k)).cloned()).collect()
         };
         for s in slots {
-            // Sessão em uso (IDLE esperando): não trava aqui; ela cai sozinha no próximo erro de rede.
+            // Sessão em uso (IDLE esperando): não trava aqui; o IDLE confere a geração e se encerra.
             if let Ok(mut g) = s.try_lock() {
                 if let Some(live) = g.take() {
                     live.logout();
                 }
             }
         }
+    }
+
+    /// IDLE na sessão `Idle` da conta, encerrável por `drop_account`: devolve `IdleEnd::Cancelled` e fecha a conexão.
+    pub fn idle(&self, acc: &ImapAccount, mailbox: &str, timeout: Duration) -> Result<IdleEnd> {
+        let gen = self.generation(&acc.id);
+        let cancelled = || self.generation(&acc.id) != gen;
+        let end = self.with(acc, Kind::Idle, |live| idle_until(live, mailbox, timeout, &cancelled))?;
+        if end == IdleEnd::Cancelled {
+            if let Some(live) = self.slot(&acc.id, Kind::Idle).lock().unwrap_or_else(|p| p.into_inner()).take() {
+                live.logout();
+            }
+        }
+        Ok(end)
     }
 
     /// Há sessão aberta para a conta e finalidade? (Para testes e diagnóstico.)

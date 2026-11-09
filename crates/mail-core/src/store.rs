@@ -175,7 +175,7 @@ const FTS_CREATE: &str = "CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING 
 
 /// Revisão das colunas/índices/tabelas adicionadas sem recriar o banco (guardada em `application_id`).
 /// Banco já na revisão pula todo o esquema ao abrir.
-const SCHEMA_REV: i32 = 0x5054_0002;
+const SCHEMA_REV: i32 = 0x5054_0003;
 
 /// Mensagem já interpretada, pronta para gravar.
 #[derive(Debug, Clone, Default)]
@@ -568,8 +568,8 @@ impl Store {
         Self::init(Connection::open(path)?)
     }
 
-    /// Devolve o WAL ao arquivo principal sem bloquear leitores. O auto-checkpoint só dispara a cada ~128 MB,
-    /// então quem termina uma sync grande chama isto para o WAL não crescer.
+    /// Devolve o WAL ao arquivo principal sem bloquear leitores. O auto-checkpoint só dispara em ~1 GiB (o fsync dele
+    /// no meio da carga inicial custava ~1,5 s em 50k mensagens), então quem termina uma sync chama isto.
     pub fn checkpoint(&self) {
         self.conn.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |_| Ok(())).ok();
     }
@@ -586,7 +586,8 @@ impl Store {
              PRAGMA busy_timeout = 5000;
              PRAGMA cache_size = -65536;
              PRAGMA mmap_size = 268435456;
-             PRAGMA wal_autocheckpoint = 32768;
+             PRAGMA wal_autocheckpoint = 262144;
+             PRAGMA journal_size_limit = 134217728;
              PRAGMA temp_store = MEMORY;",
         )?;
         Ok(())
@@ -607,6 +608,8 @@ impl Store {
             )?;
         }
         conn.execute_batch(FTS_CREATE)?;
+        // Funde segmentos do índice só quando há 16 deles (padrão 4): a carga inicial paga bem menos merges.
+        conn.execute("INSERT INTO messages_fts (messages_fts, rank) VALUES ('automerge', 16)", [])?;
         conn.execute_batch(SCHEMA)?;
         let store = Self { conn };
         store.migrate()?;

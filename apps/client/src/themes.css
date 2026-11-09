@@ -1,0 +1,318 @@
+/* Temas da Posta. Cada preset sobrescreve os tokens de cor; o resto do app só lê var(--...).
+   [data-theme] vale em qualquer elemento (as miniaturas em Configurações > Aparência reaproveitam os mesmos tokens).
+   Claro e escuro "Padrão" são a base; as famílias abaixo trazem os tokens semânticos e os presets só trocam o núcleo.
+   Contraste: AA (4,5:1) em todos os pares de texto; os de alto contraste, AAA (7:1). Conferido por verificar-ui-temas. */
+:root, [data-theme="light"] {
+  --bg: #fbfbfa; --surface: #ffffff; --rail: #f7f6f3;
+  --text: #2f3437; --strong: #111111; --muted: #65645f; --faint: #6e6d68;
+  --line: #eaeaea; --hover: rgba(0, 0, 0, 0.03); --selected: #f1f0ec;
+  --blue-bg: #e1f3fe; --blue: #1f6c9f;
+  --green-bg: #edf3ec; --green: #346538;
+  --red-bg: #fdebec; --red: #9f2f2d;
+  --yellow-bg: #fbf3db; --yellow: #956400;
+  --purple-bg: #f6f3f9; --purple: #6940a5;
+  --orange-bg: #fdecc8; --orange: #9c4308;
+  --star: #d99a00;
+  --btn: #111111; --btn-text: #ffffff; --btn-hover: #333333; --on-blue: #ffffff;
+  color-scheme: light;
+}
+
+/* Família escura: tokens semânticos comuns. */
+[data-theme="dark"],
+[data-theme="graphite"],
+[data-theme="midnight"],
+[data-theme="ocean"],
+[data-theme="amber"],
+[data-theme="nord"],
+[data-theme="solarized-dark"],
+[data-theme="dracula"],
+[data-theme="hc-dark"],
+[data-theme="oled"] {
+  --hover: rgba(255, 255, 255, 0.04);
+  --green-bg: #22301f; --green: #9cc596;
+  --red-bg: #3b2222; --red: #f0a5a3;
+  --yellow-bg: #3a3220; --yellow: #e6c35c;
+  --purple-bg: #2c2437; --purple: #c4a7ed;
+  --orange-bg: #3d2b1a; --orange: #f0b27a;
+  --star: #e0a800;
+  --btn: var(--strong); --btn-text: var(--bg); --btn-hover: color-mix(in srgb, var(--strong) 80%, var(--bg)); --on-blue: #0b0b0b;
+  color-scheme: dark;
+}
+[data-theme="dark"] {
+  --bg: #191919; --surface: #1f1f1f; --rail: #202020;
+  --text: #d4d4d1; --strong: #f2f2f0; --muted: #a9a8a4; --faint: #94938f;
+  --line: #2e2e2e; --selected: #2a2a28;
+  --blue-bg: #1c3443; --blue: #8cc8ef;
+  --btn: #f2f2f0; --btn-text: #111111; --btn-hover: #d9d9d6;
+}
+
+/* Azul Outlook */
+[data-theme="outlook"] {
+  --bg: #f3f2f1;
+  --surface: #ffffff;
+  --rail: #faf9f8;
+  --text: #323130;
+  --strong: #201f1e;
+  --muted: #575553;
+  --faint: #5c5a58;
+  --line: #e1dfdd;
+  --selected: #cfe4fa;
+  --blue-bg: #deecf9;
+  --blue: #0b5cad;
+  --btn: #0f6cbd;
+  --btn-text: #ffffff;
+  --btn-hover: #115ea3;
+  --on-blue: #ffffff;
+}
+
+/* Grafite */
+[data-theme="graphite"] {
+  --bg: #17181a;
+  --surface: #1e2023;
+  --rail: #1a1b1d;
+  --text: #d7d9dc;
+  --strong: #f4f5f6;
+  --muted: #a9adb3;
+  --faint: #a0a4ab;
+  --line: #2f3236;
+  --selected: #2e333a;
+  --blue-bg: #1f3550;
+  --blue: #8ec1f5;
+}
+
+/* Meia-noite */
+[data-theme="midnight"] {
+  --bg: #0b1020;
+  --surface: #11172b;
+  --rail: #0e1426;
+  --text: #cfd6ee;
+  --strong: #f0f3ff;
+  --muted: #a0abd0;
+  --faint: #98a5cf;
+  --line: #222b4d;
+  --selected: #1e2a58;
+  --blue-bg: #1d2d63;
+  --blue: #96b6ff;
+}
+
+/* Sépia / Papel */
+[data-theme="paper"] {
+  --bg: #f2e9d3;
+  --surface: #fbf5e6;
+  --rail: #ebdfc4;
+  --text: #43341f;
+  --strong: #2a1f10;
+  --muted: #65543b;
+  --faint: #6b5940;
+  --line: #dccfae;
+  --selected: #e8dab5;
+  --blue-bg: #efdcb6;
+  --blue: #8a4510;
+}
+
+/* Floresta */
+[data-theme="forest"] {
+  --bg: #eef3ec;
+  --surface: #fafcf9;
+  --rail: #e4ede1;
+  --text: #25322a;
+  --strong: #111b14;
+  --muted: #4f5f52;
+  --faint: #556657;
+  --line: #d0dccd;
+  --selected: #d3e4cf;
+  --blue-bg: #d8ebdb;
+  --blue: #1d6a38;
+}
+
+/* Oceano */
+[data-theme="ocean"] {
+  --bg: #08171d;
+  --surface: #0d2229;
+  --rail: #0a1c22;
+  --text: #cfe6ea;
+  --strong: #effafc;
+  --muted: #9bbcc3;
+  --faint: #92b4bb;
+  --line: #183a44;
+  --selected: #15434f;
+  --blue-bg: #12444f;
+  --blue: #66d3e8;
+}
+
+/* Lavanda */
+[data-theme="lavender"] {
+  --bg: #f4f1fb;
+  --surface: #fcfbff;
+  --rail: #ece7f7;
+  --text: #332e44;
+  --strong: #1b1630;
+  --muted: #5b5476;
+  --faint: #615a7c;
+  --line: #dbd4ee;
+  --selected: #dfd6f4;
+  --blue-bg: #e4dcf8;
+  --blue: #5a3db3;
+}
+
+/* Rosé */
+[data-theme="rose"] {
+  --bg: #fbf0f2;
+  --surface: #fffafb;
+  --rail: #f5e5e8;
+  --text: #3c2c31;
+  --strong: #25161b;
+  --muted: #684f5a;
+  --faint: #6e5560;
+  --line: #ecd2d8;
+  --selected: #f6d8df;
+  --blue-bg: #fadce4;
+  --blue: #ab1f4a;
+}
+
+/* Âmbar */
+[data-theme="amber"] {
+  --bg: #1a140b;
+  --surface: #221a0f;
+  --rail: #1e170d;
+  --text: #e8dcc6;
+  --strong: #fbf1dd;
+  --muted: #bcad8f;
+  --faint: #b3a487;
+  --line: #3a2d18;
+  --selected: #35290f;
+  --blue-bg: #4a3510;
+  --blue: #f2b13a;
+}
+
+/* Nord */
+[data-theme="nord"] {
+  --bg: #2e3440;
+  --surface: #3b4252;
+  --rail: #353c4a;
+  --text: #dce2ec;
+  --strong: #eceff4;
+  --muted: #c0c9d8;
+  --faint: #b8c1d1;
+  --line: #4c566a;
+  --selected: #434c5e;
+  --blue-bg: #33505d;
+  --blue: #8fcadb;
+}
+
+/* Solarized claro */
+[data-theme="solarized-light"] {
+  --bg: #fdf6e3;
+  --surface: #fffbed;
+  --rail: #f5eed9;
+  --text: #41565d;
+  --strong: #073642;
+  --muted: #4f6970;
+  --faint: #4d676e;
+  --line: #e6dfc8;
+  --selected: #efe8cd;
+  --blue-bg: #dbe9ee;
+  --blue: #1767a3;
+}
+
+/* Solarized escuro */
+[data-theme="solarized-dark"] {
+  --bg: #002b36;
+  --surface: #073642;
+  --rail: #04313c;
+  --text: #c1cccc;
+  --strong: #eee8d5;
+  --muted: #a8b6b7;
+  --faint: #a0aeaf;
+  --line: #17505e;
+  --selected: #0c3f4c;
+  --blue-bg: #0a4058;
+  --blue: #6bbcf0;
+}
+
+/* Dracula */
+[data-theme="dracula"] {
+  --bg: #282a36;
+  --surface: #2f3142;
+  --rail: #252733;
+  --text: #f8f8f2;
+  --strong: #ffffff;
+  --muted: #c3c6dc;
+  --faint: #b9bdd7;
+  --line: #44475a;
+  --selected: #3d4054;
+  --blue-bg: #41365f;
+  --blue: #c4a1fb;
+}
+
+/* Alto contraste claro */
+[data-theme="hc-light"] {
+  --bg: #ffffff;
+  --surface: #ffffff;
+  --rail: #ffffff;
+  --text: #000000;
+  --strong: #000000;
+  --muted: #1a1a1a;
+  --faint: #262626;
+  --line: #000000;
+  --hover: rgba(0, 0, 0, 0.09);
+  --selected: #cfe0ff;
+  --blue-bg: #dbe6ff;
+  --blue: #0a2a9a;
+  --green-bg: #e0f3e0;
+  --green: #0a3a10;
+  --red-bg: #fde4e4;
+  --red: #700000;
+  --yellow-bg: #fff1bf;
+  --yellow: #4a3300;
+  --purple-bg: #eee5fb;
+  --purple: #36166f;
+  --orange-bg: #ffe5cc;
+  --orange: #622a00;
+  --star: #7a5200;
+}
+
+/* Alto contraste escuro */
+[data-theme="hc-dark"] {
+  --bg: #000000;
+  --surface: #000000;
+  --rail: #000000;
+  --text: #ffffff;
+  --strong: #ffffff;
+  --muted: #ebebeb;
+  --faint: #e0e0e0;
+  --line: #ffffff;
+  --hover: rgba(255, 255, 255, 0.14);
+  --selected: #1b3668;
+  --blue-bg: #12305f;
+  --blue: #a8d2ff;
+  --green-bg: #0b2a0f;
+  --green: #9af09a;
+  --red-bg: #3a0b0b;
+  --red: #ffb3b3;
+  --yellow-bg: #352a00;
+  --yellow: #ffe27a;
+  --purple-bg: #25104a;
+  --purple: #dcc4ff;
+  --orange-bg: #3a1c00;
+  --orange: #ffc690;
+  --star: #ffd24a;
+  --btn: #ffffff;
+  --btn-text: #000000;
+  --btn-hover: #d9d9d9;
+}
+
+/* OLED preto */
+[data-theme="oled"] {
+  --bg: #000000;
+  --surface: #0b0b0b;
+  --rail: #050505;
+  --text: #dadada;
+  --strong: #ffffff;
+  --muted: #a9a9a9;
+  --faint: #9f9f9f;
+  --line: #242424;
+  --selected: #1d1d1f;
+  --blue-bg: #12263d;
+  --blue: #74b9ff;
+}

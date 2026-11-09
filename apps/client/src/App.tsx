@@ -1,16 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowBendUpLeft, ArrowBendDoubleUpLeft, ArrowBendUpRight, ArrowsClockwise, Archive, Copy, FolderOpen, FolderSimple, NotePencil, Star, Tag, Trash, EnvelopeSimple, EnvelopeSimpleOpen, FloppyDisk, PaperPlaneTilt, Printer, PushPin, Clock } from "@phosphor-icons/react";
+import { ArrowBendUpLeft, ArrowBendDoubleUpLeft, ArrowBendUpRight, ArrowsClockwise, Archive, Copy, FolderOpen, FolderSimple, NotePencil, Star, Tag, Trash, EnvelopeSimple, EnvelopeSimpleOpen, FloppyDisk, Printer, PushPin, Clock } from "@phosphor-icons/react";
 import { api, isTauri, type Account, type Attachment, type MailDelta, type MessageDetail, type MessageSummary, type OutAttachment, type OutboxItem, type Role, type Settings, type StoredDraft, type UnreadCounts, type UserFolder, type View } from "./api";
 import { AccountDialog } from "./AccountDialog";
 import { parseCategories } from "./Categories";
 import { FolderDialog, type FolderDialogState } from "./FolderDialog";
 import { OutboxPane, useQueue } from "./Offline";
+import { DraftList, ScheduledList } from "./DraftLists";
 import { boxView, catView, parseBox, parseCat, roleOf } from "./views";
 import { Composer, type ComposeInit } from "./Composer";
 import { aliasFor, aliasLines, addrOf } from "./aliases";
 import { justSwiped, swipeProps, type SwipeAction, type SwipeDir } from "./swipe";
 import { escapeHtml, textToHtml } from "./richtext";
 import { Toaster, toast } from "./toast";
+import { applyAppearance, themePref, watchSystem } from "./themes";
 import { FOLDERS, LOCAL_VIEWS, SHOWS_UNREAD, folderTree, viewInfo, withStarred, type Dest, type FolderNode } from "./folders";
 import { Resizer } from "./Resizer";
 import { SettingsPage } from "./SettingsPage";
@@ -29,7 +31,7 @@ import { MessageList, type Density, type ListHandle, type ListRow } from "./Mess
 import { PAGE, useMessageList } from "./useMessageList";
 import { ContextMenu, type MenuItem, type MenuState } from "./ContextMenu";
 import { ContactCard, parseContact, type ContactState } from "./ContactCard";
-import { fmtLong, shortDate } from "./dates";
+import { fmtLong } from "./dates";
 import { isFocused, repliedThreads } from "./focus";
 import { dropUndo, popUndo, pushUndo } from "./undo";
 import { isTyping, ownsKeys, shortcutOf, type ShortcutAction } from "./shortcuts";
@@ -660,14 +662,19 @@ export default function App() {
     refreshDrafts();
   }
 
-  /** Tema e fonte vivem no <html>; "sistema" e "M" ficam sem atributo. */
+  /** Tema, destaque e fonte vivem no <html>. Antes de as configurações chegarem vale o que o public/theme-init.js aplicou. */
+  const [accentAdjusted, setAccentAdjusted] = useState(false);
+  useEffect(() => {
+    if (!prefsReady) return;
+    const apply = () => setAccentAdjusted(applyAppearance(themePref(settings.theme), settings.accent)?.adjusted ?? false);
+    apply();
+    return themePref(settings.theme) === "system" ? watchSystem(apply) : undefined;
+  }, [prefsReady, settings.theme, settings.accent]);
   useEffect(() => {
     const root = document.documentElement;
-    if (settings.theme === "light" || settings.theme === "dark") root.dataset.theme = settings.theme;
-    else delete root.dataset.theme;
     if (settings.size === "s" || settings.size === "l") root.dataset.size = settings.size;
     else delete root.dataset.size;
-  }, [settings.theme, settings.size]);
+  }, [settings.size]);
 
   // Tela cheia só existe com uma mensagem aberta e fora das Configurações.
   useEffect(() => { if (full && !current) setFull(false); }, [full, current]);
@@ -1495,44 +1502,11 @@ export default function App() {
           )}
 
           {showScheduled ? (
-            scheduled.length === 0 ? (
-              <div className="empty quiet"><p>Nenhuma mensagem agendada</p></div>
-            ) : (
-              <ul className="plain-list" aria-label="Agendados">
-                {scheduled.map((s) => (
-                  <li key={s.id} className="row plain-row draft-row" tabIndex={0} onClick={() => editScheduled(s)}
-                    onKeyDown={(e) => { if (e.key === "Enter" && e.target === e.currentTarget) editScheduled(s); }}>
-                    <PaperPlaneTilt size={13} weight="bold" className="sched-icon" aria-hidden />
-                    <span className="from">{s.to.trim() || "(sem destinatário)"}</span>
-                    <time className="date" dateTime={new Date(s.send_at * 1000).toISOString()}>{whenLabel(s.send_at)}</time>
-                    <span className="subject">{s.subject || "(sem assunto)"}</span>
-                    <span className="snippet sched-status" data-failed={s.status === "failed" || undefined}>
-                      {s.status === "failed" ? `Falhou: ${s.error}` : s.status === "sending" ? "Enviando…" : "Aguardando a hora"}
-                      <button type="button" className="btn ghost small" onClick={(e) => { e.stopPropagation(); cancelScheduled(s); }}>Cancelar envio</button>
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            )
+            <ScheduledList items={scheduled} onEdit={editScheduled} onCancel={cancelScheduled} />
           ) : showOutbox ? (
             <OutboxPane items={outbox} accounts={(accounts ?? []).map((a) => a.id)} online={net.online} onChange={refreshOutbox} />
           ) : showDrafts ? (
-            draftsShown.length === 0 ? (
-              <div className="empty quiet"><p>Nenhum rascunho</p></div>
-            ) : (
-              <ul className="plain-list" aria-label="Rascunhos">
-                {draftsShown.map((d) => (
-                  <li key={d.id} className="row plain-row draft-row" tabIndex={0} onClick={() => openDraft(d)}
-                    onKeyDown={(e) => { if (e.key === "Enter" && e.target === e.currentTarget) openDraft(d); }}>
-                    <span className="dot" aria-hidden />
-                    <span className="from">{d.to.trim() || "(sem destinatário)"}</span>
-                    <time className="date" dateTime={new Date(d.updated * 1000).toISOString()}>{shortDate(d.updated)}</time>
-                    <span className="subject">{d.subject || "(sem assunto)"}</span>
-                    <span className="snippet">{d.body.trim().replace(/\s+/g, " ").slice(0, 200)}</span>
-                  </li>
-                ))}
-              </ul>
-            )
+            <DraftList items={draftsShown} onOpen={openDraft} />
           ) : empty ? (
             <div className="empty">
               <EnvelopeSimple size={28} weight="duotone" />
@@ -1569,7 +1543,7 @@ export default function App() {
         </PageLayout>
 
         {!full && !settingsOpen && (
-          <>
+          <div className="resizers" role="region" aria-label="Redimensionar painéis">
             <Resizer axis="x" edge="rail" label="Largura das pastas" value={railW} min={RAIL.min} max={() => RAIL.max}
               onChange={(v) => previewSetting("w:rail", String(v))} onCommit={(v) => changeSetting("w:rail", String(v))}
               onReset={() => changeSetting("w:rail", "")} />
@@ -1583,7 +1557,7 @@ export default function App() {
                 onChange={(v) => previewSetting("h:list", String(v))} onCommit={(v) => changeSetting("h:list", String(v))}
                 onReset={() => changeSetting("h:list", "")} />
             )}
-          </>
+          </div>
         )}
 
         <ReaderPane detail={detail && detail.id === selectedId ? detail : null} error={openError && openError.id === selectedId ? openError.msg : null}
@@ -1622,7 +1596,7 @@ export default function App() {
       )}
       {settingsOpen && (
         <SettingsPage accounts={accounts ?? []} settings={settings} onSetting={changeSetting} onRemoveAccount={removeAccount}
-          onAddAccount={() => setDialog(true)} onAccountSaved={accountSaved} onClose={() => setSettingsOpen(false)} onUpdate={showUpdate} onApplyRules={applyRules} />
+          onAddAccount={() => setDialog(true)} onAccountSaved={accountSaved} onClose={() => setSettingsOpen(false)} onUpdate={showUpdate} onApplyRules={applyRules} accentAdjusted={accentAdjusted} onPreview={previewSetting} />
       )}
       {folderDialog && (
         <FolderDialog state={folderDialog} accounts={accounts ?? []} folders={userFolders} onSubmit={submitFolder} onClose={() => setFolderDialog(null)} />

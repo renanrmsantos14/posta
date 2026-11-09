@@ -294,11 +294,13 @@ fn notify_new(app: &AppHandle, st: &AppState, account: &str, fetched: usize) {
 fn idle_cycle(app: &AppHandle, id: &str) -> CmdResult<()> {
     let st = app.state::<AppState>();
     let acc = st.account_with_password(id)?;
-    // IDLE numa sessão própria; ao acordar, sincroniza na sessão de comandos (já aberta) sem novo login.
-    let end = st.hub.with(&acc, Kind::Idle, |live| imap_sync::idle_on(live, "INBOX", IDLE_RENEW)).map_err(err)?;
+    // IDLE numa sessão própria, encerrável por `drop_account`; ao acordar, sincroniza na sessão de comandos (já aberta) sem novo login.
+    let end = st.hub.idle(&acc, "INBOX", IDLE_RENEW).map_err(err)?;
     let changed = match end {
         IdleEnd::Changed => true,
         IdleEnd::TimedOut => false,
+        // Conta salva ou removida: a sessão já foi fechada; o laço recomeça (e sai se a conta não existe mais).
+        IdleEnd::Cancelled => return Ok(()),
         IdleEnd::Unsupported => {
             std::thread::sleep(POLL_EVERY);
             true
@@ -686,7 +688,7 @@ async fn open_message(app: AppHandle, id: i64) -> CmdResult<Option<MessageDetail
         let loader = app.clone();
         let to = tauri::async_runtime::spawn_blocking(move || {
             let hub = &loader.state::<AppState>().hub;
-            hub.with(&own, Kind::Cmd, |l| imap_sync::fetch_to_on(l, &mailbox, uid))
+            hub.with(&own, Kind::Read, |l| imap_sync::fetch_to_on(l, &mailbox, uid))
         })
         .await
             .map_err(err)?;
@@ -734,7 +736,7 @@ fn fetch_raw_online(st: &AppState, id: i64) -> CmdResult<Vec<u8>> {
     let loc = st.locate(id)?;
     let fetched = st
         .account_with_password(&loc.account)
-        .and_then(|a| st.hub.with(&a, Kind::Cmd, |l| imap_sync::fetch_raw_on(l, &loc.mailbox, loc.uid)).map_err(err));
+        .and_then(|a| st.hub.with(&a, Kind::Read, |l| imap_sync::fetch_raw_on(l, &loc.mailbox, loc.uid)).map_err(err));
     match fetched {
         Ok(raw) => raw.ok_or_else(|| "mensagem não encontrada no servidor".to_string()),
         Err(_) if !reachable(st, &loc.account) => Err("Sem conexão: o anexo ainda não foi baixado.".to_string()),
@@ -779,7 +781,7 @@ async fn save_eml(app: AppHandle, id: i64) -> CmdResult<String> {
         let acc = st.account_with_password(&loc.account)?;
         let raw = st
             .hub
-            .with(&acc, Kind::Cmd, |l| imap_sync::fetch_raw_on(l, &loc.mailbox, loc.uid))
+            .with(&acc, Kind::Read, |l| imap_sync::fetch_raw_on(l, &loc.mailbox, loc.uid))
             .map_err(err)?
             .ok_or_else(|| "mensagem não encontrada no servidor".to_string())?;
         let title: String = subject.trim().chars().take(80).collect();
@@ -855,6 +857,7 @@ async fn remove_account(app: AppHandle, id: String) -> CmdResult<()> {
         st.save_accounts(&accounts)?;
         st.tokens.lock().unwrap().remove(&id);
         st.hub.drop_account(&id);
+        send::forget(&id);
         st.store.lock().unwrap().remove_account(&id).map_err(err)
     })
     .await
