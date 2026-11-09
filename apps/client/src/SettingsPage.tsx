@@ -1,7 +1,9 @@
 // Configurações em página inteira: menu de seções à esquerda; voltar (botão ou Esc) devolve a caixa de entrada.
 import { useEffect, useState } from "react";
-import { ArrowLeft, ArrowsClockwise, Bell, Gauge, Keyboard, PencilSimple, Plus, Trash, UserCircle, Layout } from "@phosphor-icons/react";
+import { ArrowLeft, ArrowsClockwise, Bell, Gauge, Keyboard, PencilSimple, Plus, Tag, Trash, UserCircle, Layout, X } from "@phosphor-icons/react";
 import { api, type Account, type Settings } from "./api";
+import { AccountEditDialog } from "./AccountEditDialog";
+import { MAX_CATEGORIES, PALETTE, parseCategories } from "./Categories";
 import { autoCheck, checkUpdate, setAutoCheck, type Update } from "./updater";
 import { toast } from "./toast";
 import build from "./version.json";
@@ -13,12 +15,15 @@ interface Props {
   /** Resolve quando a conta foi removida; rejeita com a mensagem de erro. */
   onRemoveAccount: (id: string) => Promise<void>;
   onAddAccount: () => void;
+  /** Conta editada e já gravada (a lista do app troca a antiga por esta). */
+  onAccountSaved: (a: Account) => void;
   onClose: () => void;
   onUpdate: (u: Update) => void;
 }
 
 const SECTIONS = [
   { id: "accounts", label: "Contas", icon: UserCircle },
+  { id: "categories", label: "Categorias", icon: Tag },
   { id: "layout", label: "Leitura e layout", icon: Layout },
   { id: "write", label: "Escrita", icon: PencilSimple },
   { id: "notify", label: "Notificações", icon: Bell },
@@ -63,15 +68,23 @@ function Row({ title, sub, children }: { title: string; sub?: string; children: 
   );
 }
 
-export function SettingsPage({ accounts, settings, onSetting, onRemoveAccount, onAddAccount, onClose, onUpdate }: Props) {
+export function SettingsPage({ accounts, settings, onSetting, onRemoveAccount, onAddAccount, onAccountSaved, onClose, onUpdate }: Props) {
   const [section, setSection] = useState<SectionId>("accounts");
   const [auto, setAuto] = useState(autoCheck);
   const [checking, setChecking] = useState(false);
   const [sigAccount, setSigAccount] = useState(accounts[0]?.id ?? "");
+  const [editing, setEditing] = useState<Account | null>(null);
   const [removing, setRemoving] = useState<Account | null>(null);
   const [removeBusy, setRemoveBusy] = useState(false);
   const notify = settings.notify !== "0";
   const sigId = accounts.some((a) => a.id === sigAccount) ? sigAccount : accounts[0]?.id ?? "";
+
+  const categories = parseCategories(settings.categories);
+  const saveCategories = (list: typeof categories) => onSetting("categories", JSON.stringify(list));
+  function addCategory() {
+    const color = PALETTE.find((p) => !categories.some((c) => c.color === p.key))?.key ?? PALETTE[0].key;
+    saveCategories([...categories, { id: `c${Date.now().toString(36)}`, name: "Nova categoria", color }]);
+  }
 
   async function confirmRemove() {
     if (!removing || removeBusy) return;
@@ -113,6 +126,7 @@ export function SettingsPage({ accounts, settings, onSetting, onRemoveAccount, o
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
       e.stopPropagation();
+      if (editing) return; // o diálogo de edição trata o próprio Esc
       if (removing) { if (!removeBusy) setRemoving(null); }
       else onClose();
     };
@@ -145,9 +159,12 @@ export function SettingsPage({ accounts, settings, onSetting, onRemoveAccount, o
               {accounts.map((a) => (
                 <div key={a.id} className="settings-row">
                   <div className="settings-account">
-                    <div className="settings-strong">{a.username}</div>
+                    <div className="settings-strong">{a.name ? `${a.name} · ${a.username}` : a.username}</div>
                     <div className="settings-sub">{a.host}</div>
                   </div>
+                  <button type="button" className="btn" onClick={() => setEditing(a)}>
+                    <PencilSimple size={15} weight="bold" /> Editar
+                  </button>
                   <button type="button" className="btn" onClick={() => setRemoving(a)}>
                     <Trash size={15} weight="bold" /> Remover
                   </button>
@@ -155,6 +172,32 @@ export function SettingsPage({ accounts, settings, onSetting, onRemoveAccount, o
               ))}
               <div className="settings-row">
                 <button type="button" className="btn" onClick={onAddAccount}><Plus size={15} weight="bold" /> Adicionar conta</button>
+              </div>
+            </section>
+          )}
+
+          {section === "categories" && (
+            <section className="settings-group" aria-label="Categorias">
+              <p className="settings-sub">Até {MAX_CATEGORIES} categorias coloridas. Aplique pelo botão de categoria na mensagem; elas ficam só neste aparelho.</p>
+              {categories.map((c) => (
+                <div key={c.id} className="settings-row cat-row">
+                  <div className="cat-swatches" role="radiogroup" aria-label={`Cor de ${c.name}`}>
+                    {PALETTE.map(({ key, label }) => (
+                      <button key={key} type="button" role="radio" aria-checked={c.color === key} aria-label={label} title={label}
+                        className="cat-swatch" style={{ background: `var(--${key}-bg)`, color: `var(--${key})` }} onClick={() => saveCategories(categories.map((x) => (x.id === c.id ? { ...x, color: key } : x)))} />
+                    ))}
+                  </div>
+                  <input className="cat-name" aria-label="Nome da categoria" maxLength={24} value={c.name}
+                    onChange={(e) => saveCategories(categories.map((x) => (x.id === c.id ? { ...x, name: e.target.value } : x)))} />
+                  <button type="button" className="icon-btn" aria-label={`Remover ${c.name}`} onClick={() => saveCategories(categories.filter((x) => x.id !== c.id))}>
+                    <X size={14} weight="bold" />
+                  </button>
+                </div>
+              ))}
+              <div className="settings-row">
+                <button type="button" className="btn" disabled={categories.length >= MAX_CATEGORIES} onClick={addCategory}>
+                  <Plus size={15} weight="bold" /> Adicionar categoria
+                </button>
               </div>
             </section>
           )}
@@ -255,6 +298,8 @@ export function SettingsPage({ accounts, settings, onSetting, onRemoveAccount, o
           )}
         </div>
       </main>
+
+      {editing && <AccountEditDialog account={editing} onClose={() => setEditing(null)} onSaved={onAccountSaved} />}
 
       {removing && (
         <div className="confirm scrim" onMouseDown={(e) => { if (e.target === e.currentTarget && !removeBusy) setRemoving(null); }}>

@@ -1,5 +1,6 @@
 // Dados de exemplo para rodar a UI no navegador (pnpm dev), sem Tauri e sem rede.
-import type { Account, Contact, Draft, Provider, MessageDetail, MessageSummary, NewAccount, OutAttachment, Role, SendReport, Settings, StoredDraft, SyncResult, UnreadCounts, View } from "./api";
+import type { Account, Contact, Draft, Provider, MessageDetail, MessageSummary, NewAccount, OutAttachment, Role, SendReport, Settings, StoredDraft, SyncResult, UnreadCounts, UserFolder, View } from "./api";
+import { parseBox, parseCat } from "./views";
 
 const now = Math.floor(Date.now() / 1000);
 const H = 3600;
@@ -18,12 +19,12 @@ const seed: [string, string, string, string, number][] = [
 ];
 
 let accounts: Account[] = [
-  { id: "renan@imap.exemplo.com", host: "imap.exemplo.com", port: 993, security: "tls", username: "renan@exemplo.com" },
-  { id: "contato@imap.betinhos.com.br", host: "imap.betinhos.com.br", port: 993, security: "tls", username: "contato@betinhos.com.br" },
+  { id: "renan@imap.exemplo.com", host: "imap.exemplo.com", port: 993, security: "tls", username: "renan@exemplo.com", name: "Renan Santos" },
+  { id: "contato@imap.betinhos.com.br", host: "imap.betinhos.com.br", port: 993, security: "tls", username: "contato@betinhos.com.br", name: "Betinhos" },
 ];
 
-/** `thread_count` é calculado ao responder; `thread_id` 0 = mensagem sem fio. */
-type MockMessage = Omit<MessageDetail, "thread_count"> & { role: Role };
+/** `thread_count` é calculado ao responder; `thread_id` 0 = mensagem sem fio. `box`: nome completo da pasta do usuário (então `role` é null). */
+type MockMessage = Omit<MessageDetail, "thread_count"> & { role: Role | null; box?: string };
 
 let messages: MockMessage[] = Array.from({ length: 60 }, (_, i) => {
   const [from_name, from_addr, subject, body, hoursAgo] = seed[i % seed.length];
@@ -134,18 +135,33 @@ const SETTINGS_KEY = "posta-mock-settings";
 let settings: Settings = { [`signature:${accounts[0].id}`]: "Renan\nBetinhos Executive Service" };
 try { settings = { ...settings, ...JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? "{}") }; } catch { /* sem armazenamento */ }
 
+// Pastas do usuário de exemplo (separador "/"), com duas mensagens na subpasta.
+let userFolders: UserFolder[] = ["Clientes", "Clientes/Lumen"].map((name) => ({ account: accounts[0].id, name, delimiter: "/" }));
+messages.filter((m) => m.id === 1 || m.id === 5).forEach((m) => { m.role = null; m.box = "Clientes/Lumen"; });
+const inTree = (m: MockMessage, name: string) => !!m.box && (m.box === name || m.box.startsWith(`${name}/`));
+const leaf = (name: string) => {
+  const t = name.trim();
+  if (!t || /[/*%\\]/.test(t)) throw "Nome inválido: não use / * % nem deixe vazio";
+  return t;
+};
+
 const norm = (s: string) => s.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase();
 const withCount = <T extends MockMessage>(m: T) => ({
   ...m,
   thread_count: m.thread_id ? messages.filter((x) => x.account === m.account && x.thread_id === m.thread_id).length : 1,
 });
 const summary = (m: MockMessage): MessageSummary => {
-  const { body_text: _b, body_html: _h, reply_addr: _r, attachments: _a, to_addrs: _t, cc_addrs: _c, ...s } = withCount(m);
+  const { box: _x, body_text: _b, body_html: _h, reply_addr: _r, attachments: _a, to_addrs: _t, cc_addrs: _c, ...s } = withCount(m);
   return s;
 };
-/** Pastas virtuais: "Com estrela" (fora de Lixeira e Spam) e "Todas as caixas" (a Entrada de todas as contas). */
-const inView = (m: MockMessage, view: View) =>
-  view === "starred" ? m.flagged && m.role !== "trash" && m.role !== "junk" : m.role === (view === "all" ? "inbox" : view);
+/** Pastas virtuais: "Com estrela" (fora de Lixeira e Spam), "Todas as caixas" (a Entrada de todas as contas), pastas do usuário e categorias. */
+const inView = (m: MockMessage, view: View) => {
+  const box = parseBox(view);
+  const cat = parseCat(view);
+  if (box) return m.account === box.account && m.box === box.name;
+  if (cat) return m.category === cat && m.role !== "trash" && m.role !== "junk";
+  return view === "starred" ? m.flagged && m.role !== "trash" && m.role !== "junk" : m.role === (view === "all" ? "inbox" : view);
+};
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 let syncCount = 0;
 
@@ -217,9 +233,67 @@ export const mockApi = {
   async folders(): Promise<Role[]> {
     return ["inbox", "sent", "archive", "trash", "junk"];
   },
-  async syncFolder(role: Role, _keep: number): Promise<SyncResult> {
+  async syncFolder(view: View, _keep: number): Promise<SyncResult> {
     await wait(500);
-    return { fetched: 0, total: messages.filter((m) => m.role === role).length, errors: [], skipped: false };
+    return { fetched: 0, total: messages.filter((m) => inView(m, view)).length, errors: [], skipped: false };
+  },
+  async userFolders(): Promise<UserFolder[]> {
+    return userFolders.filter((f) => accounts.some((a) => a.id === f.account));
+  },
+  /** Para testar a falha: nome "Falha". */
+  async createFolder(account: string, parent: string | null, name: string): Promise<UserFolder[]> {
+    await wait(400);
+    const full = parent ? `${parent}/${leaf(name)}` : leaf(name);
+    if (full.endsWith("Falha")) throw "IMAP: servidor recusou o CREATE";
+    if (userFolders.some((f) => f.account === account && f.name.toLowerCase() === full.toLowerCase())) throw "Já existe uma pasta com esse nome";
+    userFolders = [...userFolders, { account, name: full, delimiter: "/" }];
+    return this.userFolders();
+  },
+  async renameFolder(account: string, folder: string, name: string): Promise<UserFolder[]> {
+    await wait(400);
+    const parent = folder.includes("/") ? folder.slice(0, folder.lastIndexOf("/") + 1) : "";
+    const next = parent + leaf(name);
+    if (userFolders.some((f) => f.account === account && f.name !== folder && f.name.toLowerCase() === next.toLowerCase())) throw "Já existe uma pasta com esse nome";
+    const swap = (n: string) => (n === folder || n.startsWith(`${folder}/`) ? next + n.slice(folder.length) : n);
+    userFolders = userFolders.map((f) => (f.account === account ? { ...f, name: swap(f.name) } : f));
+    messages.forEach((m) => { if (m.account === account && m.box) m.box = swap(m.box); });
+    return this.userFolders();
+  },
+  async countFolder(account: string, folder: string): Promise<number> {
+    return messages.filter((m) => m.account === account && inTree(m, folder)).length;
+  },
+  async deleteFolder(account: string, folder: string): Promise<UserFolder[]> {
+    await wait(400);
+    userFolders = userFolders.filter((f) => !(f.account === account && (f.name === folder || f.name.startsWith(`${folder}/`))));
+    messages = messages.filter((m) => !(m.account === account && inTree(m, folder)));
+    return this.userFolders();
+  },
+  /** Devolve quantas foram movidas (só as da mesma conta da pasta). */
+  async moveToFolder(ids: number[], account: string, folder: string): Promise<number> {
+    await wait(400);
+    const found = messages.filter((x) => ids.includes(x.id) && x.account === account && x.box !== folder);
+    if (found.some((m) => m.subject.toLowerCase().includes("fatura"))) throw "IMAP: servidor recusou o MOVE";
+    found.forEach((m) => { m.role = null; m.box = folder; });
+    return found.length;
+  },
+  async setCategory(ids: number[], category: string | null): Promise<void> {
+    await wait(100);
+    messages.forEach((m) => { if (ids.includes(m.id)) m.category = category; });
+  },
+  /** Para testar a falha: senha com menos de 3 caracteres ou servidor com "erro". */
+  async updateAccount(a: Account, password: string | null): Promise<Account> {
+    await wait(900);
+    const cur = accounts.find((x) => x.id === a.id);
+    if (!cur) throw "conta não encontrada";
+    if (cur.auth && cur.auth !== "password") {
+      cur.name = a.name?.trim() || null;
+    } else {
+      if (password !== null && password.length > 0 && password.length < 3) throw "LOGIN failed. Invalid login/password";
+      if (a.host.includes("erro") || a.smtp?.host.includes("erro")) throw "conexão recusada pelo servidor";
+      Object.assign(cur, { name: a.name?.trim() || null, host: a.host, port: a.port, security: a.security, smtp: a.smtp });
+    }
+    accounts = [...accounts];
+    return { ...cur };
   },
   async sync(): Promise<SyncResult> {
     await wait(700);
@@ -266,12 +340,13 @@ export const mockApi = {
     if (!m) throw "mensagem não encontrada";
     if (m.subject.toLowerCase().includes("fatura")) throw "IMAP: servidor recusou o MOVE";
     m.role = role;
+    m.box = undefined;
   },
   async moveMany(ids: number[], role: Role): Promise<void> {
     await wait(400);
     const found = messages.filter((x) => ids.includes(x.id));
     if (found.some((m) => m.subject.toLowerCase().includes("fatura"))) throw "IMAP: servidor recusou o MOVE";
-    found.forEach((m) => { m.role = role; });
+    found.forEach((m) => { m.role = role; m.box = undefined; });
   },
   async deleteForever(id: number): Promise<void> {
     await wait(400);

@@ -1,12 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowLeft, ArrowsIn, ArrowsOut, ArrowBendUpLeft, ArrowBendDoubleUpLeft, ArrowBendUpRight, ArrowsClockwise, Archive, CaretUp, Check, MagnifyingGlass, NotePencil, Plus, Star, Trash, Tray, EnvelopeSimple, EnvelopeSimpleOpen, GearSix, Paperclip, FileText, X } from "@phosphor-icons/react";
 import { HtmlBody, hasRemoteImages } from "./HtmlBody";
-import { api, isTauri, type Account, type Attachment, type MessageDetail, type MessageSummary, type OutAttachment, type Role, type Settings, type StoredDraft, type UnreadCounts, type View } from "./api";
+import { api, isTauri, type Account, type Attachment, type MessageDetail, type MessageSummary, type OutAttachment, type Role, type Settings, type StoredDraft, type UnreadCounts, type UserFolder, type View } from "./api";
 import { AccountDialog } from "./AccountDialog";
+import { CategoryChip, CategoryPicker, parseCategories } from "./Categories";
+import { FolderDialog, type FolderDialogState } from "./FolderDialog";
+import { FolderTree } from "./FolderTree";
+import { boxView, catView, parseBox, parseCat } from "./views";
 import { Composer, type ComposeInit } from "./Composer";
 import { escapeHtml, textToHtml } from "./richtext";
 import { Toaster, toast } from "./toast";
-import { FOLDERS, LOCAL_VIEWS, SHOWS_UNREAD, withStarred } from "./folders";
+import { FOLDERS, LOCAL_VIEWS, SHOWS_UNREAD, folderTree, viewInfo, withStarred, type Dest, type FolderNode } from "./folders";
 import { fmtSize } from "./format";
 import { Resizer } from "./Resizer";
 import { SettingsPage } from "./SettingsPage";
@@ -102,7 +106,7 @@ export default function App() {
   /** Cascata só na primeira abertura; buscas e atualizações trocam a lista sem animar. */
   const [intro, setIntro] = useState(true);
   const [folder, setFolder] = useState<View>("inbox");
-  const [folderList, setFolderList] = useState<View[]>(["inbox", "starred"]);
+  const [folderList, setFolderList] = useState<(Role | "starred")[]>(["inbox", "starred"]);
   /** Janela da pasta atual no servidor e total que o servidor informou. */
   const [keep, setKeep] = useState(KEEP);
   const [serverTotal, setServerTotal] = useState<number | null>(null);
@@ -126,6 +130,15 @@ export default function App() {
   const [thread, setThread] = useState<MessageSummary[]>([]);
   const [bodies, setBodies] = useState<Record<number, MessageDetail>>({});
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
+  /** Pastas do usuário (todas as contas), o diálogo de criar/renomear e a exclusão à espera de confirmação. */
+  const [userFolders, setUserFolders] = useState<UserFolder[]>([]);
+  const [folderDialog, setFolderDialog] = useState<FolderDialogState | null>(null);
+  const [folderDelete, setFolderDelete] = useState<{ node: FolderNode; count: number } | null>(null);
+  const [folderBusy, setFolderBusy] = useState(false);
+  /** Arrastar da lista para uma pasta: mensagens em arrasto e alvo sob o ponteiro. */
+  const dragging = useRef<MessageSummary[]>([]);
+  const [dragIds, setDragIds] = useState<Set<number>>(new Set());
+  const [dropKey, setDropKey] = useState<string | null>(null);
   const known = useRef<Set<number> | null>(null);
   const folderRef = useRef(folder);
   folderRef.current = folder;
@@ -161,11 +174,11 @@ export default function App() {
   const withThread = (ms: MessageSummary[]) => [...new Map(ms.flatMap((m) => rowOf.get(m.id)?.members ?? [m]).map((m) => [m.id, m])).values()];
   const checkedRows = useMemo(() => rows.filter((r) => checked.has(r.head.id)), [rows, checked]);
   const checkedList = useMemo(() => checkedRows.flatMap((r) => r.members), [checkedRows]);
-  /** Só a pasta real sincroniza com o servidor; "Com estrela" e "Todas as caixas" são visões do banco local. */
-  const remote = !LOCAL_VIEWS.includes(folder);
+  /** Só a pasta real sincroniza com o servidor; "Com estrela", "Todas as caixas" e categorias são visões do banco local. */
+  const remote = !LOCAL_VIEWS.includes(folder) && !parseCat(folder);
   /** "Todas as caixas" só existe com 2+ contas. */
-  const navFolders: View[] = accounts && accounts.length > 1 ? ["all", ...folderList] : folderList;
-  const unreadOf = (r: View) => (r === "all" ? counts.inbox : r !== "starred" && SHOWS_UNREAD.includes(r) ? counts[r] : 0);
+  const navFolders: (Role | "starred" | "all")[] = accounts && accounts.length > 1 ? ["all", ...folderList] : folderList;
+  const unreadOf = (r: Role | "starred" | "all") => (r === "all" ? counts.inbox : r !== "starred" && SHOWS_UNREAD.includes(r) ? counts[r] : 0);
   /** Rótulo curto da conta na linha: a parte antes do @, ou o endereço inteiro se duas contas começam igual. */
   const acctLabel = (id: string) => {
     const a = accounts?.find((x) => x.id === id);
@@ -173,6 +186,9 @@ export default function App() {
     const local = a.username.split("@")[0];
     return accounts!.some((x) => x.id !== id && x.username.split("@")[0] === local) ? a.username : local;
   };
+  const categories = useMemo(() => parseCategories(settings.categories), [settings.categories]);
+  const tree = useMemo(() => folderTree(userFolders.filter((f) => !accountFilter || f.account === accountFilter)), [userFolders, accountFilter]);
+  const info = viewInfo(folder, userFolders, categories);
 
   const current = visible.find((m) => m.id === selectedId) ?? null;
   const pane = settings.pane === "bottom" || settings.pane === "off" ? settings.pane : "right";
@@ -219,11 +235,11 @@ export default function App() {
     refreshCounts();
   }, [folder, refreshCounts]);
 
-  const syncFolder = useCallback(async (role: Role, window: number) => {
-    const r = await api.syncFolder(role, window);
+  const syncFolder = useCallback(async (view: View, window: number) => {
+    const r = await api.syncFolder(view, window);
     r.errors.forEach((e) => toast(e, "error"));
     // Outra sincronização em andamento: não há total confiável (0 esconderia "carregar mais").
-    if (!r.skipped && folderRef.current === role) setServerTotal(r.total);
+    if (!r.skipped && folderRef.current === view) setServerTotal(r.total);
     return !r.skipped;
   }, []);
 
@@ -239,6 +255,7 @@ export default function App() {
       if (r.skipped) return;
       r.errors.forEach((e) => toast(e, "error"));
       api.folders().then((r) => setFolderList(withStarred(r))).catch(() => {});
+      api.userFolders().then(setUserFolders).catch(() => {});
       if (r.fetched) {
         if (!remote) await reload(messages.length);
         toast(plural(r.fetched, "mensagem nova", "mensagens novas"), "success");
@@ -257,6 +274,7 @@ export default function App() {
   useEffect(() => {
     api.listAccounts().then(setAccounts);
     api.folders().then((r) => setFolderList(withStarred(r))).catch(() => {});
+    api.userFolders().then(setUserFolders).catch(() => {});
     refreshDrafts();
     api.settings().then((s) => {
       setSettings(s);
@@ -495,6 +513,114 @@ export default function App() {
     api.setSetting(key, value).catch((e) => toast(`Não consegui salvar a configuração: ${e}`, "error"));
   }
 
+  function accountSaved(a: Account) {
+    setAccounts((l) => (l ?? []).map((x) => (x.id === a.id ? a : x)));
+  }
+
+  /** Sai da pasta aberta se ela (ou a mãe dela) deixou de existir ou mudou de nome. */
+  function followFolder(node: FolderNode, renamedTo: string | null) {
+    const box = parseBox(folder);
+    if (!box || box.account !== node.account) return;
+    const under = box.name === node.name || (node.delimiter !== "" && box.name.startsWith(node.name + node.delimiter));
+    if (!under) return;
+    if (renamedTo === null) openFolder("inbox");
+    else setFolder(boxView(box.account, renamedTo + box.name.slice(node.name.length)));
+  }
+
+  async function submitFolder(account: string, parent: string | null, name: string) {
+    const st = folderDialog;
+    if (!st) return;
+    if (st.mode === "create") {
+      setUserFolders(await api.createFolder(account, parent, name));
+      toast("Pasta criada", "success");
+      return;
+    }
+    const { node } = st;
+    setUserFolders(await api.renameFolder(node.account, node.name, name));
+    const at = node.delimiter ? node.name.lastIndexOf(node.delimiter) : -1;
+    followFolder(node, (at >= 0 ? node.name.slice(0, at + 1) : "") + name);
+    toast("Pasta renomeada", "success");
+  }
+
+  async function removeFolder(node: FolderNode) {
+    setFolderBusy(true);
+    try {
+      setUserFolders(await api.deleteFolder(node.account, node.name));
+      followFolder(node, null);
+      toast("Pasta excluída", "success");
+    } catch (e) {
+      toast(`Não foi possível excluir a pasta: ${e}`, "error");
+    } finally {
+      setFolderBusy(false);
+      setFolderDelete(null);
+    }
+  }
+
+  /** Pasta vazia some direto; com mensagens (contando as subpastas) pede confirmação. */
+  async function askDeleteFolder(node: FolderNode) {
+    try {
+      const count = await api.countFolder(node.account, node.name);
+      if (count === 0) await removeFolder(node);
+      else setFolderDelete({ node, count });
+    } catch (e) {
+      toast(`Não consegui consultar a pasta: ${e}`, "error");
+    }
+  }
+
+  /** Aplica (ou tira) a categoria na hora; na visão de uma categoria, a mensagem sai da lista se mudou de categoria. */
+  async function applyCategory(ms: MessageSummary[], id: string | null) {
+    const ids = new Set(ms.map((m) => m.id));
+    const set = (l: MessageSummary[]) => l.map((m) => (ids.has(m.id) ? { ...m, category: id } : m));
+    setMessages(set);
+    setResults((r) => r && set(r));
+    try {
+      await api.setCategory([...ids], id);
+      const inCat = parseCat(folder);
+      if (inCat && id !== inCat) takeOutMany(ms);
+    } catch (e) {
+      toast(`Não consegui aplicar a categoria: ${e}`, "error");
+      reload(messages.length).catch(() => {});
+    }
+  }
+
+  function endDrag() {
+    dragging.current = [];
+    setDragIds(new Set());
+    setDropKey(null);
+  }
+
+  /** Alvo de soltar mensagens arrastadas da lista; a pasta aberta não é alvo. */
+  function dropProps(key: string, view: View, dest: Dest): Record<string, unknown> {
+    if (view === folder || showDrafts) return {};
+    return {
+      "data-drop": dropKey === key || undefined,
+      onDragOver: (e: React.DragEvent) => {
+        if (!dragging.current.length) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "move";
+        setDropKey(key);
+      },
+      onDragLeave: (e: React.DragEvent) => {
+        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDropKey((k) => (k === key ? null : k));
+      },
+      onDrop: (e: React.DragEvent) => {
+        e.preventDefault();
+        const ms = dragging.current;
+        endDrag();
+        if (!ms.length) return;
+        if (typeof dest === "string") {
+          const todo = ms.filter((m) => m.role !== dest);
+          if (todo.length) moveOut(todo, dest);
+          return;
+        }
+        const same = ms.filter((m) => m.account === dest.account);
+        const other = ms.length - same.length;
+        if (other) toast(`${plural(other, "mensagem é", "mensagens são")} de outra conta e não ${other === 1 ? "foi movida" : "foram movidas"}`, "info");
+        if (same.length) moveOut(same, dest);
+      },
+    };
+  }
+
   async function removeAccount(id: string) {
     await api.removeAccount(id);
     setAccounts((l) => (l ?? []).filter((a) => a.id !== id));
@@ -504,6 +630,7 @@ export default function App() {
     setDetail(null);
     setReaderOpen(false);
     api.folders().then(setFolderList).catch(() => {});
+    api.userFolders().then(setUserFolders).catch(() => {});
     refreshDrafts();
     reload().catch(() => {});
     toast("Conta removida", "success");
@@ -632,19 +759,21 @@ export default function App() {
   }
 
   /** Sai da lista na hora; o servidor só recebe quando o "Desfazer" expira. */
-  function moveOut(ms: MessageSummary[], to: Role) {
+  function moveOut(ms: MessageSummary[], to: Dest) {
     const ids = ms.map((m) => m.id);
     const undo = takeOutMany(ms);
     ids.forEach((id) => pendingMove.current.add(id));
     const restore = () => { ids.forEach((id) => pendingMove.current.delete(id)); undo(); };
-    const text = to === "trash" ? "Movida para a Lixeira" : to === "inbox" ? "Movida para a Caixa de entrada" : "Arquivada";
+    const text = typeof to !== "string" ? `Movida para ${to.label}`
+      : to === "trash" ? "Movida para a Lixeira" : to === "inbox" ? "Movida para a Caixa de entrada" : to === "archive" ? "Arquivada" : `Movida para ${FOLDERS[to].label}`;
     toast(ms.length === 1 ? text : `${plural(ms.length, "mensagem movida", "mensagens movidas")}`, "info", {
       action: { label: "Desfazer", onClick: restore },
       duration: UNDO_MS,
       onClose: async (reason) => {
         if (reason === "action") return;
         try {
-          await api.moveMany(ids, to);
+          if (typeof to === "string") await api.moveMany(ids, to);
+          else await api.moveToFolder(ids, to.account, to.name);
           ids.forEach((id) => pendingMove.current.delete(id));
           refreshCounts();
         } catch (e) {
@@ -790,7 +919,11 @@ export default function App() {
   // s estrela, u marca não lida. Com mensagens marcadas (checkbox), e/#/s/u valem para todas. Esc limpa a busca, a seleção ou volta.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (dialog || compose || settingsOpen || update) return;
+      if (dialog || compose || settingsOpen || update || folderDialog) return;
+      if (folderDelete) {
+        if (e.key === "Escape" && !folderBusy) setFolderDelete(null);
+        return;
+      }
       if (confirmDelete) {
         if (e.key === "Escape" && !deleting) setConfirmDelete(null);
         return;
@@ -885,6 +1018,7 @@ export default function App() {
               aria-label="Marcar como não lida" title="Marcar como não lida (u)">
               <EnvelopeSimple size={15} weight="bold" />
             </button>
+            <CategoryPicker className="btn icon-only" categories={categories} current={current.category ?? null} onPick={(id) => applyCategory(withThread([current]), id)} />
           </>
         )}
       </div>
@@ -962,7 +1096,8 @@ export default function App() {
             const Icon = FOLDERS[r].icon;
             return (
               <button key={r} className="nav-item" title={FOLDERS[r].label} onClick={() => openFolder(r)}
-                aria-current={r === folder && !showDrafts ? "page" : undefined}>
+                aria-current={r === folder && !showDrafts ? "page" : undefined}
+                {...(r === "starred" || r === "all" ? {} : dropProps(r, r, r))}>
                 <Icon size={16} weight="bold" />
                 <span>{FOLDERS[r].label}</span>
                 {!!unreadOf(r) && <span className="count">{unreadOf(r)}</span>}
@@ -975,6 +1110,14 @@ export default function App() {
             {drafts.length > 0 && <span className="count plain">{drafts.length}</span>}
           </button>
         </nav>
+        <FolderTree nodes={tree} accounts={accounts ?? []} byAccount={(accounts?.length ?? 0) > 1 && !accountFilter}
+          categories={categories} folder={folder} inList={!showDrafts} open={openFolder}
+          drop={(key, view) => {
+            const box = parseBox(view);
+            return box ? dropProps(key, view, { account: box.account, name: box.name, label: viewInfo(view, userFolders, categories).label }) : {};
+          }}
+          onNew={(parent) => setFolderDialog({ mode: "create", account: parent?.account ?? accountFilter ?? undefined, parent: parent?.name })}
+          onRename={(node) => setFolderDialog({ mode: "rename", node })} onDelete={askDeleteFolder} />
         <div className="rail-section">
           <div className="rail-label">Contas</div>
           {accounts && accounts.length > 1 && (
@@ -1046,6 +1189,14 @@ export default function App() {
               </button>
             );
           })}
+          {[...tree.map((n) => boxView(n.account, n.name)), ...categories.map((c) => catView(c.id))].map((v) => {
+            const { label, icon: Icon } = viewInfo(v, userFolders, categories);
+            return (
+              <button key={v} className="btn ghost small" onClick={() => openFolder(v)} aria-current={v === folder && !showDrafts ? "page" : undefined}>
+                <Icon size={14} weight="bold" /> {label}
+              </button>
+            );
+          })}
           <button className="btn ghost small" onClick={openDrafts} aria-current={showDrafts ? "page" : undefined}>
             <FileText size={14} weight="bold" /> Rascunhos
           </button>
@@ -1070,6 +1221,8 @@ export default function App() {
                 aria-label="Marcar como não lida" title="Marcar como não lida (u)"><EnvelopeSimple size={16} weight="bold" /></button>
               <button className="icon-btn" onClick={() => toggleStar(checkedList)}
                 aria-label="Alternar estrela" title="Alternar estrela (s)"><Star size={16} weight="bold" /></button>
+              <CategoryPicker className="icon-btn" categories={categories} onPick={(id) => applyCategory(checkedList, id)}
+                current={checkedList.every((m) => m.category === checkedList[0].category) ? checkedList[0].category ?? null : undefined} />
             </span>
           </div>
         )}
@@ -1103,7 +1256,7 @@ export default function App() {
         ) : results && results.length === 0 ? (
           <div className="empty quiet"><p>Nada encontrado.</p></div>
         ) : !results && visible.length === 0 ? (
-          <div className="empty quiet"><p>{loadingFolder ? "Carregando…" : FOLDERS[folder].empty}</p></div>
+          <div className="empty quiet"><p>{loadingFolder ? "Carregando…" : info.empty}</p></div>
         ) : (
           <ul ref={listRef} className="list" role="listbox" aria-label="Mensagens" data-intro={intro || undefined}
             data-selecting={checkedList.length > 0 || undefined} aria-multiselectable
@@ -1120,7 +1273,16 @@ export default function App() {
               return (
                 <li key={m.id} role="option" aria-selected={open}
                   className="row" data-unread={unread || undefined} data-fresh={freshIds.has(m.id) || undefined}
-                  data-checked={checked.has(m.id) || undefined}
+                  data-checked={checked.has(m.id) || undefined} data-dragging={row.members.some((x) => dragIds.has(x.id)) || undefined}
+                  draggable
+                  onDragStart={(e) => {
+                    const ms = checked.has(m.id) ? checkedList : row.members;
+                    dragging.current = ms;
+                    e.dataTransfer.effectAllowed = "move";
+                    e.dataTransfer.setData("text/plain", ms.map((x) => x.subject).join("\n"));
+                    setDragIds(new Set(ms.map((x) => x.id)));
+                  }}
+                  onDragEnd={endDrag}
                   style={{ "--i": Math.min(i, 12) } as React.CSSProperties}
                   onClick={(e) => onRowClick(e, m)} onDoubleClick={(e) => { if (!(e.target as Element).closest("button")) setFull(true); }}>
                   <span className="dot" aria-hidden />
@@ -1141,6 +1303,7 @@ export default function App() {
                   </button>
                   <span className="subject">
                     {folder === "all" && <span className="acct" title={m.account}>{acctLabel(m.account)}</span>}
+                    {categories.filter((c) => c.id === m.category).map((c) => <CategoryChip key={c.id} category={c} />)}
                     {m.subject || "(sem assunto)"}
                   </span>
                   <span className="snippet">{m.snippet}</span>
@@ -1173,7 +1336,7 @@ export default function App() {
         {detail && detail.id === selectedId ? (
           <article key={detail.id} className="message" data-instant={viaKeyboard || undefined}>
             <button className="btn ghost small back" onClick={() => (full ? setFull(false) : setReaderOpen(false))}>
-              <ArrowLeft size={14} weight="bold" /> {full ? "Voltar" : FOLDERS[folder].label}
+              <ArrowLeft size={14} weight="bold" /> {full ? "Voltar" : info.label}
             </button>
             <h1>{detail.subject || "(sem assunto)"}</h1>
             {threaded && actionsBar}
@@ -1231,7 +1394,22 @@ export default function App() {
       )}
       {settingsOpen && (
         <SettingsPage accounts={accounts ?? []} settings={settings} onSetting={changeSetting} onRemoveAccount={removeAccount}
-          onAddAccount={() => setDialog(true)} onClose={() => setSettingsOpen(false)} onUpdate={showUpdate} />
+          onAddAccount={() => setDialog(true)} onAccountSaved={accountSaved} onClose={() => setSettingsOpen(false)} onUpdate={showUpdate} />
+      )}
+      {folderDialog && (
+        <FolderDialog state={folderDialog} accounts={accounts ?? []} folders={userFolders} onSubmit={submitFolder} onClose={() => setFolderDialog(null)} />
+      )}
+      {folderDelete && (
+        <div className="confirm scrim" onMouseDown={(e) => { if (e.target === e.currentTarget && !folderBusy) setFolderDelete(null); }}>
+          <div className="confirm-card" role="alertdialog" aria-labelledby="folder-delete-title">
+            <p id="folder-delete-title">Excluir a pasta “{folderDelete.node.leaf}”?</p>
+            <span>{plural(folderDelete.count, "mensagem", "mensagens")} (incluindo subpastas) serão excluídas do servidor junto com a pasta.</span>
+            <div className="confirm-actions">
+              <button type="button" className="btn" onClick={() => setFolderDelete(null)} disabled={folderBusy} autoFocus>Cancelar</button>
+              <button type="button" className="btn danger" onClick={() => removeFolder(folderDelete.node)} disabled={folderBusy}>Excluir pasta</button>
+            </div>
+          </div>
+        </div>
       )}
       {update && (
         <UpdateDialog update={update} onLater={() => { skip(update.version); setUpdate(null); }} />

@@ -69,6 +69,19 @@ CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+-- Pastas criadas pelo usuário (lista copiada do servidor) e categorias coloridas (só locais).
+CREATE TABLE IF NOT EXISTS user_folders (
+  account TEXT NOT NULL,
+  name TEXT NOT NULL,
+  delimiter TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (account, name)
+);
+CREATE TABLE IF NOT EXISTS message_categories (
+  account TEXT NOT NULL,
+  msg_key TEXT NOT NULL,
+  category TEXT NOT NULL,
+  PRIMARY KEY (account, msg_key)
+);
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5 (
   subject, from_name, from_addr, body_text,
   content = 'messages', content_rowid = 'id',
@@ -139,6 +152,17 @@ pub struct MessageSummary {
     pub thread_id: i64,
     /// Mensagens do fio, em qualquer pasta.
     pub thread_count: u32,
+    /// Id da categoria colorida aplicada (definidas nas configurações); `None` sem categoria.
+    pub category: Option<String>,
+}
+
+/// Pasta criada pelo usuário numa conta.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct UserFolder {
+    pub account: String,
+    pub name: String,
+    /// Separador da hierarquia no servidor (vazio se não há).
+    pub delimiter: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -196,11 +220,23 @@ const IN_ROLE: &str = "m.mailbox = COALESCE(
     (SELECT f.name FROM folders f WHERE f.account = m.account AND f.role = ?1),
     CASE ?1 WHEN 'inbox' THEN 'INBOX' END)";
 
-const SUMMARY_COLS: &str = "m.id, m.account, m.uid, m.from_name, m.from_addr, m.subject, m.date, m.snippet, m.seen, m.flagged,
+/// Chave da categoria: o Message-ID (sobrevive a mover entre pastas, que muda o UID); sem ele, pasta/UID.
+macro_rules! msg_key {
+    () => {
+        "CASE WHEN m.message_id <> '' THEN m.message_id ELSE m.mailbox || '/' || m.uid END"
+    };
+}
+
+const SUMMARY_COLS: &str = concat!(
+    "m.id, m.account, m.uid, m.from_name, m.from_addr, m.subject, m.date, m.snippet, m.seen, m.flagged,
     COALESCE((SELECT f.role FROM folders f WHERE f.account = m.account AND f.name = m.mailbox),
     CASE WHEN m.mailbox = 'INBOX' THEN 'inbox' END),
     m.thread_id,
-    CASE WHEN m.thread_id = 0 THEN 1 ELSE (SELECT COUNT(*) FROM messages t WHERE t.account = m.account AND t.thread_id = m.thread_id) END";
+    CASE WHEN m.thread_id = 0 THEN 1 ELSE (SELECT COUNT(*) FROM messages t WHERE t.account = m.account AND t.thread_id = m.thread_id) END,
+    (SELECT c.category FROM message_categories c WHERE c.account = m.account AND c.msg_key = ",
+    msg_key!(),
+    ")"
+);
 
 /// Fora da Lixeira e do Spam.
 const NOT_DISCARDED: &str = "COALESCE((SELECT f.role FROM folders f WHERE f.account = m.account AND f.name = m.mailbox), '') NOT IN ('trash', 'junk')";
@@ -220,6 +256,7 @@ fn row_to_summary(r: &rusqlite::Row) -> rusqlite::Result<MessageSummary> {
         role: r.get(10)?,
         thread_id: r.get(11)?,
         thread_count: r.get(12)?,
+        category: r.get(13)?,
     })
 }
 
@@ -517,12 +554,12 @@ impl Store {
                 |r| {
                     Ok(MessageDetail {
                         summary: row_to_summary(r)?,
-                        body_text: r.get(13)?,
-                        body_html: r.get(14)?,
-                        reply_addr: r.get(15)?,
-                        attachments: serde_json::from_str(&r.get::<_, String>(16)?).unwrap_or_default(),
-                        to_addrs: r.get(17)?,
-                        cc_addrs: r.get(18)?,
+                        body_text: r.get(14)?,
+                        body_html: r.get(15)?,
+                        reply_addr: r.get(16)?,
+                        attachments: serde_json::from_str(&r.get::<_, String>(17)?).unwrap_or_default(),
+                        to_addrs: r.get(18)?,
+                        cc_addrs: r.get(19)?,
                     })
                 },
             )
@@ -749,6 +786,135 @@ impl Store {
         Ok(())
     }
 
+    /// Troca a lista de pastas do usuário de uma conta (o que o servidor acabou de listar).
+    pub fn set_user_folders(&mut self, account: &str, names: &[String], delimiter: &str) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute("DELETE FROM user_folders WHERE account = ?1", params![account])?;
+        for n in names {
+            tx.execute("INSERT INTO user_folders (account, name, delimiter) VALUES (?1, ?2, ?3)", params![account, n, delimiter])?;
+        }
+        Ok(tx.commit()?)
+    }
+
+    pub fn user_folders(&self) -> Result<Vec<UserFolder>> {
+        let mut stmt = self.conn.prepare_cached("SELECT account, name, delimiter FROM user_folders ORDER BY account, name")?;
+        let rows = stmt
+            .query_map([], |r| Ok(UserFolder { account: r.get(0)?, name: r.get(1)?, delimiter: r.get(2)? }))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(rows)
+    }
+
+    /// Depois de renomear no servidor: a pasta e as subpastas passam a ter o novo nome, com as mensagens.
+    pub fn rename_box(&mut self, account: &str, old: &str, new: &str, delimiter: &str) -> Result<()> {
+        // Sem separador não há subpastas: o prefixo impossível não casa com nada.
+        let prefix = if delimiter.is_empty() { "\u{0}".to_string() } else { format!("{old}{delimiter}") };
+        let tx = self.conn.transaction()?;
+        for (table, col) in [("messages", "mailbox"), ("mailbox_state", "mailbox"), ("user_folders", "name")] {
+            tx.execute(
+                &format!(
+                    "UPDATE {table} SET {col} = ?3 || substr({col}, length(?2) + 1)
+                     WHERE account = ?1 AND ({col} = ?2 OR substr({col}, 1, length(?4)) = ?4)"
+                ),
+                params![account, old, new, prefix],
+            )?;
+        }
+        Ok(tx.commit()?)
+    }
+
+    /// Depois de excluir no servidor: apaga a cópia local das pastas e das mensagens delas.
+    pub fn drop_boxes(&mut self, account: &str, names: &[String]) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        for n in names {
+            tx.execute("DELETE FROM messages WHERE account = ?1 AND mailbox = ?2", params![account, n])?;
+            tx.execute("DELETE FROM mailbox_state WHERE account = ?1 AND mailbox = ?2", params![account, n])?;
+            tx.execute("DELETE FROM user_folders WHERE account = ?1 AND name = ?2", params![account, n])?;
+        }
+        Ok(tx.commit()?)
+    }
+
+    /// Mensagens de uma pasta de uma conta (as pastas do usuário não se juntam entre contas).
+    pub fn list_box(&self, account: &str, mailbox: &str, limit: u32, offset: u32) -> Result<Vec<MessageSummary>> {
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT {SUMMARY_COLS} FROM messages m WHERE m.account = ?1 AND m.mailbox = ?2
+             ORDER BY m.date DESC, m.id DESC LIMIT ?3 OFFSET ?4"
+        ))?;
+        let rows = stmt
+            .query_map(params![account, mailbox, limit, offset], row_to_summary)?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(rows)
+    }
+
+    pub fn search_box(&self, account: &str, mailbox: &str, query: &str, limit: u32) -> Result<Vec<MessageSummary>> {
+        let Some(q) = fts_query(query) else {
+            return Ok(Vec::new());
+        };
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT {SUMMARY_COLS} FROM messages_fts f JOIN messages m ON m.id = f.rowid
+             WHERE messages_fts MATCH ?1 AND m.account = ?2 AND m.mailbox = ?3 ORDER BY m.date DESC LIMIT ?4"
+        ))?;
+        let rows = stmt
+            .query_map(params![q, account, mailbox, limit], row_to_summary)?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(rows)
+    }
+
+    /// Aplica a categoria (ou tira, com `None`) às mensagens. Só local: não muda nada no servidor.
+    pub fn set_category(&mut self, ids: &[i64], category: Option<&str>) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        for id in ids {
+            let found: Option<(String, String)> = tx
+                .query_row(
+                    concat!("SELECT m.account, ", msg_key!(), " FROM messages m WHERE m.id = ?1"),
+                    params![id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            let Some((account, key)) = found else { continue };
+            match category {
+                Some(c) => tx.execute(
+                    "INSERT INTO message_categories (account, msg_key, category) VALUES (?1, ?2, ?3)
+                     ON CONFLICT (account, msg_key) DO UPDATE SET category = excluded.category",
+                    params![account, key, c],
+                )?,
+                None => tx.execute("DELETE FROM message_categories WHERE account = ?1 AND msg_key = ?2", params![account, key])?,
+            };
+        }
+        Ok(tx.commit()?)
+    }
+
+    /// Mensagens de uma categoria, em todas as contas, exceto Lixeira e Spam.
+    pub fn list_category(&self, category: &str, limit: u32, offset: u32) -> Result<Vec<MessageSummary>> {
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT {SUMMARY_COLS} FROM messages m
+             WHERE (SELECT c.category FROM message_categories c WHERE c.account = m.account AND c.msg_key = {key}) = ?1
+               AND {NOT_DISCARDED}
+             ORDER BY m.date DESC, m.id DESC LIMIT ?2 OFFSET ?3",
+            key = msg_key!()
+        ))?;
+        let rows = stmt
+            .query_map(params![category, limit, offset], row_to_summary)?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(rows)
+    }
+
+    pub fn search_category(&self, category: &str, query: &str, limit: u32) -> Result<Vec<MessageSummary>> {
+        let Some(q) = fts_query(query) else {
+            return Ok(Vec::new());
+        };
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT {SUMMARY_COLS} FROM messages_fts f JOIN messages m ON m.id = f.rowid
+             WHERE messages_fts MATCH ?1
+               AND (SELECT c.category FROM message_categories c WHERE c.account = m.account AND c.msg_key = {key}) = ?2
+               AND {NOT_DISCARDED}
+             ORDER BY m.date DESC LIMIT ?3",
+            key = msg_key!()
+        ))?;
+        let rows = stmt
+            .query_map(params![q, category, limit], row_to_summary)?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(rows)
+    }
+
     /// Apaga tudo o que é local de uma conta: mensagens (e FTS), estado das pastas, pastas, rascunhos e assinatura.
     pub fn remove_account(&mut self, account: &str) -> Result<()> {
         let tx = self.conn.transaction()?;
@@ -757,6 +923,8 @@ impl Store {
             "DELETE FROM mailbox_state WHERE account = ?1",
             "DELETE FROM folders WHERE account = ?1",
             "DELETE FROM drafts WHERE account = ?1",
+            "DELETE FROM user_folders WHERE account = ?1",
+            "DELETE FROM message_categories WHERE account = ?1",
             "DELETE FROM settings WHERE key = 'signature:' || ?1",
         ] {
             tx.execute(sql, params![account])?;
@@ -1145,5 +1313,76 @@ mod tests {
         assert_eq!(list.len(), 2);
         assert!(list[0].thread_id != 0 && list[0].thread_id == list[1].thread_id);
         assert_eq!(list[0].thread_count, 2);
+    }
+
+    #[test]
+    fn pastas_do_usuario_listam_renomeiam_e_somem_com_as_mensagens() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.set_uid_validity("a", "INBOX.Obra", 7).unwrap();
+        s.insert_messages("a", "INBOX.Obra", &[msg(1, "planta", "x", 10)]).unwrap();
+        s.insert_messages("a", "INBOX.Obra.Fase1", &[msg(2, "fase", "x", 20)]).unwrap();
+        s.insert_messages("a", "INBOX.ObraX", &[msg(3, "outra", "x", 30)]).unwrap();
+        s.insert_messages("b", "INBOX.Obra", &[msg(4, "da conta b", "x", 40)]).unwrap();
+        let names = ["INBOX.Obra".to_string(), "INBOX.Obra.Fase1".to_string(), "INBOX.ObraX".to_string()];
+        s.set_user_folders("a", &names, ".").unwrap();
+        assert_eq!(s.user_folders().unwrap().len(), 3);
+        assert_eq!(s.list_box("a", "INBOX.Obra", 10, 0).unwrap().len(), 1, "só a conta e a pasta pedidas");
+        assert_eq!(s.search_box("a", "INBOX.Obra", "planta", 10).unwrap().len(), 1);
+        assert!(s.search_box("a", "INBOX.Obra", "fase", 10).unwrap().is_empty());
+
+        s.rename_box("a", "INBOX.Obra", "INBOX.Projeto", ".").unwrap();
+        assert_eq!(s.list_box("a", "INBOX.Projeto", 10, 0).unwrap()[0].subject, "planta");
+        assert_eq!(s.list_box("a", "INBOX.Projeto.Fase1", 10, 0).unwrap()[0].subject, "fase");
+        assert_eq!(s.list_box("a", "INBOX.ObraX", 10, 0).unwrap().len(), 1, "irmã com o mesmo começo não muda");
+        assert_eq!(s.list_box("b", "INBOX.Obra", 10, 0).unwrap().len(), 1, "outra conta não muda");
+        assert_eq!(s.uid_validity("a", "INBOX.Projeto").unwrap(), Some(7));
+        let after: Vec<_> = s.user_folders().unwrap().into_iter().map(|f| f.name).collect();
+        assert_eq!(after, ["INBOX.ObraX", "INBOX.Projeto", "INBOX.Projeto.Fase1"]);
+
+        s.drop_boxes("a", &["INBOX.Projeto.Fase1".into(), "INBOX.Projeto".into()]).unwrap();
+        assert!(s.list_box("a", "INBOX.Projeto", 10, 0).unwrap().is_empty());
+        assert!(s.search_box("a", "INBOX.Projeto.Fase1", "fase", 10).unwrap().is_empty(), "FTS limpo");
+        assert_eq!(s.uid_validity("a", "INBOX.Projeto").unwrap(), None);
+        assert_eq!(s.user_folders().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn categoria_aplica_filtra_tira_e_sobrevive_a_mover() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.insert_messages("a", "INBOX", &[msg(1, "contrato", "x", 10), msg(2, "fatura", "x", 20)]).unwrap();
+        let id = |s: &Store, uid| s.list("INBOX", 10, 0).unwrap().into_iter().find(|m| m.uid == uid).unwrap().id;
+        let (one, two) = (id(&s, 1), id(&s, 2));
+        s.set_category(&[one, two], Some("azul")).unwrap();
+        s.set_category(&[two], Some("verde")).unwrap();
+        assert_eq!(s.list_category("azul", 10, 0).unwrap().iter().map(|m| m.uid).collect::<Vec<_>>(), [1]);
+        assert_eq!(s.search_category("verde", "fatura", 10).unwrap().len(), 1);
+        assert!(s.search_category("azul", "fatura", 10).unwrap().is_empty());
+        assert_eq!(s.list("INBOX", 10, 0).unwrap().iter().find(|m| m.uid == 1).unwrap().category.as_deref(), Some("azul"));
+
+        // Mover muda pasta e UID no servidor: a cópia local some e a nova entra com o mesmo Message-ID.
+        s.remove(one).unwrap();
+        let mut moved = msg(9, "contrato", "x", 10);
+        moved.message_id = "1@exemplo.com".into();
+        s.insert_messages("a", "INBOX.Obra", &[moved]).unwrap();
+        assert_eq!(s.list_box("a", "INBOX.Obra", 10, 0).unwrap()[0].category.as_deref(), Some("azul"));
+
+        s.set_category(&[two], None).unwrap();
+        assert!(s.list_category("verde", 10, 0).unwrap().is_empty());
+        s.set_category(&[999], Some("azul")).unwrap();
+    }
+
+    #[test]
+    fn categoria_nao_lista_lixeira_e_remover_conta_apaga() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.set_folders("a", &[Folder { role: Role::Trash, name: "Trash".into() }]).unwrap();
+        s.insert_messages("a", "INBOX", &[msg(1, "ok", "x", 10)]).unwrap();
+        s.insert_messages("a", "Trash", &[msg(2, "lixo", "x", 20)]).unwrap();
+        let ids: Vec<i64> = s.list("INBOX", 10, 0).unwrap().iter().chain(&s.list("Trash", 10, 0).unwrap()).map(|m| m.id).collect();
+        s.set_category(&ids, Some("azul")).unwrap();
+        assert_eq!(s.list_category("azul", 10, 0).unwrap().len(), 1);
+        s.set_user_folders("a", &["X".into()], "/").unwrap();
+        s.remove_account("a").unwrap();
+        assert!(s.user_folders().unwrap().is_empty());
+        assert!(s.conn.query_row("SELECT COUNT(*) FROM message_categories", [], |r| r.get::<_, i64>(0)).unwrap() == 0);
     }
 }
