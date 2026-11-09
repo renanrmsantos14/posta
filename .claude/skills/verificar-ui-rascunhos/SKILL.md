@@ -6,7 +6,7 @@ description: Verifica rascunhos, assinatura, remoção de conta, filtro por cont
 # Verificar rascunhos, contas e notificações (mock)
 
 1. `pnpm -C apps/client build` (inclui `tsc -b`) e `cargo test -q -p mail-core` (testes `rascunho_*`, `remover_conta_*`, `configuracoes_e_novas_nao_lidas`).
-2. Suba `npx vite --port <livre, diferente de 36480> --strictPort` em `apps/client` (o mock já traz 2 rascunhos e uma assinatura para a conta de exemplo).
+2. Suba `npx vite --port <livre, diferente de 36480> --strictPort` em `apps/client` (o mock traz 2 contas, 2 rascunhos e uma assinatura).
 3. Com playwright-core (`/home/renan/.codex/worktrees/3b95/Auto-Prime-Interno/node_modules/.pnpm/playwright-core@1.63.0/node_modules/playwright-core`), em 1280x800, confirme:
    - Barra lateral: "Rascunhos" com contagem; clicar lista os rascunhos (destinatário, assunto, trecho); clicar num abre o Composer preenchido.
    - Editar o corpo e esperar ~1,9 s mostra "Rascunho salvo" no rodapé; Esc fecha, mostra o toast "Rascunho salvo" e o texto continua na lista (nunca perde texto).

@@ -12,12 +12,16 @@ use crate::imap_sync::{connect, AuthMode, ImapAccount, ImapSession, Security};
 use crate::store::ReplyRef;
 use crate::{Error, Result};
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Outgoing {
     /// Um ou mais endereços separados por vírgula ou ponto e vírgula.
     pub to: String,
     pub subject: String,
+    /// Texto simples (parte `text/plain`); a UI o gera a partir do HTML.
     pub body: String,
+    /// Corpo formatado; quando presente a mensagem sai como `multipart/alternative` (texto + HTML).
+    #[serde(default)]
+    pub html: Option<String>,
     /// Cópia visível (vários endereços, como em `to`).
     #[serde(default)]
     pub cc: String,
@@ -45,6 +49,8 @@ pub struct SendReport {
     pub saved_to_sent: bool,
     /// A mensagem saiu, mas algo depois do envio falhou (ex.: cópia em Enviados).
     pub warning: Option<String>,
+    /// Sem rede: a mensagem foi para a Caixa de saída e sai quando a conexão voltar.
+    pub queued: bool,
 }
 
 fn mailboxes(to: &str) -> Result<Vec<Mailbox>> {
@@ -75,10 +81,9 @@ fn attachment_part(a: &OutAttachment, data: Vec<u8>) -> Result<SinglePart> {
 
 /// Monta a mensagem. Em resposta, In-Reply-To e References mantêm a conversa agrupada.
 pub fn build(acc: &ImapAccount, out: &Outgoing, reply: Option<&ReplyRef>) -> Result<Message> {
-    let from: Mailbox = acc
-        .username
-        .parse()
-        .map_err(|_| Error::Invalid(format!("remetente inválido: {}", acc.username)))?;
+    let addr: lettre::Address =
+        acc.username.parse().map_err(|_| Error::Invalid(format!("remetente inválido: {}", acc.username)))?;
+    let from = Mailbox::new(acc.name.clone().filter(|n| !n.trim().is_empty()), addr);
     let mut b = Message::builder().from(from).subject(out.subject.trim()).message_id(None);
     b = b.mailbox(header::To::from(recipients(&out.to)?));
     if let Some(r) = reply.filter(|r| !r.message_id.is_empty()) {
@@ -100,11 +105,19 @@ pub fn build(acc: &ImapAccount, out: &Outgoing, reply: Option<&ReplyRef>) -> Res
     if !bcc.is_empty() {
         b = b.mailbox(header::Bcc::from(bcc.into_iter().collect::<Mailboxes>()));
     }
+    let html = out.html.as_deref().filter(|h| !h.trim().is_empty());
     if out.attachments.is_empty() {
-        return Ok(b.header(header::ContentType::TEXT_PLAIN).body(out.body.clone())?);
+        return Ok(match html {
+            Some(h) => b.multipart(MultiPart::alternative_plain_html(out.body.clone(), h.to_string()))?,
+            None => b.header(header::ContentType::TEXT_PLAIN).body(out.body.clone())?,
+        });
     }
     let mut total = 0;
-    let mut multi = MultiPart::mixed().singlepart(SinglePart::plain(out.body.clone()));
+    let mut multi = match html {
+        Some(h) => MultiPart::mixed().multipart(MultiPart::alternative_plain_html(out.body.clone(), h.to_string())),
+        None => MultiPart::mixed().singlepart(SinglePart::plain(out.body.clone())),
+    };
+
     for a in &out.attachments {
         let data = base64::engine::general_purpose::STANDARD
             .decode(a.data.trim())
@@ -131,6 +144,15 @@ fn transport(acc: &ImapAccount) -> Result<SmtpTransport> {
         _ => builder.authentication(vec![Mechanism::Xoauth2]),
     }
     .build())
+}
+
+/// Testa o login no servidor SMTP (usado ao editar a conta, antes de salvar).
+pub fn check_smtp(acc: &ImapAccount) -> Result<()> {
+    if transport(acc)?.test_connection()? {
+        Ok(())
+    } else {
+        Err(Error::Invalid("o servidor SMTP recusou a conexão".into()))
+    }
 }
 
 /// O Gmail já guarda no Enviados o que passa pelo SMTP; copiar duplicaria.
@@ -168,10 +190,11 @@ pub fn send(acc: &ImapAccount, out: &Outgoing, reply: Option<&ReplyRef>) -> Resu
     let raw = msg.formatted();
     transport(acc)?.send(&msg)?;
     Ok(match after_send(acc, &raw, reply) {
-        Ok(saved_to_sent) => SendReport { saved_to_sent, warning: None },
+        Ok(saved_to_sent) => SendReport { saved_to_sent, warning: None, queued: false },
         Err(e) => SendReport {
             saved_to_sent: false,
             warning: Some(format!("Enviada, mas não foi possível guardar em Enviados: {e}")),
+            queued: false,
         },
     })
 }
@@ -187,6 +210,7 @@ mod tests {
             port: 993,
             security: Security::Tls,
             username: "eu@exemplo.com".into(),
+            name: None,
             smtp: None,
             auth: AuthMode::Password,
             password: String::new(),
@@ -194,7 +218,7 @@ mod tests {
     }
 
     fn out(to: &str) -> Outgoing {
-        Outgoing { to: to.into(), subject: "Re: Orçamento".into(), body: "Combinado, até amanhã.".into(), cc: String::new(), bcc: String::new(), attachments: vec![] }
+        Outgoing { to: to.into(), subject: "Re: Orçamento".into(), body: "Combinado, até amanhã.".into(), html: None, cc: String::new(), bcc: String::new(), attachments: vec![] }
     }
 
     #[test]
@@ -253,6 +277,30 @@ mod tests {
         let (_, data) = crate::attachments::extract(&raw, 1).unwrap();
         assert_eq!(data, [0, 1, 2, 255]);
         assert_eq!(parsed.body_text(0).unwrap().trim(), "Combinado, até amanhã.");
+    }
+
+    #[test]
+    fn html_vira_multipart_alternative_com_texto_e_html() {
+        let mut o = out("ana@x.com");
+        o.body = "Olá, *Ana*".into();
+        o.html = Some("<p>Olá, <b>Ana</b></p>".into());
+        let raw = build(&acc(), &o, None).unwrap().formatted();
+        assert!(String::from_utf8_lossy(&raw).contains("multipart/alternative"));
+        let parsed = mail_parser::MessageParser::default().parse(&raw).unwrap();
+        assert_eq!(parsed.body_text(0).unwrap().trim(), "Olá, *Ana*");
+        assert_eq!(parsed.body_html(0).unwrap().trim(), "<p>Olá, <b>Ana</b></p>");
+        // Com anexo: mixed contendo o alternative.
+        o.attachments = vec![att("a.pdf", "application/pdf", b"%PDF")];
+        let raw = build(&acc(), &o, None).unwrap().formatted();
+        let text = String::from_utf8_lossy(&raw);
+        assert!(text.contains("multipart/mixed") && text.contains("multipart/alternative"), "{text}");
+        let parsed = mail_parser::MessageParser::default().parse(&raw).unwrap();
+        assert_eq!(parsed.body_html(0).unwrap().trim(), "<p>Olá, <b>Ana</b></p>");
+        assert_eq!(crate::attachments::list(&parsed, "").len(), 1);
+        // HTML em branco = texto simples.
+        o.html = Some("  ".into());
+        o.attachments.clear();
+        assert!(!String::from_utf8_lossy(&build(&acc(), &o, None).unwrap().formatted()).contains("multipart"));
     }
 
     #[test]

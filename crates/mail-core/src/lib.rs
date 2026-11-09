@@ -4,14 +4,17 @@ pub mod attachments;
 pub mod folders;
 pub mod imap_sync;
 pub mod oauth;
+pub mod outbox;
 pub mod send;
 pub mod store;
+pub mod threads;
 
 pub use attachments::Attachment;
 pub use folders::{Folder, Role};
 pub use imap_sync::{AuthMode, IdleEnd, ImapAccount, MsgFlag, Security, SmtpServer, SyncReport};
+pub use outbox::{FlushReport, OpKind, OutboxItem, PendingOp};
 pub use send::{OutAttachment, Outgoing, SendReport};
-pub use store::{DraftRecord, MessageDetail, MessageSummary, ReplyRef, Store};
+pub use store::{Contact, DraftRecord, MessageDetail, MessageSummary, ReplyRef, Store, UserFolder};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -28,3 +31,19 @@ pub enum Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+impl Error {
+    /// A falha foi de rede (sem conexão, DNS, TLS, servidor fora do ar)? Quem recebe deve tentar de novo mais tarde.
+    /// Recusa do servidor (NO/BAD, 5xx, endereço inválido) não é de rede: repetir daria o mesmo resultado.
+    pub fn is_network(&self) -> bool {
+        use imap::Error as I;
+        match self {
+            Error::Imap(e) => matches!(
+                e,
+                I::Io(_) | I::ConnectionLost | I::RustlsHandshake(_) | I::Bye(_)
+            ),
+            Error::Smtp(e) => !(e.is_permanent() || e.is_client() || e.is_response()),
+            Error::Db(_) | Error::Email(_) | Error::Invalid(_) => false,
+        }
+    }
+}

@@ -1,5 +1,6 @@
 // Dados de exemplo para rodar a UI no navegador (pnpm dev), sem Tauri e sem rede.
-import type { Account, Draft, Provider, MessageDetail, MessageSummary, NewAccount, OutAttachment, Role, SendReport, Settings, StoredDraft, SyncResult, UnreadCounts, View } from "./api";
+import type { Account, Contact, Draft, FlushReport, OutboxItem, QueueStatus, Provider, MessageDetail, MessageSummary, NewAccount, OutAttachment, Role, SendReport, Settings, StoredDraft, SyncResult, UnreadCounts, UserFolder, View } from "./api";
+import { parseBox, parseCat } from "./views";
 
 const now = Math.floor(Date.now() / 1000);
 const H = 3600;
@@ -17,9 +18,13 @@ const seed: [string, string, string, string, number][] = [
   ["Prefeitura de Campinas", "nfse@campinas.sp.gov.br", "Nota fiscal de serviço emitida", "A NFS-e nº 00012873 foi emitida. Consulte o documento pelo código de verificação no portal.", 140],
 ];
 
-let accounts: Account[] = [{ id: "renan@imap.exemplo.com", host: "imap.exemplo.com", port: 993, security: "tls", username: "renan@exemplo.com" }];
+let accounts: Account[] = [
+  { id: "renan@imap.exemplo.com", host: "imap.exemplo.com", port: 993, security: "tls", username: "renan@exemplo.com", name: "Renan Santos" },
+  { id: "contato@imap.betinhos.com.br", host: "imap.betinhos.com.br", port: 993, security: "tls", username: "contato@betinhos.com.br", name: "Betinhos" },
+];
 
-type MockMessage = MessageDetail & { role: Role };
+/** `thread_count` é calculado ao responder; `thread_id` 0 = mensagem sem fio. `box`: nome completo da pasta do usuário (então `role` é null). */
+type MockMessage = Omit<MessageDetail, "thread_count"> & { role: Role | null; box?: string };
 
 let messages: MockMessage[] = Array.from({ length: 60 }, (_, i) => {
   const [from_name, from_addr, subject, body, hoursAgo] = seed[i % seed.length];
@@ -42,6 +47,7 @@ let messages: MockMessage[] = Array.from({ length: 60 }, (_, i) => {
     to_addrs: "renan@exemplo.com",
     cc_addrs: i % 3 === 0 ? "carla.mendes@outlook.com, pedro@antunes.dev" : "",
     role: "inbox",
+    thread_id: 0,
   };
 });
 
@@ -58,7 +64,7 @@ htmlSamples.forEach(([from_name, from_addr, subject, text, html, hoursAgo], i) =
   messages.unshift({
     id, account: accounts[0].id, uid: id, from_name, from_addr, subject,
     date: now - Math.round(hoursAgo * H), snippet: text, body_text: text, body_html: html,
-    seen: false, flagged: false, reply_addr: from_addr, attachments: [], to_addrs: "renan@exemplo.com", cc_addrs: "", role: "inbox",
+    seen: false, flagged: false, reply_addr: from_addr, attachments: [], to_addrs: "renan@exemplo.com", cc_addrs: "", role: "inbox", thread_id: 0,
   });
 });
 
@@ -70,7 +76,7 @@ messages.unshift({
   subject: "Planta e orçamento da sala de reunião", date: now - Math.round(0.2 * H),
   snippet: "Seguem a planta revisada e o orçamento em anexo.", body_text: "Seguem a planta revisada e o orçamento em anexo.\n\nMarina",
   body_html: `<div style="font-family:Arial,sans-serif;max-width:560px"><img src="${LOGO}" width="160" height="48" alt="Lumen"><p>Oi, Renan! Seguem a <b>planta revisada</b> e o orçamento em anexo.</p><p>Marina</p></div>`,
-  seen: false, flagged: true, reply_addr: "marina@lumenarquitetura.com.br", role: "inbox",
+  seen: false, flagged: true, reply_addr: "marina@lumenarquitetura.com.br", role: "inbox", thread_id: 1100,
   to_addrs: "renan@exemplo.com", cc_addrs: "carla.mendes@outlook.com, pedro@antunes.dev",
   attachments: [
     { name: "planta-sala-reuniao-v3.pdf", mime: "application/pdf", size: 2_516_582, index: 0 },
@@ -94,9 +100,30 @@ extra.forEach(([role, name, addr, subject, body], i) => {
     id, account: accounts[0].id, uid: id,
     from_name: mine ? "Renan" : name, from_addr: mine ? "renan@exemplo.com" : addr,
     subject, date: now - (i + 1) * 30 * H, snippet: body, body_text: `${body}\n\n${mine ? "Renan" : name}`, body_html: "",
-    seen: true, flagged: false, reply_addr: addr, attachments: [], to_addrs: mine ? addr : "renan@exemplo.com", cc_addrs: "", role,
+    seen: true, flagged: false, reply_addr: addr, attachments: [], to_addrs: mine ? addr : "renan@exemplo.com", cc_addrs: "", role, thread_id: 0,
   });
 });
+
+// Conversas: o fio da Marina (3 mensagens dela e a minha resposta em Enviados) e um fio da segunda conta.
+const second = accounts[1].id;
+const thread = (id: number, account: string, role: Role, thread_id: number, subject: string, from: [string, string], text: string, hoursAgo: number, seen: boolean, to: string) =>
+  messages.push({
+    id, account, uid: id, from_name: from[0], from_addr: from[1], subject, date: now - Math.round(hoursAgo * H),
+    snippet: text.slice(0, 200), body_text: `${text}\n\n${from[0].split(" ")[0]}`, body_html: "", seen, flagged: false,
+    reply_addr: from[1], attachments: [], to_addrs: to, cc_addrs: "", role, thread_id,
+  });
+const MARINA: [string, string] = ["Marina Duarte", "marina@lumenarquitetura.com.br"];
+const ME: [string, string] = ["Renan", "renan@exemplo.com"];
+thread(1101, accounts[0].id, "inbox", 1100, "Planta e orçamento da sala de reunião", MARINA, "Oi, Renan! Posso te mandar a planta da sala de reunião ainda hoje? Preciso só do teu ok no orçamento.", 30, true, "renan@exemplo.com");
+thread(1102, accounts[0].id, "sent", 1100, "Re: Planta e orçamento da sala de reunião", ME, "Pode mandar sim. O orçamento fecha se o prazo de entrega for até o dia 16.", 26, true, MARINA[1]);
+thread(1103, accounts[0].id, "inbox", 1100, "Re: Planta e orçamento da sala de reunião", MARINA, "Fechado, o prazo é dia 16. Estou revisando a iluminação e já te envio a versão final.", 6, true, "renan@exemplo.com");
+const HELENA: [string, string] = ["Helena Bastos", "helena@cliente-alfa.com.br"];
+const CONTATO = "contato@betinhos.com.br";
+thread(2001, second, "inbox", 2001, "Transfer aeroporto: sexta às 18h", HELENA, "Preciso de um transfer de Congonhas para o hotel na sexta, 18h, para 2 passageiros.", 22, true, CONTATO);
+thread(2002, second, "sent", 2001, "Re: Transfer aeroporto: sexta às 18h", ["Betinhos", CONTATO], "Olá, Helena! Confirmado: sedan executivo, motorista com placa de recepção. Valor R$ 280,00.", 21, true, HELENA[1]);
+thread(2003, second, "inbox", 2001, "RES: Transfer aeroporto: sexta às 18h", HELENA, "Perfeito. Pode incluir também a volta no domingo, às 16h?", 3, false, CONTATO);
+thread(2004, second, "inbox", 0, "Renovação do seguro frota", ["Porto Seguro", "frota@portoseguro.com.br"], "A renovação da apólice da frota vence em 30 dias. Veja as condições no anexo.", 8, false, CONTATO);
+thread(2005, second, "inbox", 0, "Nota fiscal de combustível", ["Posto Ipiranga", "nf@postoipiranga.com.br"], "Sua nota fiscal de combustível de outubro está disponível.", 52, true, CONTATO);
 
 // Rascunhos e configurações de exemplo (a tela de Rascunhos e as assinaturas aparecem preenchidas).
 let drafts: StoredDraft[] = [
@@ -108,12 +135,44 @@ const SETTINGS_KEY = "posta-mock-settings";
 let settings: Settings = { [`signature:${accounts[0].id}`]: "Renan\nBetinhos Executive Service" };
 try { settings = { ...settings, ...JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? "{}") }; } catch { /* sem armazenamento */ }
 
+// Pastas do usuário de exemplo (separador "/"), com duas mensagens na subpasta.
+let userFolders: UserFolder[] = ["Clientes", "Clientes/Lumen"].map((name) => ({ account: accounts[0].id, name, delimiter: "/" }));
+messages.filter((m) => m.id === 1 || m.id === 5).forEach((m) => { m.role = null; m.box = "Clientes/Lumen"; });
+const inTree = (m: MockMessage, name: string) => !!m.box && (m.box === name || m.box.startsWith(`${name}/`));
+const leaf = (name: string) => {
+  const t = name.trim();
+  if (!t || /[/*%\\]/.test(t)) throw "Nome inválido: não use / * % nem deixe vazio";
+  return t;
+};
+
 const norm = (s: string) => s.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase();
-const summary = ({ body_text: _b, body_html: _h, reply_addr: _r, attachments: _a, to_addrs: _t, cc_addrs: _c, ...s }: MockMessage): MessageSummary => s;
-/** Pasta virtual: com estrela e fora de Lixeira e Spam. */
-const inView = (m: MockMessage, view: View) =>
-  view === "starred" ? m.flagged && m.role !== "trash" && m.role !== "junk" : m.role === view;
+const withCount = <T extends MockMessage>(m: T) => ({
+  ...m,
+  thread_count: m.thread_id ? messages.filter((x) => x.account === m.account && x.thread_id === m.thread_id).length : 1,
+});
+const summary = (m: MockMessage): MessageSummary => {
+  const { box: _x, body_text: _b, body_html: _h, reply_addr: _r, attachments: _a, to_addrs: _t, cc_addrs: _c, ...s } = withCount(m);
+  return s;
+};
+/** Pastas virtuais: "Com estrela" (fora de Lixeira e Spam), "Todas as caixas" (a Entrada de todas as contas), pastas do usuário e categorias. */
+const inView = (m: MockMessage, view: View) => {
+  const box = parseBox(view);
+  const cat = parseCat(view);
+  if (box) return m.account === box.account && m.box === box.name;
+  if (cat) return m.category === cat && m.role !== "trash" && m.role !== "junk";
+  return view === "starred" ? m.flagged && m.role !== "trash" && m.role !== "junk" : m.role === (view === "all" ? "inbox" : view);
+};
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// Rede simulada: no console do navegador, `__mockOffline(true)` liga o modo offline (ações entram na fila).
+let offline = false;
+let pendingOps = 0;
+let outbox: OutboxItem[] = [];
+(window as unknown as { __mockOffline: (v: boolean) => void }).__mockOffline = (v) => {
+  offline = v;
+  window.dispatchEvent(new Event(v ? "offline" : "online"));
+};
+const queue = (n: number) => { if (offline) pendingOps += n; };
 let syncCount = 0;
 
 export const mockApi = {
@@ -150,6 +209,23 @@ export const mockApi = {
   async listDrafts(): Promise<StoredDraft[]> {
     return [...drafts].sort((a, b) => b.updated - a.updated);
   },
+  /** Mesma regra do núcleo: remetentes, Para e Cc; mais frequentes primeiro, empate pelo mais recente. */
+  async suggestContacts(query: string, limit: number): Promise<Contact[]> {
+    const q = norm(query.trim());
+    const found = new Map<string, Contact>();
+    for (const m of [...messages].sort((a, b) => b.date - a.date)) {
+      const seen: [string, string][] = [[m.from_name, m.from_addr], ...[...m.to_addrs.split(","), ...m.cc_addrs.split(",")].map((a): [string, string] => ["", a.trim()])];
+      for (const [name, addr] of seen) {
+        if (!addr.includes("@")) continue;
+        const c = found.get(addr.toLowerCase()) ?? { name: "", addr, count: 0 };
+        c.count++;
+        c.name ||= name;
+        found.set(addr.toLowerCase(), c);
+      }
+    }
+    return [...found.values()].filter((c) => !q || norm(`${c.name} ${c.addr}`).includes(q))
+      .sort((a, b) => b.count - a.count).slice(0, limit);
+  },
   async deleteDraft(id: string): Promise<void> {
     drafts = drafts.filter((d) => d.id !== id);
   },
@@ -167,25 +243,85 @@ export const mockApi = {
   async folders(): Promise<Role[]> {
     return ["inbox", "sent", "archive", "trash", "junk"];
   },
-  async syncFolder(role: Role, _keep: number): Promise<SyncResult> {
+  async syncFolder(view: View, _keep: number): Promise<SyncResult> {
     await wait(500);
-    return { fetched: 0, total: messages.filter((m) => m.role === role).length, errors: [], skipped: false };
+    if (offline) return { fetched: 0, total: 0, errors: [], skipped: false, offline: true };
+    return { fetched: 0, total: messages.filter((m) => inView(m, view)).length, errors: [], skipped: false, offline: false };
+  },
+  async userFolders(): Promise<UserFolder[]> {
+    return userFolders.filter((f) => accounts.some((a) => a.id === f.account));
+  },
+  /** Para testar a falha: nome "Falha". */
+  async createFolder(account: string, parent: string | null, name: string): Promise<UserFolder[]> {
+    await wait(400);
+    const full = parent ? `${parent}/${leaf(name)}` : leaf(name);
+    if (full.endsWith("Falha")) throw "IMAP: servidor recusou o CREATE";
+    if (userFolders.some((f) => f.account === account && f.name.toLowerCase() === full.toLowerCase())) throw "Já existe uma pasta com esse nome";
+    userFolders = [...userFolders, { account, name: full, delimiter: "/" }];
+    return this.userFolders();
+  },
+  async renameFolder(account: string, folder: string, name: string): Promise<UserFolder[]> {
+    await wait(400);
+    const parent = folder.includes("/") ? folder.slice(0, folder.lastIndexOf("/") + 1) : "";
+    const next = parent + leaf(name);
+    if (userFolders.some((f) => f.account === account && f.name !== folder && f.name.toLowerCase() === next.toLowerCase())) throw "Já existe uma pasta com esse nome";
+    const swap = (n: string) => (n === folder || n.startsWith(`${folder}/`) ? next + n.slice(folder.length) : n);
+    userFolders = userFolders.map((f) => (f.account === account ? { ...f, name: swap(f.name) } : f));
+    messages.forEach((m) => { if (m.account === account && m.box) m.box = swap(m.box); });
+    return this.userFolders();
+  },
+  async countFolder(account: string, folder: string): Promise<number> {
+    return messages.filter((m) => m.account === account && inTree(m, folder)).length;
+  },
+  async deleteFolder(account: string, folder: string): Promise<UserFolder[]> {
+    await wait(400);
+    userFolders = userFolders.filter((f) => !(f.account === account && (f.name === folder || f.name.startsWith(`${folder}/`))));
+    messages = messages.filter((m) => !(m.account === account && inTree(m, folder)));
+    return this.userFolders();
+  },
+  /** Devolve quantas foram movidas (só as da mesma conta da pasta). */
+  async moveToFolder(ids: number[], account: string, folder: string): Promise<number> {
+    await wait(400);
+    const found = messages.filter((x) => ids.includes(x.id) && x.account === account && x.box !== folder);
+    if (found.some((m) => m.subject.toLowerCase().includes("fatura"))) throw "IMAP: servidor recusou o MOVE";
+    found.forEach((m) => { m.role = null; m.box = folder; });
+    return found.length;
+  },
+  async setCategory(ids: number[], category: string | null): Promise<void> {
+    await wait(100);
+    messages.forEach((m) => { if (ids.includes(m.id)) m.category = category; });
+  },
+  /** Para testar a falha: senha com menos de 3 caracteres ou servidor com "erro". */
+  async updateAccount(a: Account, password: string | null): Promise<Account> {
+    await wait(900);
+    const cur = accounts.find((x) => x.id === a.id);
+    if (!cur) throw "conta não encontrada";
+    if (cur.auth && cur.auth !== "password") {
+      cur.name = a.name?.trim() || null;
+    } else {
+      if (password !== null && password.length > 0 && password.length < 3) throw "LOGIN failed. Invalid login/password";
+      if (a.host.includes("erro") || a.smtp?.host.includes("erro")) throw "conexão recusada pelo servidor";
+      Object.assign(cur, { name: a.name?.trim() || null, host: a.host, port: a.port, security: a.security, smtp: a.smtp });
+    }
+    accounts = [...accounts];
+    return { ...cur };
   },
   async sync(): Promise<SyncResult> {
     await wait(700);
+    if (offline) return { fetched: 0, total: 0, errors: [], skipped: false, offline: true };
     syncCount += 1;
-    if (syncCount % 3 !== 2) return { fetched: 0, total: messages.length, errors: [], skipped: false };
+    if (syncCount % 3 !== 2) return { fetched: 0, total: messages.length, errors: [], skipped: false, offline: false };
     const id = messages.length + 1;
     messages = [
       {
         id, account: accounts[0].id, uid: id, from_name: "Marina Duarte", from_addr: "marina@lumenarquitetura.com.br",
         subject: "Orçamento aprovado", date: Math.floor(Date.now() / 1000),
         snippet: "Tudo certo com o orçamento. Podemos assinar na segunda?", body_text: "Tudo certo com o orçamento. Podemos assinar na segunda?\n\nMarina", body_html: "", seen: false, flagged: false,
-        reply_addr: "marina@lumenarquitetura.com.br", attachments: [], to_addrs: "renan@exemplo.com", cc_addrs: "", role: "inbox",
+        reply_addr: "marina@lumenarquitetura.com.br", attachments: [], to_addrs: "renan@exemplo.com", cc_addrs: "", role: "inbox", thread_id: 0,
       },
       ...messages,
     ];
-    return { fetched: 1, total: messages.length, errors: [], skipped: false };
+    return { fetched: 1, total: messages.length, errors: [], skipped: false, offline: false };
   },
   async list(view: View, limit: number, offset: number): Promise<MessageSummary[]> {
     return messages.filter((m) => inView(m, view)).sort((a, b) => b.date - a.date).slice(offset, offset + limit).map(summary);
@@ -197,11 +333,17 @@ export const mockApi = {
       .sort((a, b) => b.date - a.date)
       .map(summary);
   },
+  async thread(id: number): Promise<MessageSummary[]> {
+    const m = messages.find((x) => x.id === id);
+    if (!m) return [];
+    const all = m.thread_id ? messages.filter((x) => x.account === m.account && x.thread_id === m.thread_id && x.role !== "trash" && x.role !== "junk") : [m];
+    return all.sort((a, b) => a.date - b.date).map(summary);
+  },
   async open(id: number): Promise<MessageDetail | null> {
     const m = messages.find((x) => x.id === id);
     if (!m) return null;
     m.seen = true;
-    return { ...m };
+    return withCount(m);
   },
   /** Para testar a falha: assunto com "fatura" não move. */
   async move(id: number, role: Role): Promise<void> {
@@ -210,36 +352,44 @@ export const mockApi = {
     if (!m) throw "mensagem não encontrada";
     if (m.subject.toLowerCase().includes("fatura")) throw "IMAP: servidor recusou o MOVE";
     m.role = role;
+    m.box = undefined;
+    queue(1);
   },
   async moveMany(ids: number[], role: Role): Promise<void> {
     await wait(400);
     const found = messages.filter((x) => ids.includes(x.id));
     if (found.some((m) => m.subject.toLowerCase().includes("fatura"))) throw "IMAP: servidor recusou o MOVE";
-    found.forEach((m) => { m.role = role; });
+    found.forEach((m) => { m.role = role; m.box = undefined; });
+    queue(found.length);
   },
   async deleteForever(id: number): Promise<void> {
     await wait(400);
     messages = messages.filter((x) => x.id !== id);
+    queue(1);
   },
   /** Para testar a falha: anexo com "falha" no nome. */
   async saveAttachment(id: number, index: number, _open: boolean): Promise<string> {
     await wait(500);
     const a = messages.find((x) => x.id === id)?.attachments.find((x) => x.index === index);
     if (!a) throw "anexo não encontrado na mensagem";
+    if (offline) throw "Sem conexão: o anexo ainda não foi baixado.";
     if (a.name.includes("falha")) throw "IMAP: conexão recusada";
     return `/home/renan/Downloads/${a.name}`;
   },
   async deleteForeverMany(ids: number[]): Promise<void> {
     await wait(400);
     messages = messages.filter((x) => !ids.includes(x.id));
+    queue(ids.length);
   },
   async setSeen(ids: number[], seen: boolean): Promise<void> {
     await wait(150);
     messages.forEach((m) => { if (ids.includes(m.id)) m.seen = seen; });
+    queue(ids.length);
   },
   async setFlagged(ids: number[], flagged: boolean): Promise<void> {
     await wait(150);
     messages.forEach((m) => { if (ids.includes(m.id)) m.flagged = flagged; });
+    queue(ids.length);
   },
   async unreadCounts(): Promise<UnreadCounts> {
     const out: UnreadCounts = {};
@@ -254,7 +404,31 @@ export const mockApi = {
   /** Para testar a falha: qualquer destinatário com "erro". */
   async send(d: Draft): Promise<SendReport> {
     await wait(800);
+    if (offline) {
+      outbox = [...outbox, { id: Date.now(), account: d.account, to: d.to, subject: d.subject, created: Math.floor(Date.now() / 1000), error: "" }];
+      return { saved_to_sent: false, warning: null, queued: true };
+    }
     if (d.to.includes("erro")) throw "SMTP: connection refused";
-    return { saved_to_sent: true, warning: null };
+    return { saved_to_sent: true, warning: null, queued: false };
+  },
+  async queueStatus(): Promise<QueueStatus> {
+    return { online: !offline, pending: pendingOps, outbox: outbox.length };
+  },
+  async flushQueue(): Promise<FlushReport> {
+    if (offline) return { applied: 0, discarded: 0, sent: 0, failed: 0, offline: true };
+    await wait(400);
+    const report = { applied: pendingOps, discarded: 0, sent: outbox.length, failed: 0, offline: false };
+    pendingOps = 0;
+    outbox = [];
+    return report;
+  },
+  async listOutbox(): Promise<OutboxItem[]> {
+    return [...outbox];
+  },
+  async discardOutbox(id: number): Promise<void> {
+    outbox = outbox.filter((m) => m.id !== id);
+  },
+  async retryOutbox(_id: number): Promise<FlushReport> {
+    return this.flushQueue();
   },
 };

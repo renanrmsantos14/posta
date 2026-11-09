@@ -18,6 +18,7 @@ fn account(tag: &str) -> Option<ImapAccount> {
         port: port.parse().ok()?,
         security: Security::Plaintext,
         username: user.clone(),
+        name: None,
         smtp: std::env::var("POSTA_SMTP_TEST").ok().and_then(|p| {
             Some(SmtpServer { host: host.into(), port: p.parse().ok()?, security: Security::Plaintext })
         }),
@@ -134,6 +135,7 @@ fn responde_por_smtp_guarda_em_enviados_e_marca_respondida() {
         to: ana.username.clone(),
         subject: "Re: Translado sexta".into(),
         body: "Confirmado: 7h40 no saguão.".into(),
+        html: None,
         cc: String::new(),
         bcc: String::new(),
         attachments: vec![],
@@ -277,6 +279,7 @@ fn envia_com_anexo_e_cc_e_le_de_volta() {
         to: ana.username.clone(),
         subject: "Contrato com anexo".into(),
         body: "Segue o arquivo.".into(),
+        html: Some("<p>Segue o <b>arquivo</b>.</p>".into()),
         cc: bia.username.clone(),
         bcc: String::new(),
         attachments: vec![OutAttachment {
@@ -304,6 +307,9 @@ fn envia_com_anexo_e_cc_e_le_de_volta() {
         assert_eq!(d.attachments.len(), 1, "{:?}", d.attachments);
         let a = &d.attachments[0];
         assert_eq!((a.name.as_str(), a.size), ("contrato.bin", 5000));
+        // Corpo HTML + texto (multipart/alternative dentro do mixed) chegam juntos.
+        assert!(d.body_html.contains("<b>arquivo</b>"), "{:?}", d.body_html);
+        assert!(d.body_text.contains("Segue o arquivo."), "{:?}", d.body_text);
 
         // O conteúdo vem do servidor sob demanda e bate byte a byte.
         let raw = imap_sync::fetch_raw(quem, "INBOX", got.uid).unwrap().unwrap();
@@ -391,4 +397,105 @@ fn move_e_exclui_varias_de_uma_vez() {
     imap_sync::delete_forever_many(&acc, &archive, &alvo).unwrap();
     imap_sync::sync_mailbox(&acc, &mut store, &archive, Some(1000)).unwrap();
     assert!(store.list_folder(Role::Archive, 10, 0).unwrap().is_empty());
+}
+
+#[test]
+fn cria_renomeia_e_exclui_pastas_com_subpastas() {
+    let Some(acc) = account("pastas") else { return };
+    let obra = imap_sync::create_folder(&acc, None, "Obra").unwrap();
+    let fase = imap_sync::create_folder(&acc, Some(&obra), "Fase 1").unwrap();
+    assert!(imap_sync::create_folder(&acc, None, "obra").is_err(), "nome repetido");
+    assert!(imap_sync::create_folder(&acc, None, "a/b").is_err(), "nome inválido");
+
+    let (names, delimiter) = imap_sync::list_user_folders(&acc).unwrap();
+    assert!(names.contains(&obra) && names.contains(&fase), "{names:?}");
+    assert!(delimiter.is_some());
+
+    // Move uma mensagem para a pasta nova, como no arrastar da lista.
+    let mut s = session(&acc);
+    s.append("INBOX", &raw(1, "Planta")).finish().unwrap();
+    s.logout().ok();
+    let mut store = Store::open_in_memory().unwrap();
+    imap_sync::sync_mailbox(&acc, &mut store, "INBOX", None).unwrap();
+    let uid = store.list("INBOX", 10, 0).unwrap()[0].uid;
+    imap_sync::move_messages(&acc, "INBOX", &[uid], &fase).unwrap();
+    assert_eq!(imap_sync::count_messages(&acc, &obra).unwrap(), 1, "conta as subpastas");
+
+    // Renomear leva a subpasta junto e preserva a mensagem.
+    let novo = imap_sync::rename_folder(&acc, &obra, "Projeto").unwrap();
+    let (names, _) = imap_sync::list_user_folders(&acc).unwrap();
+    let filha = names.iter().find(|n| n.ends_with("Fase 1")).unwrap().clone();
+    assert!(names.contains(&novo) && !names.contains(&obra) && filha.starts_with(&novo), "{names:?}");
+    assert_eq!(imap_sync::count_messages(&acc, &novo).unwrap(), 1);
+
+    // Pastas do sistema ficam como estão.
+    let archive = imap_sync::discover_folders(&acc).unwrap().into_iter().find(|f| f.role == Role::Archive).unwrap().name;
+    assert!(imap_sync::rename_folder(&acc, "INBOX", "Outra").is_err());
+    assert!(imap_sync::delete_folder(&acc, "INBOX").is_err());
+    assert!(imap_sync::delete_folder(&acc, &archive).is_err());
+
+    // Excluir leva as subpastas.
+    let gone = imap_sync::delete_folder(&acc, &novo).unwrap();
+    assert_eq!(gone, [filha, novo]);
+    let (names, _) = imap_sync::list_user_folders(&acc).unwrap();
+    assert!(!names.iter().any(|n| n.contains("Projeto")), "{names:?}");
+}
+
+#[test]
+fn fila_offline_reaplica_quando_a_rede_volta() {
+    let (Some(acc), Some(dest)) = (account("fila"), account("dest")) else { return };
+    if acc.smtp.is_none() {
+        return;
+    }
+    let mut s = session(&acc);
+    for i in 0..3 {
+        s.append("INBOX", &raw(i, &format!("F{i}"))).finish().unwrap();
+    }
+    s.logout().ok();
+    let folders = imap_sync::discover_folders(&acc).unwrap();
+    let archive = folders.iter().find(|f| f.role == Role::Archive).unwrap().name.clone();
+    let mut store = Store::open_in_memory().unwrap();
+    store.set_folders(&acc.id, &folders).unwrap();
+    imap_sync::sync_mailbox(&acc, &mut store, "INBOX", None).unwrap();
+    let uids: Vec<u32> = store.list("INBOX", 10, 0).unwrap().iter().map(|m| m.uid).collect();
+
+    // "Sem rede": servidor inalcançável. A fila não perde nada.
+    let mut off = acc.clone();
+    off.port = 1;
+    if let Some(sm) = off.smtp.as_mut() {
+        sm.port = 1;
+    }
+    let out = Outgoing {
+        to: dest.username.clone(),
+        subject: "Enviada depois".into(),
+        body: "Saiu quando a rede voltou.".into(),
+        html: None,
+        cc: String::new(),
+        bcc: String::new(),
+        attachments: vec![],
+    };
+    store.enqueue_op(&acc.id, "INBOX", uids[0], mail_core::OpKind::Seen, "").unwrap();
+    store.enqueue_op(&acc.id, "INBOX", uids[1], mail_core::OpKind::Star, "").unwrap();
+    store.enqueue_op(&acc.id, "INBOX", uids[2], mail_core::OpKind::Move, &archive).unwrap();
+    store.enqueue_op(&acc.id, "INBOX", 9999, mail_core::OpKind::Seen, "").unwrap();
+    store.enqueue_send(&acc.id, &out, None).unwrap();
+    let r = mail_core::outbox::flush(&store, &mut |_| Ok(Some(off.clone()))).unwrap();
+    assert!(r.offline);
+    assert_eq!((store.pending_count().unwrap(), store.outbox_count().unwrap()), (4, 1));
+
+    // "A rede volta".
+    let r = mail_core::outbox::flush(&store, &mut |_| Ok(Some(acc.clone()))).unwrap();
+    assert!(!r.offline);
+    assert_eq!(r.applied + r.discarded, 4, "{r:?}");
+    assert_eq!(r.sent, 1);
+    assert_eq!((store.pending_count().unwrap(), store.outbox_count().unwrap()), (0, 0));
+    assert!(server_flags(&acc, uids[0]).contains(&imap::types::Flag::Seen));
+    assert!(server_flags(&acc, uids[1]).contains(&imap::types::Flag::Flagged));
+    imap_sync::sync_mailbox(&acc, &mut store, &archive, Some(1000)).unwrap();
+    assert_eq!(store.list_folder(Role::Archive, 10, 0).unwrap().len(), 1);
+
+    // Destino recebeu a mensagem enfileirada.
+    let mut theirs = Store::open_in_memory().unwrap();
+    imap_sync::sync_mailbox(&dest, &mut theirs, "INBOX", None).unwrap();
+    assert_eq!(theirs.list("INBOX", 10, 0).unwrap()[0].subject, "Enviada depois");
 }

@@ -1,10 +1,13 @@
 // Escrever e responder. Painel fixo, sem cobrir a mensagem que está sendo respondida.
 // Salva sozinho como rascunho (debounce de 1,5 s); Esc e X guardam o rascunho e fecham, a lixeira descarta
 // (com confirmação se há texto). Ctrl/Cmd+Enter envia.
+// O corpo é um editor formatado (contentEditable); `draft.html` é a fonte e `draft.body` o texto simples derivado.
 import { useEffect, useRef, useState } from "react";
-import { File as FileIcon, Paperclip, PaperPlaneTilt, Trash, X } from "@phosphor-icons/react";
+import { Eraser, File as FileIcon, LinkSimple, ListBullets, ListNumbers, Paperclip, PaperPlaneTilt, Quotes, TextB, TextItalic, TextUnderline, Trash, X } from "@phosphor-icons/react";
 import { api, type Account, type Draft, type OutAttachment } from "./api";
 import { fmtSize } from "./format";
+import { Recipients } from "./Recipients";
+import { escapeHtml, htmlToText, outgoingHtml, sanitizeHtml, textToHtml } from "./richtext";
 import { toast } from "./toast";
 
 export interface ComposeInit extends Draft {
@@ -21,6 +24,9 @@ interface Props {
   onSend: (draft: ComposeInit) => void;
   onDiscard: () => void;
 }
+
+/** HTML inicial: o do rascunho/resposta, ou o texto simples (rascunhos antigos) convertido. */
+const initialHtml = (i: Draft) => (i.html?.trim() ? sanitizeHtml(i.html) : textToHtml(i.body));
 
 const EXIT_MS = 150;
 const AUTOSAVE_MS = 1500;
@@ -53,7 +59,10 @@ function readBase64(file: File): Promise<string> {
 }
 
 export function Composer({ init, accounts, onSend, onDiscard }: Props) {
-  const [draft, setDraft] = useState(init);
+  const [base] = useState(() => { const html = initialHtml(init); return { html, body: htmlToText(html) }; });
+  const [draft, setDraft] = useState<ComposeInit>(() => ({ ...init, ...base }));
+  const [link, setLink] = useState<string | null>(null);
+  const linkRange = useRef<Range | null>(null);
   const [error, setError] = useState("");
   const [errorKey, setErrorKey] = useState(0);
   const [confirming, setConfirming] = useState(false);
@@ -62,13 +71,13 @@ export function Composer({ init, accounts, onSend, onDiscard }: Props) {
   const [attachNote, setAttachNote] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
   const toRef = useRef<HTMLInputElement>(null);
-  const bodyRef = useRef<HTMLTextAreaElement>(null);
+  const bodyRef = useRef<HTMLDivElement>(null);
   const [draftId] = useState(() => init.draftId ?? crypto.randomUUID());
   const [saved, setSaved] = useState(false);
   /** Última versão gravada; evita regravar o mesmo texto. */
   const savedKey = useRef("");
 
-  const dirty = !!init.restored || draft.to !== init.to || draft.subject !== init.subject || draft.body !== init.body
+  const dirty = !!init.restored || draft.to !== init.to || draft.subject !== init.subject || draft.html !== base.html
     || (draft.cc ?? "") !== (init.cc ?? "") || (draft.bcc ?? "") !== (init.bcc ?? "")
     || (draft.attachments?.length ?? 0) !== (init.attachments?.length ?? 0);
   const files = draft.attachments ?? [];
@@ -76,10 +85,17 @@ export function Composer({ init, accounts, onSend, onDiscard }: Props) {
 
   // Resposta: cursor no topo do corpo, acima da citação. Nova: começa pelo destinatário.
   useEffect(() => {
-    if (init.reply_to !== null && init.to) {
-      bodyRef.current?.focus();
-      bodyRef.current?.setSelectionRange(0, 0);
-      bodyRef.current?.scrollTo(0, 0);
+    const el = bodyRef.current;
+    if (el) el.innerHTML = base.html;
+    if (el && init.reply_to !== null && init.to) {
+      el.focus();
+      const r = document.createRange();
+      r.setStart(el, 0);
+      r.collapse(true);
+      const sel = window.getSelection();
+      sel?.removeAllRanges();
+      sel?.addRange(r);
+      el.scrollTo(0, 0);
     } else {
       toRef.current?.focus();
     }
@@ -92,11 +108,11 @@ export function Composer({ init, accounts, onSend, onDiscard }: Props) {
   /** Grava o rascunho atual; texto todo em branco apaga o rascunho. Devolve false se não gravou. */
   async function persist(): Promise<boolean> {
     const d = latest.current;
-    const key = JSON.stringify([d.account, d.to, d.cc, d.bcc, d.subject, d.body]);
+    const key = JSON.stringify([d.account, d.to, d.cc, d.bcc, d.subject, d.html]);
     if (key === savedKey.current) return true;
     try {
       if (!d.to.trim() && !d.subject.trim() && !d.body.trim()) await api.deleteDraft(draftId);
-      else await api.saveDraft({ id: draftId, account: d.account, reply_to: d.reply_to, to: d.to, cc: d.cc ?? "", bcc: d.bcc ?? "", subject: d.subject, body: d.body });
+      else await api.saveDraft({ id: draftId, account: d.account, reply_to: d.reply_to, to: d.to, cc: d.cc ?? "", bcc: d.bcc ?? "", subject: d.subject, body: d.body, html: d.html ?? "" });
       savedKey.current = key;
       setSaved(!!(d.to.trim() || d.subject.trim() || d.body.trim()));
       return true;
@@ -110,7 +126,7 @@ export function Composer({ init, accounts, onSend, onDiscard }: Props) {
     if (!dirty) return;
     const t = setTimeout(() => { persist(); }, AUTOSAVE_MS);
     return () => clearTimeout(t);
-  }, [draft.account, draft.to, draft.cc, draft.bcc, draft.subject, draft.body, dirty]);
+  }, [draft.account, draft.to, draft.cc, draft.bcc, draft.subject, draft.html, dirty]);
 
   // Janela escondida ou fechando: não espera o debounce.
   useEffect(() => {
@@ -154,6 +170,8 @@ export function Composer({ init, accounts, onSend, onDiscard }: Props) {
   }
 
   function send() {
+    // `latest` já traz o chip recém-confirmado, que o render ainda não refletiu.
+    const draft = latest.current;
     const problem = invalidRecipient(draft.to);
     if (problem) {
       setError(problem);
@@ -168,18 +186,21 @@ export function Composer({ init, accounts, onSend, onDiscard }: Props) {
       setErrorKey((k) => k + 1);
       return;
     }
-    leave(() => onSend({ ...draft, draftId }));
+    leave(() => onSend({ ...draft, html: outgoingHtml(draft.html ?? ""), draftId }));
   }
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
+        // Lista de sugestões e barra de link tratam o próprio Esc.
+        if (document.querySelector(".suggest-list, .link-bar")) return;
         e.stopPropagation();
         if (confirming) setConfirming(false);
         else requestClose();
       } else if (e.key === "Enter" && (mac ? e.metaKey : e.ctrlKey)) {
         e.preventDefault();
         e.stopPropagation();
+        (document.activeElement as HTMLElement | null)?.blur();
         send();
       }
     };
@@ -188,10 +209,65 @@ export function Composer({ init, accounts, onSend, onDiscard }: Props) {
   });
 
   const set = <K extends keyof ComposeInit>(k: K, v: ComposeInit[K]) => {
+    latest.current = { ...latest.current, [k]: v };
     setDraft((d) => ({ ...d, [k]: v }));
     setSaved(false);
     if (k === "to" || k === "cc" || k === "bcc") setError("");
   };
+
+  function onEditorInput() {
+    const html = bodyRef.current?.innerHTML ?? "";
+    setDraft((d) => ({ ...d, html, body: htmlToText(html) }));
+    setSaved(false);
+  }
+
+  function format(cmd: string, arg?: string) {
+    bodyRef.current?.focus();
+    document.execCommand(cmd, false, arg);
+  }
+
+  const inQuote = () => document.queryCommandValue("formatBlock").toLowerCase() === "blockquote";
+  const toggleQuote = () => format("formatBlock", inQuote() ? "div" : "blockquote");
+  const clearFormat = () => { format("removeFormat"); format("unlink"); format("formatBlock", "div"); };
+
+  function openLink() {
+    const sel = window.getSelection();
+    linkRange.current = sel?.rangeCount && bodyRef.current?.contains(sel.anchorNode) ? sel.getRangeAt(0).cloneRange() : null;
+    setLink("");
+  }
+
+  function applyLink() {
+    let url = (link ?? "").trim();
+    setLink(null);
+    const el = bodyRef.current;
+    if (!el || !url) return el?.focus();
+    el.focus();
+    if (linkRange.current) {
+      const sel = window.getSelection();
+      sel?.removeAllRanges();
+      sel?.addRange(linkRange.current);
+    }
+    if (!/^[a-z][a-z0-9+.-]*:/i.test(url)) url = url.includes("@") && !url.includes("/") ? `mailto:${url}` : `https://${url}`;
+    if (!/^(https?:|mailto:|tel:)/i.test(url)) return void toast("Use um link http, https ou mailto.", "error");
+    if (window.getSelection()?.isCollapsed ?? true) format("insertHTML", `<a href="${escapeHtml(url)}">${escapeHtml(url.replace(/^mailto:/i, ""))}</a>`);
+    else format("createLink", url);
+  }
+
+  function onEditorKey(e: React.KeyboardEvent) {
+    if (!(mac ? e.metaKey : e.ctrlKey) || e.altKey || e.shiftKey) return;
+    const cmd = { b: "bold", i: "italic", u: "underline" }[e.key.toLowerCase()];
+    if (cmd) { e.preventDefault(); format(cmd); }
+    else if (e.key.toLowerCase() === "k") { e.preventDefault(); openLink(); }
+  }
+
+  /** Cola sempre limpo: só a estrutura do HTML (sem estilos, scripts nem imagens) ou o texto simples. */
+  function onPaste(e: React.ClipboardEvent) {
+    e.preventDefault();
+    const html = e.clipboardData.getData("text/html");
+    const text = e.clipboardData.getData("text/plain");
+    if (html) format("insertHTML", sanitizeHtml(html));
+    else if (text) format("insertText", text);
+  }
 
   async function addFiles(list: FileList | null) {
     const picked = Array.from(list ?? []);
@@ -240,26 +316,15 @@ export function Composer({ init, accounts, onSend, onDiscard }: Props) {
             <span className="from-value">{accounts.find((a) => a.id === draft.account)?.username}</span>
           </div>
         )}
-        <label className="line" data-invalid={error ? true : undefined}>
-          <span>Para</span>
-          <input ref={toRef} type="text" inputMode="email" autoComplete="email" value={draft.to}
-            onChange={(e) => set("to", e.target.value)} placeholder="nome@exemplo.com" aria-invalid={!!error} />
-          {!showCc && (
-            <button type="button" className="btn ghost small cc-toggle" onClick={() => setShowCc(true)}>Cc/Bcc</button>
-          )}
-        </label>
+        <Recipients label="Para" value={draft.to} onChange={(v) => set("to", v)} placeholder="nome@exemplo.com"
+          invalid={!!error} inputRef={toRef} own={accounts.map((a) => a.username)}
+          trailing={!showCc && <button type="button" className="btn ghost small cc-toggle" onClick={() => setShowCc(true)}>Cc/Bcc</button>} />
         {showCc && (
           <>
-            <label className="line">
-              <span>Cc</span>
-              <input type="text" inputMode="email" autoComplete="email" value={draft.cc ?? ""}
-                onChange={(e) => set("cc", e.target.value)} placeholder="separe vários por vírgula" />
-            </label>
-            <label className="line">
-              <span>Bcc</span>
-              <input type="text" inputMode="email" autoComplete="email" value={draft.bcc ?? ""}
-                onChange={(e) => set("bcc", e.target.value)} placeholder="cópia oculta" />
-            </label>
+            <Recipients label="Cc" value={draft.cc ?? ""} onChange={(v) => set("cc", v)} placeholder="separe vários por vírgula"
+              own={accounts.map((a) => a.username)} />
+            <Recipients label="Bcc" value={draft.bcc ?? ""} onChange={(v) => set("bcc", v)} placeholder="cópia oculta"
+              own={accounts.map((a) => a.username)} />
           </>
         )}
         {error && <p key={errorKey} className="form-error composer-error" role="alert">{error}</p>}
@@ -269,8 +334,34 @@ export function Composer({ init, accounts, onSend, onDiscard }: Props) {
         </label>
       </div>
 
-      <textarea ref={bodyRef} className="composer-body" value={draft.body} aria-label="Mensagem"
-        onChange={(e) => set("body", e.target.value)} />
+      <div className="fmt-bar" role="toolbar" aria-label="Formatação">
+        {([
+          ["Negrito", `${mac ? "⌘" : "Ctrl+"}B`, <TextB size={15} weight="bold" />, () => format("bold")],
+          ["Itálico", `${mac ? "⌘" : "Ctrl+"}I`, <TextItalic size={15} weight="bold" />, () => format("italic")],
+          ["Sublinhado", `${mac ? "⌘" : "Ctrl+"}U`, <TextUnderline size={15} weight="bold" />, () => format("underline")],
+          ["Lista com marcadores", "", <ListBullets size={15} weight="bold" />, () => format("insertUnorderedList")],
+          ["Lista numerada", "", <ListNumbers size={15} weight="bold" />, () => format("insertOrderedList")],
+          ["Link", `${mac ? "⌘" : "Ctrl+"}K`, <LinkSimple size={15} weight="bold" />, openLink],
+          ["Citação", "", <Quotes size={15} weight="bold" />, toggleQuote],
+          ["Limpar formatação", "", <Eraser size={15} weight="bold" />, clearFormat],
+        ] as [string, string, React.ReactNode, () => void][]).map(([name, key, icon, run]) => (
+          <button key={name} type="button" className="icon-btn" aria-label={name} title={key ? `${name} (${key})` : name}
+            onMouseDown={(e) => e.preventDefault()} onClick={run}>
+            {icon}
+          </button>
+        ))}
+      </div>
+      {link !== null && (
+        <form className="link-bar" onSubmit={(e) => { e.preventDefault(); applyLink(); }}>
+          <input autoFocus type="text" value={link} placeholder="https://exemplo.com" aria-label="Endereço do link"
+            onChange={(e) => setLink(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Escape") { setLink(null); bodyRef.current?.focus(); } }} />
+          <button type="submit" className="btn small">Aplicar</button>
+        </form>
+      )}
+      <div ref={bodyRef} className="composer-body rich" contentEditable suppressContentEditableWarning spellCheck
+        role="textbox" aria-multiline="true" aria-label="Mensagem"
+        onInput={onEditorInput} onPaste={onPaste} onKeyDown={onEditorKey} />
 
       {(files.length > 0 || attachNote) && (
         <div className="attach-bar">

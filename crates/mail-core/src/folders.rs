@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::{Error, Result};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
@@ -86,12 +88,136 @@ pub fn archive_name(listed: &[Listed], delimiter: Option<&str>) -> String {
     }
 }
 
+/// Rascunhos ficam locais; uma pasta de rascunhos do servidor não é pasta de usuário.
+const DRAFT_NAMES: [&str; 3] = ["drafts", "draft", "rascunhos"];
+
+/// Nome sem o prefixo "INBOX." ou "INBOX/" que alguns servidores põem em todas as pastas.
+fn relative(name: &str) -> &str {
+    name.strip_prefix("INBOX.").or_else(|| name.strip_prefix("INBOX/")).unwrap_or(name)
+}
+
+/// Pastas de sistema (Entrada, Enviados, Arquivo, Lixeira, Spam, Rascunhos): não renomeiam nem excluem.
+pub fn is_system(name: &str, system: &[Folder]) -> bool {
+    name.eq_ignore_ascii_case("INBOX")
+        || system.iter().any(|f| f.name == name)
+        || DRAFT_NAMES.contains(&relative(name).to_lowercase().as_str())
+}
+
+/// Pastas que o usuário pode gerenciar: o resto do LIST, sem as de sistema e sem as marcadas com SPECIAL-USE.
+pub fn user_folders(listed: &[Listed], system: &[Folder]) -> Vec<String> {
+    listed
+        .iter()
+        .filter(|l| l.special.is_none() && !is_system(&l.name, system))
+        .filter(|l| !l.name.starts_with("[Gmail]") && !l.name.starts_with("[Google Mail]"))
+        .map(|l| l.name.clone())
+        .collect()
+}
+
+/// Texto digitado como nome de uma pasta: sem vazio, separadores nem curingas do IMAP.
+fn clean_leaf(leaf: &str, delimiter: Option<&str>) -> Result<String> {
+    let leaf = leaf.trim();
+    let bad = leaf.is_empty()
+        || leaf.chars().any(|c| matches!(c, '*' | '%' | '/' | '\\') || c.is_control())
+        || delimiter.is_some_and(|d| leaf.contains(d));
+    if bad {
+        return Err(Error::Invalid("nome de pasta inválido: não use / \\ * % nem o separador do servidor".into()));
+    }
+    Ok(leaf.to_string())
+}
+
+/// Nome completo de uma pasta nova. Sem pai, segue o prefixo "INBOX." quando o servidor organiza tudo sob a Caixa de entrada.
+pub fn new_name(listed: &[Listed], delimiter: Option<&str>, parent: Option<&str>, leaf: &str) -> Result<String> {
+    let leaf = clean_leaf(leaf, delimiter)?;
+    let name = match (delimiter, parent) {
+        (Some(d), Some(p)) => format!("{p}{d}{leaf}"),
+        (None, Some(_)) => return Err(Error::Invalid("este servidor não aceita subpastas".into())),
+        (Some(d), None) if listed.iter().any(|l| l.name.starts_with(&format!("INBOX{d}"))) => format!("INBOX{d}{leaf}"),
+        _ => leaf,
+    };
+    if listed.iter().any(|l| l.name.eq_ignore_ascii_case(&name)) {
+        return Err(Error::Invalid(format!("já existe uma pasta chamada {name}")));
+    }
+    Ok(name)
+}
+
+/// Nome completo depois de renomear: mesma pasta-pai, novo último trecho.
+pub fn renamed(listed: &[Listed], delimiter: Option<&str>, old: &str, leaf: &str) -> Result<String> {
+    let leaf = clean_leaf(leaf, delimiter)?;
+    let name = match delimiter.and_then(|d| old.rsplit_once(d).map(|(parent, _)| format!("{parent}{d}{leaf}"))) {
+        Some(n) => n,
+        None => leaf,
+    };
+    if listed.iter().any(|l| l.name.eq_ignore_ascii_case(&name) && l.name != old) {
+        return Err(Error::Invalid(format!("já existe uma pasta chamada {name}")));
+    }
+    Ok(name)
+}
+
+/// A pasta e as subpastas dela (nomes que começam com `name` + separador), da mais funda para a mais rasa.
+pub fn with_children(listed: &[Listed], delimiter: Option<&str>, name: &str) -> Vec<String> {
+    let prefix = delimiter.map(|d| format!("{name}{d}"));
+    let mut out: Vec<String> = listed
+        .iter()
+        .filter(|l| l.name == name || prefix.as_deref().is_some_and(|p| l.name.starts_with(p)))
+        .map(|l| l.name.clone())
+        .collect();
+    out.sort_by_key(|n| std::cmp::Reverse(n.len()));
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn l(name: &str, special: Option<&'static str>) -> Listed {
         Listed { name: name.into(), special }
+    }
+
+    fn system() -> Vec<Folder> {
+        vec![Folder { role: Role::Inbox, name: "INBOX".into() }, Folder { role: Role::Sent, name: "INBOX.Sent".into() }]
+    }
+
+    #[test]
+    fn pastas_de_usuario_sem_as_de_sistema() {
+        let listed = [
+            l("INBOX", None),
+            l("INBOX.Sent", Some("sent")),
+            l("INBOX.Drafts", Some("drafts")),
+            l("INBOX.Rascunhos", None),
+            l("INBOX.Projetos", None),
+            l("INBOX.Projetos.Obra", None),
+            l("[Gmail]/Important", None),
+        ];
+        assert_eq!(user_folders(&listed, &system()), ["INBOX.Projetos", "INBOX.Projetos.Obra"]);
+        assert!(is_system("inbox", &system()) && is_system("INBOX.Sent", &system()) && is_system("Drafts", &system()));
+        assert!(!is_system("INBOX.Projetos", &system()));
+    }
+
+    #[test]
+    fn nome_de_pasta_nova_com_e_sem_pai() {
+        let listed = [l("INBOX", None), l("INBOX.Projetos", None)];
+        assert_eq!(new_name(&listed, Some("."), None, " Clientes ").unwrap(), "INBOX.Clientes");
+        assert_eq!(new_name(&listed, Some("."), Some("INBOX.Projetos"), "Obra").unwrap(), "INBOX.Projetos.Obra");
+        assert_eq!(new_name(&[l("INBOX", None)], Some("/"), None, "Clientes").unwrap(), "Clientes");
+        assert!(new_name(&listed, Some("."), None, "projetos").is_err(), "repetida");
+        assert!(new_name(&listed, Some("."), None, "a.b").is_err(), "com o separador");
+        assert!(new_name(&listed, Some("."), None, "  ").is_err(), "vazia");
+        assert!(new_name(&listed, None, Some("x"), "y").is_err(), "servidor sem hierarquia");
+    }
+
+    #[test]
+    fn renomear_mantem_a_pasta_pai() {
+        let listed = [l("INBOX.A", None), l("INBOX.A.B", None), l("INBOX.C", None)];
+        assert_eq!(renamed(&listed, Some("."), "INBOX.A.B", "Z").unwrap(), "INBOX.A.Z");
+        assert_eq!(renamed(&listed, Some("."), "INBOX.A", "Novo").unwrap(), "INBOX.Novo");
+        assert_eq!(renamed(&listed, Some("."), "INBOX.A", "a").unwrap(), "INBOX.a", "só trocar maiúsculas vale");
+        assert!(renamed(&listed, Some("."), "INBOX.A", "C").is_err());
+    }
+
+    #[test]
+    fn filhas_saem_antes_da_pai() {
+        let listed = [l("A", None), l("A/B", None), l("A/B/C", None), l("AB", None)];
+        assert_eq!(with_children(&listed, Some("/"), "A"), ["A/B/C", "A/B", "A"]);
     }
 
     fn name(f: &[Folder], r: Role) -> Option<&str> {
