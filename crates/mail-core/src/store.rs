@@ -972,6 +972,12 @@ impl Store {
     /// Aplica o estado do servidor: remove o que sumiu e atualiza as flags de lida e estrela.
     /// Cada item é `(uid, lida, estrela)`. Devolve o que mudou, por id local.
     pub fn apply_server_state(&mut self, account: &str, mailbox: &str, server: &[(u32, bool, bool)]) -> Result<Delta> {
+        self.apply_server_state_from(account, mailbox, 0, server)
+    }
+
+    /// Como `apply_server_state`, mas só vale para UIDs a partir de `lo`: o servidor informou a faixa `lo:*`
+    /// e o que é mais antigo fica como está. Sync incremental sem CONDSTORE usa isto numa janela recente.
+    pub fn apply_server_state_from(&mut self, account: &str, mailbox: &str, lo: u32, server: &[(u32, bool, bool)]) -> Result<Delta> {
         let tx = self.conn.transaction()?;
         tx.execute_batch("CREATE TEMP TABLE IF NOT EXISTS server_uids (uid INTEGER PRIMARY KEY, seen INTEGER, flagged INTEGER); DELETE FROM server_uids;")?;
         {
@@ -981,21 +987,21 @@ impl Store {
             }
         }
         let ids = |sql: &str| -> rusqlite::Result<Vec<i64>> {
-            tx.prepare(sql)?.query_map(params![account, mailbox], |r| r.get(0))?.collect()
+            tx.prepare(sql)?.query_map(params![account, mailbox, lo], |r| r.get(0))?.collect()
         };
-        let removed = ids("SELECT id FROM messages WHERE account = ?1 AND mailbox = ?2 AND uid NOT IN (SELECT uid FROM server_uids)")?;
+        let removed = ids("SELECT id FROM messages WHERE account = ?1 AND mailbox = ?2 AND uid >= ?3 AND uid NOT IN (SELECT uid FROM server_uids)")?;
         let flips: Vec<(i64, bool, bool)> = {
             let mut st = tx.prepare(
                 "SELECT m.id, s.seen, s.flagged FROM messages m JOIN server_uids s ON s.uid = m.uid
-                 WHERE m.account = ?1 AND m.mailbox = ?2 AND (m.seen <> s.seen OR m.flagged <> s.flagged)",
+                 WHERE m.account = ?1 AND m.mailbox = ?2 AND m.uid >= ?3 AND (m.seen <> s.seen OR m.flagged <> s.flagged)",
             )?;
-            let rows = st.query_map(params![account, mailbox], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<rusqlite::Result<_>>()?;
+            let rows = st.query_map(params![account, mailbox, lo], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<rusqlite::Result<_>>()?;
             rows
         };
         tx.execute(
             "DELETE FROM messages WHERE account = ?1 AND mailbox = ?2
-             AND uid NOT IN (SELECT uid FROM server_uids)",
-            params![account, mailbox],
+             AND uid >= ?3 AND uid NOT IN (SELECT uid FROM server_uids)",
+            params![account, mailbox, lo],
         )?;
         {
             let mut up = tx.prepare_cached("UPDATE messages SET seen = ?2, flagged = ?3 WHERE id = ?1")?;
@@ -1075,6 +1081,20 @@ impl Store {
             params![account, mailbox],
             |r| r.get(0),
         )?)
+    }
+
+    /// Menor UID entre as `n` mais recentes (por UID) da pasta: início da janela que a sync incremental reconcilia.
+    /// `0` quando há menos de `n` mensagens (a janela é a pasta inteira).
+    pub fn window_start(&self, account: &str, mailbox: &str, n: u32) -> Result<u32> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT uid FROM messages WHERE account = ?1 AND mailbox = ?2 ORDER BY uid DESC LIMIT 1 OFFSET ?3",
+                params![account, mailbox, n.saturating_sub(1)],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(0))
     }
 
     pub fn count_box(&self, account: &str, mailbox: &str) -> Result<u32> {

@@ -146,7 +146,6 @@ fn queries(db: &str, n: usize) {
         println!("PRAGMA {p} = {v} (conexão nova, defaults)");
     }
     let in_role = "m.mailbox = COALESCE((SELECT f.name FROM folders f WHERE f.account = m.account AND f.role = 'inbox'), CASE 'inbox' WHEN 'inbox' THEN 'INBOX' END)";
-    let key = "(CASE WHEN m.message_id <> '' THEN m.message_id ELSE m.mailbox || '/' || m.uid END)";
     let ns = "1";
     let ord = "ORDER BY m.date DESC, m.id DESC";
     q(&conn, "list_folder", &format!("SELECT m.id FROM messages m WHERE {in_role} AND {ns} {ord} LIMIT 50 OFFSET 0"));
