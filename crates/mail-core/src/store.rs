@@ -1340,6 +1340,24 @@ impl Store {
         Ok(all.into_iter().skip(offset as usize).take(limit as usize).collect())
     }
 
+    /// Resumos por id local, na ordem da lista (aplicar um `Delta` sem recarregar a pasta). Ids que não existem
+    /// mais ou estão adiados ficam de fora: quem pediu trata a ausência como "saiu da lista".
+    pub fn summaries(&self, ids: &[i64]) -> Result<Vec<MessageSummary>> {
+        let mut out = Vec::with_capacity(ids.len());
+        for chunk in ids.chunks(500) {
+            let marks = vec!["?"; chunk.len()].join(",");
+            let mut stmt = self.conn.prepare(&format!(
+                "SELECT {SUMMARY_COLS} FROM messages m WHERE m.id IN ({marks}) AND {NOT_SNOOZED}"
+            ))?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(chunk), row_to_summary)?;
+            for r in rows {
+                out.push(r?);
+            }
+        }
+        out.sort_by(|a, b| (b.pinned, b.date, b.id).cmp(&(a.pinned, a.date, a.id)));
+        Ok(out)
+    }
+
     /// Pasta unificada: o papel em todas as contas, mais recentes primeiro.
     pub fn list_folder(&self, role: Role, limit: u32, offset: u32) -> Result<Vec<MessageSummary>> {
         let boxes = self.role_boxes(role)?;
@@ -1691,6 +1709,36 @@ mod tests {
         assert_eq!(list[1].snippet, "Translado para Guarulhos");
         assert_eq!(s.search("cotacao guaru", 10).unwrap()[0].uid, 1);
         assert!(s.search("\"", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn summaries_por_id_na_ordem_da_lista() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.set_uid_validity("a", "INBOX", 1).unwrap();
+        s.insert_messages("a", "INBOX", &[msg(1, "x", "", 100), msg(2, "y", "", 200), msg(3, "z", "", 300)]).unwrap();
+        let ids: Vec<i64> = s.list("INBOX", 50, 0).unwrap().iter().map(|m| m.id).collect();
+        let got = s.summaries(&[ids[2], 9999, ids[0]]).unwrap();
+        assert_eq!(got.iter().map(|m| m.id).collect::<Vec<_>>(), [ids[0], ids[2]], "ausente fica de fora; mais nova primeiro");
+        assert!(s.summaries(&[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn summaries_deixa_de_fora_adiadas_e_cursor_sobrevive_a_exclusao() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.set_folders("a", &folders_a()).unwrap();
+        let msgs: Vec<_> = (1..=30u32).map(|u| msg(u, &format!("m{u}"), "", 1000 + i64::from(u))).collect();
+        s.insert_messages("a", "INBOX", &msgs).unwrap();
+        let all: Vec<i64> = s.list_box_page("a", "INBOX", None, 100).unwrap().items.iter().map(|m| m.id).collect();
+        s.snooze(&[all[1]], i64::MAX / 2).unwrap();
+        let got = s.summaries(&[all[0], all[1]]).unwrap();
+        assert_eq!(got.iter().map(|m| m.id).collect::<Vec<_>>(), [all[0]], "adiada sai, como no delta");
+        // O cursor guarda posição (fixada, data, id), não a linha: apagar a linha do cursor não invalida a próxima página.
+        let first = s.list_box_page("a", "INBOX", None, 10).unwrap();
+        let last = first.items.last().unwrap().id;
+        s.remove(last).unwrap();
+        let second = s.list_box_page("a", "INBOX", first.next.as_deref(), 10).unwrap();
+        assert_eq!(second.items.len(), 10);
+        assert!(second.items.iter().all(|m| m.id != last && !first.items.iter().any(|f| f.id == m.id)));
     }
 
     #[test]

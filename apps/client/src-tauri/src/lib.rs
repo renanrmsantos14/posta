@@ -586,6 +586,12 @@ fn list_messages_page(state: State<'_, AppState>, folder: Role, cursor: Option<S
     state.store.lock().unwrap().list_folder_page(folder, cursor.as_deref(), limit).map_err(err)
 }
 
+/// Resumos por id (aplica o `mail-delta` sem recarregar a lista). Ids ausentes ou adiados não voltam.
+#[tauri::command]
+fn get_summaries(state: State<'_, AppState>, ids: Vec<i64>) -> CmdResult<Vec<MessageSummary>> {
+    state.store.lock().unwrap().summaries(&ids).map_err(err)
+}
+
 /// Pasta virtual "Com estrela": todas as contas, fora Lixeira e Spam.
 #[tauri::command]
 fn list_starred(state: State<'_, AppState>, limit: u32, offset: u32) -> CmdResult<Vec<MessageSummary>> {
@@ -1608,6 +1614,7 @@ pub fn run() {
             delete_forever,
             list_messages,
             list_messages_page,
+            get_summaries,
             search_messages,
             list_starred,
             search_starred,

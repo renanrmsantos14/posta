@@ -136,6 +136,20 @@ export interface SendReport {
   queued: boolean;
 }
 
+/** Página da lista por cursor; `next` é o cursor da seguinte (null = acabou). */
+export interface MessagePage {
+  items: MessageSummary[];
+  next: string | null;
+}
+/** Evento `mail-delta`: ids locais que chegaram, mudaram ou sumiram depois de uma sincronização. */
+export interface MailDelta {
+  account: string;
+  mailbox: string;
+  inserted: number[];
+  changed: number[];
+  removed: number[];
+}
+
 export type Role = "inbox" | "sent" | "archive" | "trash" | "junk";
 /** O que a barra lateral mostra: pastas reais, as virtuais "Com estrela" e "Todas as caixas" (Entrada de todas as contas), pastas do usuário e categorias. */
 export type View = Role | "starred" | "all" | `box:${string}` | `cat:${string}`;
@@ -237,6 +251,8 @@ export const api = isTauri
           ? invoke<MessageSummary[]>("list_starred", { limit, offset })
           : invoke<MessageSummary[]>("list_messages", { role: view === "all" ? "inbox" : view, limit, offset });
       },
+      listPage: (folder: Role, cursor: string | null, limit: number) => invoke<MessagePage>("list_messages_page", { folder, cursor, limit }),
+      summaries: (ids: number[]) => invoke<MessageSummary[]>("get_summaries", { ids }),
       search: (query: string, view: View) => {
         const box = parseBox(view);
         const cat = parseCat(view);
