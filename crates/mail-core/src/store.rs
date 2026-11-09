@@ -2156,4 +2156,184 @@ mod tests {
         assert!(s.user_folders().unwrap().is_empty());
         assert!(s.conn.query_row("SELECT COUNT(*) FROM message_categories", [], |r| r.get::<_, i64>(0)).unwrap() == 0);
     }
+
+    /// Gerador pseudoaleatório fixo (LCG), para provas reproduzíveis sem dependência extra.
+    struct Lcg(u64);
+    impl Lcg {
+        fn next(&mut self, n: u64) -> u64 {
+            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (self.0 >> 33) % n
+        }
+    }
+
+    fn thread_ids(s: &Store, account: &str) -> Vec<(i64, i64)> {
+        let mut st = s.conn.prepare("SELECT id, thread_id FROM messages WHERE account = ?1 ORDER BY id").unwrap();
+        let rows = st.query_map(params![account], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+        rows
+    }
+
+    #[test]
+    fn fios_incrementais_batem_com_o_recalculo_completo() {
+        // Lotes aleatórios com respostas fora de ordem, cópias do mesmo Message-ID, assuntos repetidos
+        // e referências a mensagens que só chegam depois. Depois de cada lote, o fio incremental tem de
+        // ser igual ao recálculo completo da conta.
+        for seed in 0..12u64 {
+            let mut rng = Lcg(seed + 1);
+            let mut s = Store::open_in_memory().unwrap();
+            let mut uid = 0u32;
+            for batch in 0..10 {
+                let n = 1 + rng.next(8) as usize;
+                let mut msgs = Vec::new();
+                for _ in 0..n {
+                    uid += 1;
+                    let topic = rng.next(6);
+                    let mut m = msg(uid, &format!("{}Assunto {topic}", ["", "Re: ", "RES: ", "Fwd: "][rng.next(4) as usize]), "", i64::from(uid));
+                    // Message-ID de 0..=40; alguns repetidos entre pastas.
+                    m.message_id = if rng.next(10) == 0 { String::new() } else { format!("id{}", rng.next(40)) };
+                    let refs: Vec<String> = (0..rng.next(3)).map(|_| format!("id{}", rng.next(40))).collect();
+                    m.refs = refs.join(" ");
+                    msgs.push(m);
+                }
+                let mailbox = if batch % 3 == 2 { "Enviados" } else { "INBOX" };
+                s.insert_messages("a", mailbox, &msgs).unwrap();
+                let incremental = thread_ids(&s, "a");
+                s.rebuild_threads("a").unwrap();
+                assert_eq!(incremental, thread_ids(&s, "a"), "seed {seed}, lote {batch}");
+            }
+        }
+    }
+
+    #[test]
+    fn paginas_por_cursor_percorrem_a_mesma_lista_sem_repetir() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.set_folders("a", &folders_a()).unwrap();
+        let mut rng = Lcg(7);
+        // Datas repetidas de propósito: o desempate pelo id é o que mantém o cursor estável.
+        let msgs: Vec<_> = (1..=120u32).map(|u| msg(u, &format!("m{u}"), "", 1000 + rng.next(15) as i64)).collect();
+        s.insert_messages("a", "INBOX", &msgs).unwrap();
+        let ids: Vec<i64> = s.list("INBOX", 500, 0).unwrap().iter().map(|m| m.id).collect();
+        s.set_pinned(&[ids[40], ids[99]], true).unwrap();
+        s.snooze(&[ids[3], ids[60]], i64::MAX / 2).unwrap();
+        let expected: Vec<i64> = s.list_folder(Role::Inbox, 500, 0).unwrap().iter().map(|m| m.id).collect();
+        assert_eq!(expected.len(), 118, "os adiados saem da lista");
+        assert!(s.list_folder(Role::Inbox, 2, 0).unwrap().iter().all(|m| m.pinned), "fixadas primeiro");
+
+        let mut got = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let page = s.list_box_page("a", "INBOX", cursor.as_deref(), 17).unwrap();
+            assert!(page.items.len() <= 17);
+            got.extend(page.items.iter().map(|m| m.id));
+            match page.next {
+                Some(c) => cursor = Some(c),
+                None => break,
+            }
+        }
+        assert_eq!(got, expected);
+        assert!(s.list_box_page("a", "INBOX", Some("lixo"), 5).is_err());
+        // Mensagem que entra no topo entre uma página e outra não desloca o que vem depois do cursor.
+        let first = s.list_box_page("a", "INBOX", None, 10).unwrap();
+        s.insert_messages("a", "INBOX", &[msg(500, "nova", "", 9999)]).unwrap();
+        let second = s.list_box_page("a", "INBOX", first.next.as_deref(), 10).unwrap();
+        assert_eq!(second.items.iter().map(|m| m.id).collect::<Vec<_>>(), expected[10..20]);
+    }
+
+    #[test]
+    fn primeira_pagina_usa_o_indice_de_ordem_sem_ordenar() {
+        let s = Store::open_in_memory().unwrap();
+        let plan: Vec<String> = {
+            let mut st = s
+                .conn
+                .prepare(
+                    "EXPLAIN QUERY PLAN SELECT id FROM messages WHERE account = 'a' AND mailbox = 'INBOX'
+                     ORDER BY pinned DESC, visible_date DESC, id DESC LIMIT 50",
+                )
+                .unwrap();
+            let rows = st.query_map([], |r| r.get::<_, String>(3)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+            rows
+        };
+        let plan = plan.join(" | ");
+        assert!(plan.contains("messages_by_top"), "{plan}");
+        assert!(!plan.contains("TEMP B-TREE"), "{plan}");
+    }
+
+    #[test]
+    fn corpo_que_chega_depois_entra_na_busca_e_nao_vira_duplicata() {
+        let mut s = Store::open_in_memory().unwrap();
+        let mut m = msg(1, "Proposta", "prévia curta", 10);
+        m.header_only = true;
+        let ids = s.insert_messages("a", "INBOX", &[m]).unwrap();
+        assert!(!s.get(ids[0]).unwrap().unwrap().body_loaded);
+        assert!(s.search("zumbaia", 10).unwrap().is_empty());
+        assert_eq!(s.body_missing(ids[0]).unwrap(), Some(("a".into(), "INBOX".into(), 1)));
+        assert_eq!(s.uids_without_body("a", "INBOX", 10).unwrap(), vec![1]);
+
+        let full = msg(1, "Proposta", "texto completo com zumbaia no meio", 10);
+        assert_eq!(s.set_body("a", "INBOX", 1, &full).unwrap(), Some(ids[0]));
+        let d = s.get(ids[0]).unwrap().unwrap();
+        assert!(d.body_loaded && d.body_text.contains("zumbaia"));
+        assert_eq!(s.search("zumbai", 10).unwrap().len(), 1, "prefixo no FTS");
+        assert_eq!(s.search("proposta", 10).unwrap().len(), 1);
+        assert_eq!(s.body_missing(ids[0]).unwrap(), None);
+        assert!(s.uids_without_body("a", "INBOX", 10).unwrap().is_empty());
+        // Mensagem que sumiu do banco no meio do caminho: nada a gravar.
+        assert_eq!(s.set_body("a", "INBOX", 99, &full).unwrap(), None);
+    }
+
+    #[test]
+    fn delta_do_estado_do_servidor_traz_ids_alterados_e_removidos() {
+        let mut s = Store::open_in_memory().unwrap();
+        let ids = s.insert_messages("a", "INBOX", &[msg(1, "a", "", 1), msg(2, "b", "", 2), msg(3, "c", "", 3)]).unwrap();
+        // 1 virou lida, 2 sumiu, 3 continua igual, 4 é novo (fica por conta de quem baixa).
+        let d = s.apply_server_state("a", "INBOX", &[(1, true, false), (3, false, false), (4, false, false)]).unwrap();
+        assert_eq!((d.changed, d.removed, d.inserted), (vec![ids[0]], vec![ids[1]], vec![]));
+        assert_eq!(s.apply_server_state("a", "INBOX", &[(1, true, false), (3, false, false)]).unwrap(), Delta::default());
+        // Janela: só mexe de `lo` para cima.
+        let d = s.apply_server_state_from("a", "INBOX", 3, &[]).unwrap();
+        assert_eq!((d.removed, s.local_uids("a", "INBOX").unwrap()), (vec![ids[2]], vec![1]));
+    }
+
+    #[test]
+    fn migracao_do_master_preenche_colunas_novas_e_e_idempotente() {
+        // Banco do master com dados reais antes de qualquer coluna/índice de desempenho.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(MASTER).unwrap();
+        conn.execute_batch(
+            "INSERT INTO messages (account, mailbox, uid, from_name, from_addr, subject, date, message_id, refs, to_addrs, cc_addrs, seen, body_text)
+               VALUES ('a', 'INBOX', 1, 'Ana', 'ana@exemplo.com', 'Pauta', 100, 'p1', '', 'eu@exemplo.com', 'carla@exemplo.com', 0, 'corpo antigo zumbaia'),
+                      ('a', 'INBOX', 2, 'Bia', 'bia@exemplo.com', 'Re: Pauta', 200, 'p2', 'p1', 'eu@exemplo.com', '', 1, 'resposta'),
+                      ('a', 'INBOX', 3, 'Ana', 'ana@exemplo.com', 'Outra', 300, 'p3', '', 'eu@exemplo.com', '', 0, '');",
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", SCHEMA_VERSION).unwrap();
+
+        let s = Store::init(conn).unwrap();
+        let list = s.list("INBOX", 10, 0).unwrap();
+        assert_eq!(list.iter().map(|m| m.uid).collect::<Vec<_>>(), [3, 2, 1]);
+        assert_eq!(list[1].thread_count, 2, "fios calculados na migração");
+        assert!(list.iter().all(|m| !m.pinned));
+        assert_eq!(s.search("zumbai", 10).unwrap().len(), 1, "FTS refeito, com prefixo");
+        assert!(!s.suggest_contacts("carla", 10).unwrap().is_empty(), "contatos preenchidos");
+        let unread: u32 = s.unread_counts().unwrap().iter().map(|(_, n)| n).sum();
+        assert!(unread <= 2);
+        let plan: String = {
+            let mut st = s
+                .conn
+                .prepare("EXPLAIN QUERY PLAN SELECT id FROM messages WHERE account = 'a' AND mailbox = 'INBOX' ORDER BY pinned DESC, visible_date DESC, id DESC LIMIT 5")
+                .unwrap();
+            let rows: Vec<String> = st.query_map([], |r| r.get(3)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+            rows.join("|")
+        };
+        assert!(plan.contains("messages_by_top"), "{plan}");
+
+        // Abrir de novo não refaz nem duplica nada.
+        let before: i64 = s.conn.query_row("SELECT COUNT(*) FROM msg_refs", [], |r| r.get(0)).unwrap();
+        let contacts: i64 = s.conn.query_row("SELECT COUNT(*) FROM contacts", [], |r| r.get(0)).unwrap();
+        let again = Store::init(s.conn).unwrap();
+        assert_eq!(again.conn.query_row("SELECT COUNT(*) FROM msg_refs", [], |r| r.get::<_, i64>(0)).unwrap(), before);
+        assert_eq!(again.conn.query_row("SELECT COUNT(*) FROM contacts", [], |r| r.get::<_, i64>(0)).unwrap(), contacts);
+        assert_eq!(again.list("INBOX", 10, 0).unwrap().len(), 3);
+        // As colunas de sync ficam zeradas num banco que nunca sincronizou com a versão nova.
+        assert_eq!(again.sync_state("a", "INBOX").unwrap().map(|x| x.highest_modseq), None);
+    }
 }
