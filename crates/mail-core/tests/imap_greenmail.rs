@@ -3,7 +3,7 @@
 //! Sem a variável, os testes passam sem fazer nada.
 
 use imap::{ClientBuilder, ConnectionMode};
-use mail_core::{imap_sync, send, ImapAccount, Outgoing, Role, Security, SmtpServer, Store};
+use mail_core::{imap_sync, send, ImapAccount, OutAttachment, Outgoing, Role, Security, SmtpServer, Store};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 fn account(tag: &str) -> Option<ImapAccount> {
@@ -134,6 +134,9 @@ fn responde_por_smtp_guarda_em_enviados_e_marca_respondida() {
         to: ana.username.clone(),
         subject: "Re: Translado sexta".into(),
         body: "Confirmado: 7h40 no saguão.".into(),
+        cc: String::new(),
+        bcc: String::new(),
+        attachments: vec![],
     };
     let report = send::send(&eu, &out, Some(&reply)).unwrap();
     assert_eq!(report.warning, None);
@@ -260,4 +263,132 @@ fn idle_acorda_quando_chega_mensagem() {
     // Sem novidade: expira no prazo.
     let end = imap_sync::idle_wait(&acc, "INBOX", Duration::from_secs(2)).unwrap();
     assert_eq!(end, IdleEnd::TimedOut);
+}
+
+#[test]
+fn envia_com_anexo_e_cc_e_le_de_volta() {
+    use base64::Engine;
+    let (Some(eu), Some(ana), Some(bia)) = (account("eu"), account("ana"), account("bia")) else { return };
+    if eu.smtp.is_none() {
+        return;
+    }
+    let conteudo: Vec<u8> = (0..=255u8).cycle().take(5000).collect();
+    let out = Outgoing {
+        to: ana.username.clone(),
+        subject: "Contrato com anexo".into(),
+        body: "Segue o arquivo.".into(),
+        cc: bia.username.clone(),
+        bcc: String::new(),
+        attachments: vec![OutAttachment {
+            name: "contrato.bin".into(),
+            mime: "application/octet-stream".into(),
+            data: base64::engine::general_purpose::STANDARD.encode(&conteudo),
+        }],
+    };
+    send::send(&eu, &out, None).unwrap();
+
+    // Destinatário e copiado recebem a mensagem com o anexo listado.
+    for quem in [&ana, &bia] {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut got = None;
+        for _ in 0..20 {
+            imap_sync::sync_mailbox(quem, &mut store, "INBOX", None).unwrap();
+            got = store.search("arquivo", 5).unwrap().into_iter().next();
+            if got.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let got = got.expect("mensagem chegou");
+        let d = store.get(got.id).unwrap().unwrap();
+        assert_eq!(d.attachments.len(), 1, "{:?}", d.attachments);
+        let a = &d.attachments[0];
+        assert_eq!((a.name.as_str(), a.size), ("contrato.bin", 5000));
+
+        // O conteúdo vem do servidor sob demanda e bate byte a byte.
+        let raw = imap_sync::fetch_raw(quem, "INBOX", got.uid).unwrap().unwrap();
+        let (_, data) = mail_core::attachments::extract(&raw, a.index).unwrap();
+        assert_eq!(data, conteudo);
+    }
+}
+
+fn server_flags(acc: &ImapAccount, uid: u32) -> Vec<imap::types::Flag<'static>> {
+    let mut s = session(acc);
+    s.select("INBOX").unwrap();
+    let f = s.uid_fetch(uid.to_string(), "FLAGS").unwrap();
+    let flags = f.iter().next().unwrap().flags().iter().map(|f| f.clone().into_owned()).collect();
+    s.logout().ok();
+    flags
+}
+
+#[test]
+fn marca_lida_e_estrela_no_servidor_e_em_lote() {
+    use imap::types::Flag;
+    let Some(acc) = account("flg") else { return };
+    let mut s = session(&acc);
+    s.append("INBOX", &raw(1, "Um")).finish().unwrap();
+    s.append("INBOX", &raw(2, "Dois")).finish().unwrap();
+    s.append("INBOX", &raw(3, "Tres")).flag(Flag::Flagged).finish().unwrap();
+    s.logout().ok();
+
+    let mut store = Store::open_in_memory().unwrap();
+    imap_sync::sync_mailbox(&acc, &mut store, "INBOX", None).unwrap();
+    let list = store.list("INBOX", 10, 0).unwrap();
+    let by = |subject: &str| list.iter().find(|m| m.subject == subject).unwrap().clone();
+    // A estrela que já estava no servidor chega ao banco local.
+    assert!(by("Tres").flagged && !by("Um").flagged);
+    assert_eq!(store.list_starred(10, 0).unwrap().len(), 1);
+
+    // Estrela e lida no servidor, conferidas direto nele e depois pelo sync.
+    let (um, dois) = (by("Um").uid, by("Dois").uid);
+    imap_sync::set_flag(&acc, "INBOX", &[um], imap_sync::MsgFlag::Flagged, true).unwrap();
+    imap_sync::set_seen(&acc, "INBOX", um, true).unwrap();
+    let flags = server_flags(&acc, um);
+    assert!(flags.contains(&Flag::Flagged) && flags.contains(&Flag::Seen), "{flags:?}");
+    assert!(!server_flags(&acc, dois).contains(&Flag::Seen));
+
+    // Lote: marca as duas como lidas de uma vez e tira a estrela da terceira.
+    imap_sync::set_flag(&acc, "INBOX", &[um, dois], imap_sync::MsgFlag::Seen, true).unwrap();
+    imap_sync::set_flag(&acc, "INBOX", &[by("Tres").uid], imap_sync::MsgFlag::Flagged, false).unwrap();
+    imap_sync::set_flag(&acc, "INBOX", &[um], imap_sync::MsgFlag::Seen, false).unwrap();
+    assert!(!server_flags(&acc, um).contains(&Flag::Seen));
+    assert!(server_flags(&acc, dois).contains(&Flag::Seen));
+    assert!(!server_flags(&acc, by("Tres").uid).contains(&Flag::Flagged));
+
+    imap_sync::sync_mailbox(&acc, &mut store, "INBOX", None).unwrap();
+    let list = store.list("INBOX", 10, 0).unwrap();
+    let by = |subject: &str| list.iter().find(|m| m.subject == subject).unwrap().clone();
+    assert!(by("Um").flagged && !by("Um").seen);
+    assert!(by("Dois").seen && !by("Tres").flagged);
+    assert_eq!(store.list_starred(10, 0).unwrap().len(), 1);
+}
+
+#[test]
+fn move_e_exclui_varias_de_uma_vez() {
+    let Some(acc) = account("lote") else { return };
+    let mut s = session(&acc);
+    for i in 0..4 {
+        s.append("INBOX", &raw(i, &format!("M{i}"))).finish().unwrap();
+    }
+    s.logout().ok();
+    let folders = imap_sync::discover_folders(&acc).unwrap();
+    let archive = folders.iter().find(|f| f.role == Role::Archive).unwrap().name.clone();
+
+    let mut store = Store::open_in_memory().unwrap();
+    store.set_folders(&acc.id, &folders).unwrap();
+    imap_sync::sync_mailbox(&acc, &mut store, "INBOX", None).unwrap();
+    let uids: Vec<u32> = store.list("INBOX", 10, 0).unwrap().iter().map(|m| m.uid).collect();
+
+    imap_sync::move_messages(&acc, "INBOX", &uids[..3], &archive).unwrap();
+    imap_sync::sync_mailbox(&acc, &mut store, "INBOX", None).unwrap();
+    imap_sync::sync_mailbox(&acc, &mut store, &archive, Some(1000)).unwrap();
+    assert_eq!(store.list_folder(Role::Inbox, 10, 0).unwrap().len(), 1);
+    let arquivo = store.list_folder(Role::Archive, 10, 0).unwrap();
+    assert_eq!(arquivo.len(), 3);
+    assert_eq!(arquivo[0].role.as_deref(), Some("archive"));
+
+    let alvo: Vec<u32> = arquivo.iter().map(|m| m.uid).collect();
+    imap_sync::delete_forever_many(&acc, &archive, &alvo).unwrap();
+    imap_sync::sync_mailbox(&acc, &mut store, &archive, Some(1000)).unwrap();
+    assert!(store.list_folder(Role::Archive, 10, 0).unwrap().is_empty());
 }

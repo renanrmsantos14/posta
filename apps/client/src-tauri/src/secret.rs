@@ -14,6 +14,14 @@ mod imp {
     pub fn get(id: &str) -> Result<String, String> {
         keyring::Entry::new(SERVICE, id).and_then(|e| e.get_password()).map_err(|e| e.to_string())
     }
+
+    /// Entrada que não existe não é erro: o objetivo (não ter segredo guardado) já está cumprido.
+    pub fn delete(id: &str) -> Result<(), String> {
+        match keyring::Entry::new(SERVICE, id).and_then(|e| e.delete_credential()) {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(e) => Err(e.to_string()),
+        }
+    }
 }
 
 #[cfg(target_os = "android")]
@@ -42,6 +50,13 @@ mod imp {
     pub fn get(id: &str) -> Result<String, String> {
         entry(id)?.get_password().map_err(|e| e.to_string())
     }
+
+    pub fn delete(id: &str) -> Result<(), String> {
+        match entry(id)?.delete_credential() {
+            Ok(()) | Err(keyring_core::Error::NoEntry) => Ok(()),
+            Err(e) => Err(e.to_string()),
+        }
+    }
 }
 
-pub use imp::{get, set};
+pub use imp::{delete, get, set};

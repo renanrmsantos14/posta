@@ -1,14 +1,15 @@
 //! Cópia local da caixa em SQLite. Toda leitura da UI vem daqui, nunca da rede.
 
 use rusqlite::{params, Connection, OptionalExtension};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+use crate::attachments::Attachment;
 use crate::folders::{Folder, Role};
 use crate::Result;
 
 /// O banco é só uma cópia do servidor: mudou o esquema, apaga e sincroniza de novo.
-const SCHEMA_VERSION: i32 = 3;
+const SCHEMA_VERSION: i32 = 5;
 
 const SCHEMA: &str = "
 PRAGMA journal_mode = WAL;
@@ -32,9 +33,13 @@ CREATE TABLE IF NOT EXISTS messages (
   body_text TEXT NOT NULL DEFAULT '',
   body_html TEXT NOT NULL DEFAULT '',
   seen INTEGER NOT NULL DEFAULT 0,
+  flagged INTEGER NOT NULL DEFAULT 0,
   message_id TEXT NOT NULL DEFAULT '',
   refs TEXT NOT NULL DEFAULT '',
   reply_addr TEXT NOT NULL DEFAULT '',
+  attachments TEXT NOT NULL DEFAULT '[]',
+  to_addrs TEXT NOT NULL DEFAULT '',
+  cc_addrs TEXT NOT NULL DEFAULT '',
   UNIQUE (account, mailbox, uid)
 );
 CREATE INDEX IF NOT EXISTS messages_by_date ON messages (date DESC);
@@ -45,6 +50,22 @@ CREATE TABLE IF NOT EXISTS folders (
   PRIMARY KEY (account, role)
 );
 CREATE INDEX IF NOT EXISTS messages_by_box ON messages (account, mailbox, date DESC);
+-- Dados do usuário (não são cópia do servidor): sobrevivem à recriação do esquema acima.
+CREATE TABLE IF NOT EXISTS drafts (
+  id TEXT PRIMARY KEY,
+  account TEXT NOT NULL,
+  reply_to INTEGER,
+  to_addr TEXT NOT NULL DEFAULT '',
+  cc_addr TEXT NOT NULL DEFAULT '',
+  bcc_addr TEXT NOT NULL DEFAULT '',
+  subject TEXT NOT NULL DEFAULT '',
+  body TEXT NOT NULL DEFAULT '',
+  updated INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5 (
   subject, from_name, from_addr, body_text,
   content = 'messages', content_rowid = 'id',
@@ -72,12 +93,18 @@ pub struct NewMessage {
     /// HTML original; vazio quando a mensagem só tem texto. A busca continua sobre `body_text`.
     pub body_html: String,
     pub seen: bool,
+    /// Estrela (`\Flagged`).
+    pub flagged: bool,
     /// Message-ID sem os sinais < >.
     pub message_id: String,
     /// IDs de References, separados por espaço, sem < >.
     pub refs: String,
     /// Para quem a resposta vai: Reply-To, ou o remetente.
     pub reply_addr: String,
+    pub attachments: Vec<Attachment>,
+    /// Endereços de To e Cc, separados por vírgula (para "Responder a todos").
+    pub to_addrs: String,
+    pub cc_addrs: String,
 }
 
 /// O que é preciso para responder mantendo a conversa agrupada.
@@ -102,6 +129,9 @@ pub struct MessageSummary {
     pub date: i64,
     pub snippet: String,
     pub seen: bool,
+    pub flagged: bool,
+    /// Papel da pasta onde a mensagem está (`inbox`, `trash`...); `None` se a pasta não tem papel.
+    pub role: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -112,6 +142,29 @@ pub struct MessageDetail {
     /// Vazio quando a mensagem só tem texto.
     pub body_html: String,
     pub reply_addr: String,
+    pub attachments: Vec<Attachment>,
+    pub to_addrs: String,
+    pub cc_addrs: String,
+}
+
+/// Rascunho guardado só localmente (o Composer salva sozinho).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DraftRecord {
+    /// Gerado pela UI; o mesmo id sobrescreve o rascunho anterior.
+    pub id: String,
+    pub account: String,
+    /// Id local da mensagem respondida.
+    pub reply_to: Option<i64>,
+    pub to: String,
+    #[serde(default)]
+    pub cc: String,
+    #[serde(default)]
+    pub bcc: String,
+    pub subject: String,
+    pub body: String,
+    /// Unix, em segundos; preenchido ao salvar.
+    #[serde(default)]
+    pub updated: i64,
 }
 
 pub struct Store {
@@ -123,8 +176,12 @@ const IN_ROLE: &str = "m.mailbox = COALESCE(
     (SELECT f.name FROM folders f WHERE f.account = m.account AND f.role = ?1),
     CASE ?1 WHEN 'inbox' THEN 'INBOX' END)";
 
-const SUMMARY_COLS: &str =
-    "m.id, m.account, m.uid, m.from_name, m.from_addr, m.subject, m.date, m.snippet, m.seen";
+const SUMMARY_COLS: &str = "m.id, m.account, m.uid, m.from_name, m.from_addr, m.subject, m.date, m.snippet, m.seen, m.flagged,
+    COALESCE((SELECT f.role FROM folders f WHERE f.account = m.account AND f.name = m.mailbox),
+    CASE WHEN m.mailbox = 'INBOX' THEN 'inbox' END)";
+
+/// Fora da Lixeira e do Spam.
+const NOT_DISCARDED: &str = "COALESCE((SELECT f.role FROM folders f WHERE f.account = m.account AND f.name = m.mailbox), '') NOT IN ('trash', 'junk')";
 
 fn row_to_summary(r: &rusqlite::Row) -> rusqlite::Result<MessageSummary> {
     Ok(MessageSummary {
@@ -137,6 +194,8 @@ fn row_to_summary(r: &rusqlite::Row) -> rusqlite::Result<MessageSummary> {
         date: r.get(6)?,
         snippet: r.get(7)?,
         seen: r.get(8)?,
+        flagged: r.get(9)?,
+        role: r.get(10)?,
     })
 }
 
@@ -176,6 +235,17 @@ impl Store {
             )?;
         }
         conn.execute_batch(SCHEMA)?;
+        // `drafts` não é recriada com o resto: rascunhos de versões antigas ganham as colunas de Cc/Bcc.
+        for col in ["cc_addr", "bcc_addr"] {
+            let has: bool = conn.query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('drafts') WHERE name = ?1",
+                params![col],
+                |r| r.get(0),
+            )?;
+            if !has {
+                conn.execute_batch(&format!("ALTER TABLE drafts ADD COLUMN {col} TEXT NOT NULL DEFAULT ''"))?;
+            }
+        }
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         Ok(Self { conn })
     }
@@ -224,8 +294,8 @@ impl Store {
             let mut stmt = tx.prepare_cached(
                 "INSERT OR IGNORE INTO messages
                  (account, mailbox, uid, from_name, from_addr, subject, date, snippet, body_text, body_html, seen,
-                  message_id, refs, reply_addr)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                  message_id, refs, reply_addr, attachments, flagged, to_addrs, cc_addrs)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
             )?;
             for m in msgs {
                 stmt.execute(params![
@@ -242,21 +312,26 @@ impl Store {
                     m.seen,
                     m.message_id,
                     m.refs,
-                    m.reply_addr
+                    m.reply_addr,
+                    serde_json::to_string(&m.attachments).unwrap_or_else(|_| "[]".into()),
+                    m.flagged,
+                    m.to_addrs,
+                    m.cc_addrs
                 ])?;
             }
         }
         Ok(tx.commit()?)
     }
 
-    /// Aplica o estado do servidor: remove o que sumiu e atualiza a flag de lida.
-    pub fn apply_server_state(&mut self, account: &str, mailbox: &str, server: &[(u32, bool)]) -> Result<()> {
+    /// Aplica o estado do servidor: remove o que sumiu e atualiza as flags de lida e estrela.
+    /// Cada item é `(uid, lida, estrela)`.
+    pub fn apply_server_state(&mut self, account: &str, mailbox: &str, server: &[(u32, bool, bool)]) -> Result<()> {
         let tx = self.conn.transaction()?;
-        tx.execute_batch("CREATE TEMP TABLE IF NOT EXISTS server_uids (uid INTEGER PRIMARY KEY, seen INTEGER); DELETE FROM server_uids;")?;
+        tx.execute_batch("CREATE TEMP TABLE IF NOT EXISTS server_uids (uid INTEGER PRIMARY KEY, seen INTEGER, flagged INTEGER); DELETE FROM server_uids;")?;
         {
-            let mut ins = tx.prepare_cached("INSERT OR REPLACE INTO server_uids (uid, seen) VALUES (?1, ?2)")?;
-            for (uid, seen) in server {
-                ins.execute(params![uid, seen])?;
+            let mut ins = tx.prepare_cached("INSERT OR REPLACE INTO server_uids (uid, seen, flagged) VALUES (?1, ?2, ?3)")?;
+            for (uid, seen, flagged) in server {
+                ins.execute(params![uid, seen, flagged])?;
             }
         }
         tx.execute(
@@ -265,9 +340,10 @@ impl Store {
             params![account, mailbox],
         )?;
         tx.execute(
-            "UPDATE messages SET seen = (SELECT s.seen FROM server_uids s WHERE s.uid = messages.uid)
-             WHERE account = ?1 AND mailbox = ?2
-             AND seen <> (SELECT s.seen FROM server_uids s WHERE s.uid = messages.uid)",
+            "UPDATE messages SET seen = s.seen, flagged = s.flagged
+             FROM server_uids s
+             WHERE s.uid = messages.uid AND messages.account = ?1 AND messages.mailbox = ?2
+             AND (messages.seen <> s.seen OR messages.flagged <> s.flagged)",
             params![account, mailbox],
         )?;
         Ok(tx.commit()?)
@@ -277,6 +353,49 @@ impl Store {
         self.conn
             .execute("UPDATE messages SET seen = ?2 WHERE id = ?1", params![id, seen])?;
         Ok(())
+    }
+
+    pub fn set_flagged(&self, id: i64, flagged: bool) -> Result<()> {
+        self.conn
+            .execute("UPDATE messages SET flagged = ?2 WHERE id = ?1", params![id, flagged])?;
+        Ok(())
+    }
+
+    /// Não lidas por papel de pasta, somando as contas (papéis sem pasta ficam em 0).
+    pub fn unread_counts(&self) -> Result<Vec<(Role, u32)>> {
+        let mut stmt = self
+            .conn
+            .prepare_cached(&format!("SELECT COUNT(*) FROM messages m WHERE m.seen = 0 AND {IN_ROLE}"))?;
+        Role::ALL
+            .iter()
+            .map(|r| Ok((*r, stmt.query_row(params![r.as_str()], |row| row.get(0))?)))
+            .collect()
+    }
+
+    /// Pasta virtual "Com estrela": todas as contas, exceto Lixeira e Spam.
+    pub fn list_starred(&self, limit: u32, offset: u32) -> Result<Vec<MessageSummary>> {
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT {SUMMARY_COLS} FROM messages m WHERE m.flagged = 1 AND {NOT_DISCARDED}
+             ORDER BY m.date DESC, m.id DESC LIMIT ?1 OFFSET ?2"
+        ))?;
+        let rows = stmt
+            .query_map(params![limit, offset], row_to_summary)?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(rows)
+    }
+
+    pub fn search_starred(&self, query: &str, limit: u32) -> Result<Vec<MessageSummary>> {
+        let Some(q) = fts_query(query) else {
+            return Ok(Vec::new());
+        };
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT {SUMMARY_COLS} FROM messages_fts f JOIN messages m ON m.id = f.rowid
+             WHERE messages_fts MATCH ?1 AND m.flagged = 1 AND {NOT_DISCARDED} ORDER BY m.date DESC LIMIT ?2"
+        ))?;
+        let rows = stmt
+            .query_map(params![q, limit], row_to_summary)?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(rows)
     }
 
     /// Caixa unificada: todas as contas, mais recentes primeiro.
@@ -309,14 +428,17 @@ impl Store {
         Ok(self
             .conn
             .query_row(
-                &format!("SELECT {SUMMARY_COLS}, m.body_text, m.body_html, m.reply_addr FROM messages m WHERE m.id = ?1"),
+                &format!("SELECT {SUMMARY_COLS}, m.body_text, m.body_html, m.reply_addr, m.attachments, m.to_addrs, m.cc_addrs FROM messages m WHERE m.id = ?1"),
                 params![id],
                 |r| {
                     Ok(MessageDetail {
                         summary: row_to_summary(r)?,
-                        body_text: r.get(9)?,
-                        body_html: r.get(10)?,
-                        reply_addr: r.get(11)?,
+                        body_text: r.get(11)?,
+                        body_html: r.get(12)?,
+                        reply_addr: r.get(13)?,
+                        attachments: serde_json::from_str(&r.get::<_, String>(14)?).unwrap_or_default(),
+                        to_addrs: r.get(15)?,
+                        cc_addrs: r.get(16)?,
                     })
                 },
             )
@@ -418,6 +540,99 @@ impl Store {
         Ok(rows)
     }
 
+    /// Mensagens novas (não lidas) mais recentes de uma pasta de uma conta, para a notificação.
+    pub fn newest_unseen(&self, account: &str, mailbox: &str, limit: u32) -> Result<Vec<MessageSummary>> {
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT {SUMMARY_COLS} FROM messages m WHERE m.account = ?1 AND m.mailbox = ?2 AND m.seen = 0
+             ORDER BY m.date DESC, m.id DESC LIMIT ?3"
+        ))?;
+        let rows = stmt
+            .query_map(params![account, mailbox, limit], row_to_summary)?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(rows)
+    }
+
+    /// Grava (ou atualiza) o rascunho; `updated` vem do relógio local.
+    pub fn save_draft(&self, d: &DraftRecord) -> Result<()> {
+        if d.id.trim().is_empty() {
+            return Err(crate::Error::Invalid("rascunho sem id".into()));
+        }
+        self.conn.execute(
+            "INSERT INTO drafts (id, account, reply_to, to_addr, cc_addr, bcc_addr, subject, body, updated)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, strftime('%s','now'))
+             ON CONFLICT (id) DO UPDATE SET account = ?2, reply_to = ?3, to_addr = ?4, cc_addr = ?5, bcc_addr = ?6,
+               subject = ?7, body = ?8, updated = strftime('%s','now')",
+            params![d.id, d.account, d.reply_to, d.to, d.cc, d.bcc, d.subject, d.body],
+        )?;
+        Ok(())
+    }
+
+    /// Rascunhos, o mais recente primeiro.
+    pub fn list_drafts(&self) -> Result<Vec<DraftRecord>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT id, account, reply_to, to_addr, cc_addr, bcc_addr, subject, body, updated FROM drafts ORDER BY updated DESC, rowid DESC",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(DraftRecord {
+                    id: r.get(0)?,
+                    account: r.get(1)?,
+                    reply_to: r.get(2)?,
+                    to: r.get(3)?,
+                    cc: r.get(4)?,
+                    bcc: r.get(5)?,
+                    subject: r.get(6)?,
+                    body: r.get(7)?,
+                    updated: r.get(8)?,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(rows)
+    }
+
+    pub fn delete_draft(&self, id: &str) -> Result<()> {
+        self.conn.execute("DELETE FROM drafts WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    pub fn setting(&self, key: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row("SELECT value FROM settings WHERE key = ?1", params![key], |r| r.get(0))
+            .optional()?)
+    }
+
+    pub fn settings(&self) -> Result<std::collections::HashMap<String, String>> {
+        let mut stmt = self.conn.prepare_cached("SELECT key, value FROM settings")?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(rows)
+    }
+
+    pub fn set_setting(&self, key: &str, value: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2) ON CONFLICT (key) DO UPDATE SET value = ?2",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
+    /// Apaga tudo o que é local de uma conta: mensagens (e FTS), estado das pastas, pastas, rascunhos e assinatura.
+    pub fn remove_account(&mut self, account: &str) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        for sql in [
+            "DELETE FROM messages WHERE account = ?1",
+            "DELETE FROM mailbox_state WHERE account = ?1",
+            "DELETE FROM folders WHERE account = ?1",
+            "DELETE FROM drafts WHERE account = ?1",
+            "DELETE FROM settings WHERE key = 'signature:' || ?1",
+        ] {
+            tx.execute(sql, params![account])?;
+        }
+        Ok(tx.commit()?)
+    }
+
     /// Apaga a cópia local (o gatilho limpa o FTS). Usado depois que o servidor confirmou mover/excluir.
     pub fn remove(&self, id: i64) -> Result<()> {
         self.conn.execute("DELETE FROM messages WHERE id = ?1", params![id])?;
@@ -438,10 +653,14 @@ mod tests {
             date,
             body_text: body.into(),
             body_html: String::new(),
+            attachments: vec![],
             seen: false,
             message_id: format!("{uid}@exemplo.com"),
             refs: String::new(),
             reply_addr: "ana@exemplo.com".into(),
+            flagged: false,
+            to_addrs: "eu@exemplo.com, bia@exemplo.com".into(),
+            cc_addrs: String::new(),
         }
     }
 
@@ -467,7 +686,7 @@ mod tests {
         let mut s = Store::open_in_memory().unwrap();
         s.set_uid_validity("a", "INBOX", 1).unwrap();
         s.insert_messages("a", "INBOX", &[msg(1, "x", "", 1), msg(2, "y", "", 2)]).unwrap();
-        s.apply_server_state("a", "INBOX", &[(2, true)]).unwrap();
+        s.apply_server_state("a", "INBOX", &[(2, true, false)]).unwrap();
         let list = s.list("INBOX", 50, 0).unwrap();
         assert_eq!(list.len(), 1);
         assert!(list[0].seen);
@@ -575,5 +794,155 @@ mod tests {
         assert_eq!(d.body_html, "<p>oferta de <b>inverno</b></p>");
         assert_eq!(d.body_text, "oferta de inverno");
         assert!(s.search("strong", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn estrela_e_lida_vem_do_servidor_e_do_usuario() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.set_uid_validity("a", "INBOX", 1).unwrap();
+        s.insert_messages("a", "INBOX", &[msg(1, "x", "", 1), msg(2, "y", "", 2)]).unwrap();
+        let id1 = s.list("INBOX", 5, 0).unwrap().iter().find(|m| m.uid == 1).unwrap().id;
+        s.set_flagged(id1, true).unwrap();
+        s.set_seen(id1, true).unwrap();
+        let m = s.list("INBOX", 5, 0).unwrap().into_iter().find(|m| m.uid == 1).unwrap();
+        assert!(m.flagged && m.seen);
+        assert_eq!(m.role.as_deref(), Some("inbox"));
+        // O servidor manda: tirou a estrela da 1 e marcou a 2.
+        s.apply_server_state("a", "INBOX", &[(1, true, false), (2, false, true)]).unwrap();
+        let list = s.list("INBOX", 5, 0).unwrap();
+        assert!(!list.iter().find(|m| m.uid == 1).unwrap().flagged);
+        assert!(list.iter().find(|m| m.uid == 2).unwrap().flagged);
+    }
+
+    #[test]
+    fn nao_lidas_por_pasta_e_pasta_com_estrela() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.set_folders("a", &folders_a()).unwrap();
+        s.insert_messages("a", "INBOX", &[msg(1, "a", "", 1), msg(2, "b cotacao", "", 2)]).unwrap();
+        s.insert_messages("a", "Lixeira", &[msg(3, "lixo", "", 3)]).unwrap();
+        let get = |s: &Store, role| s.unread_counts().unwrap().into_iter().find(|(r, _)| *r == role).unwrap().1;
+        assert_eq!((get(&s, Role::Inbox), get(&s, Role::Trash), get(&s, Role::Junk)), (2, 1, 0));
+        let ids: Vec<_> = s.list("INBOX", 5, 0).unwrap().iter().map(|m| m.id).collect();
+        s.set_seen(ids[0], true).unwrap();
+        assert_eq!(get(&s, Role::Inbox), 1);
+
+        // Estrela em mensagem da Entrada e da Lixeira: a Lixeira fica fora da pasta virtual.
+        let trash_id = s.list_folder(Role::Trash, 5, 0).unwrap()[0].id;
+        s.set_flagged(trash_id, true).unwrap();
+        s.set_flagged(ids[0], true).unwrap();
+        let starred = s.list_starred(10, 0).unwrap();
+        assert_eq!(starred.len(), 1);
+        assert_eq!(starred[0].id, ids[0]);
+        assert_eq!(s.search_starred("cotacao", 10).unwrap().len(), 1);
+        assert!(s.search_starred("lixo", 10).unwrap().is_empty());
+        s.set_flagged(ids[0], false).unwrap();
+        assert!(s.list_starred(10, 0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn detalhe_traz_to_e_cc_para_responder_a_todos() {
+        let mut s = Store::open_in_memory().unwrap();
+        let mut m = msg(1, "x", "", 1);
+        m.cc_addrs = "carla@exemplo.com".into();
+        s.insert_messages("a", "INBOX", &[m]).unwrap();
+        let id = s.list("INBOX", 1, 0).unwrap()[0].id;
+        let d = s.get(id).unwrap().unwrap();
+        assert_eq!((d.to_addrs.as_str(), d.cc_addrs.as_str()), ("eu@exemplo.com, bia@exemplo.com", "carla@exemplo.com"));
+    }
+
+    fn draft(id: &str, account: &str, body: &str) -> DraftRecord {
+        DraftRecord { id: id.into(), account: account.into(), reply_to: None, to: "bia@exemplo.com".into(), cc: "carla@exemplo.com".into(), bcc: "dan@exemplo.com".into(), subject: "Oi".into(), body: body.into(), updated: 0 }
+    }
+
+    #[test]
+    fn rascunho_salva_atualiza_lista_e_apaga() {
+        let s = Store::open_in_memory().unwrap();
+        s.save_draft(&draft("d1", "a", "primeira versão")).unwrap();
+        s.save_draft(&draft("d2", "a", "outro")).unwrap();
+        // Mesmo id sobrescreve; reply_to é preservado.
+        let mut d1 = draft("d1", "a", "segunda versão");
+        d1.reply_to = Some(7);
+        s.save_draft(&d1).unwrap();
+        let all = s.list_drafts().unwrap();
+        assert_eq!(all.len(), 2);
+        let got = all.iter().find(|d| d.id == "d1").unwrap();
+        assert_eq!((got.body.as_str(), got.reply_to), ("segunda versão", Some(7)));
+        assert_eq!((got.cc.as_str(), got.bcc.as_str()), ("carla@exemplo.com", "dan@exemplo.com"));
+        assert!(got.updated > 0);
+        s.delete_draft("d1").unwrap();
+        assert_eq!(s.list_drafts().unwrap().iter().map(|d| d.id.as_str()).collect::<Vec<_>>(), ["d2"]);
+        assert!(s.save_draft(&draft(" ", "a", "x")).is_err());
+    }
+
+    #[test]
+    fn rascunho_sobrevive_a_recriacao_do_esquema() {
+        let dir = std::env::temp_dir().join(format!("posta-draft-{}.sqlite", std::process::id()));
+        {
+            let s = Store::open(&dir).unwrap();
+            s.save_draft(&draft("d1", "a", "texto")).unwrap();
+            s.conn.pragma_update(None, "user_version", SCHEMA_VERSION - 1).unwrap();
+        }
+        let s = Store::open(&dir).unwrap();
+        assert_eq!(s.list_drafts().unwrap().len(), 1);
+        drop(s);
+        for ext in ["", "-wal", "-shm"] {
+            std::fs::remove_file(format!("{}{ext}", dir.display())).ok();
+        }
+    }
+
+    #[test]
+    fn rascunho_antigo_ganha_colunas_de_cc_e_bcc() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE drafts (id TEXT PRIMARY KEY, account TEXT NOT NULL, reply_to INTEGER, to_addr TEXT NOT NULL DEFAULT '',
+               subject TEXT NOT NULL DEFAULT '', body TEXT NOT NULL DEFAULT '', updated INTEGER NOT NULL);
+             INSERT INTO drafts (id, account, to_addr, updated) VALUES ('velho', 'a', 'x@y.z', 1);",
+        )
+        .unwrap();
+        let s = Store::init(conn).unwrap();
+        let d = &s.list_drafts().unwrap()[0];
+        assert_eq!((d.id.as_str(), d.to.as_str(), d.cc.as_str(), d.bcc.as_str()), ("velho", "x@y.z", "", ""));
+    }
+
+    #[test]
+    fn remover_conta_apaga_so_os_dados_dela() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.set_folders("a", &folders_a()).unwrap();
+        s.set_folders("b", &folders_a()).unwrap();
+        s.set_uid_validity("a", "INBOX", 1).unwrap();
+        s.set_uid_validity("b", "INBOX", 1).unwrap();
+        s.insert_messages("a", "INBOX", &[msg(1, "Cotação a", "", 1)]).unwrap();
+        s.insert_messages("b", "INBOX", &[msg(1, "Cotação b", "", 2)]).unwrap();
+        s.save_draft(&draft("da", "a", "x")).unwrap();
+        s.save_draft(&draft("db", "b", "y")).unwrap();
+        s.set_setting("signature:a", "Ana").unwrap();
+        s.set_setting("signature:b", "Beto").unwrap();
+        s.set_setting("notify", "0").unwrap();
+
+        s.remove_account("a").unwrap();
+
+        assert!(s.local_uids("a", "INBOX").unwrap().is_empty());
+        assert!(s.folders("a").unwrap().is_empty());
+        assert_eq!(s.uid_validity("a", "INBOX").unwrap(), None);
+        assert_eq!(s.list("INBOX", 10, 0).unwrap().len(), 1);
+        assert_eq!(s.search("cotacao", 10).unwrap()[0].subject, "Cotação b", "FTS limpo só da conta removida");
+        assert_eq!(s.list_drafts().unwrap()[0].id, "db");
+        assert_eq!(s.setting("signature:a").unwrap(), None);
+        assert_eq!(s.setting("signature:b").unwrap().as_deref(), Some("Beto"));
+        assert_eq!(s.setting("notify").unwrap().as_deref(), Some("0"));
+    }
+
+    #[test]
+    fn configuracoes_e_novas_nao_lidas() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.set_setting("k", "1").unwrap();
+        s.set_setting("k", "2").unwrap();
+        assert_eq!(s.settings().unwrap().get("k").map(String::as_str), Some("2"));
+        let mut lida = msg(3, "lida", "", 30);
+        lida.seen = true;
+        s.insert_messages("a", "INBOX", &[msg(1, "velha", "", 10), msg(2, "nova", "", 20), lida]).unwrap();
+        let n = s.newest_unseen("a", "INBOX", 5).unwrap();
+        assert_eq!(n.iter().map(|m| m.subject.as_str()).collect::<Vec<_>>(), ["nova", "velha"]);
+        assert_eq!(s.newest_unseen("a", "INBOX", 1).unwrap().len(), 1);
     }
 }

@@ -1,5 +1,5 @@
 // Dados de exemplo para rodar a UI no navegador (pnpm dev), sem Tauri e sem rede.
-import type { Account, Draft, Provider, MessageDetail, MessageSummary, NewAccount, Role, SendReport, SyncResult } from "./api";
+import type { Account, Draft, Provider, MessageDetail, MessageSummary, NewAccount, OutAttachment, Role, SendReport, Settings, StoredDraft, SyncResult, UnreadCounts, View } from "./api";
 
 const now = Math.floor(Date.now() / 1000);
 const H = 3600;
@@ -36,7 +36,11 @@ let messages: MockMessage[] = Array.from({ length: 60 }, (_, i) => {
     body_text: `${body}\n\nAbraço,\n${from_name.split(" ")[0]}`,
     body_html: "",
     seen: i > 2 && i % 4 !== 0,
+    flagged: i % 7 === 2,
     reply_addr: from_addr,
+    attachments: [],
+    to_addrs: "renan@exemplo.com",
+    cc_addrs: i % 3 === 0 ? "carla.mendes@outlook.com, pedro@antunes.dev" : "",
     role: "inbox",
   };
 });
@@ -54,8 +58,25 @@ htmlSamples.forEach(([from_name, from_addr, subject, text, html, hoursAgo], i) =
   messages.unshift({
     id, account: accounts[0].id, uid: id, from_name, from_addr, subject,
     date: now - Math.round(hoursAgo * H), snippet: text, body_text: text, body_html: html,
-    seen: false, reply_addr: from_addr, role: "inbox",
+    seen: false, flagged: false, reply_addr: from_addr, attachments: [], to_addrs: "renan@exemplo.com", cc_addrs: "", role: "inbox",
   });
+});
+
+// Mensagem com anexos (e uma imagem inline `cid:` já embutida como data: URL, como o núcleo faz).
+const LOGO = "data:image/svg+xml;utf8," + encodeURIComponent(
+  `<svg xmlns="http://www.w3.org/2000/svg" width="160" height="48"><rect width="160" height="48" rx="8" fill="#1f6c9f"/><text x="80" y="31" font-family="sans-serif" font-size="20" fill="#fff" text-anchor="middle">Lumen</text></svg>`);
+messages.unshift({
+  id: 1100, account: accounts[0].id, uid: 1100, from_name: "Marina Duarte", from_addr: "marina@lumenarquitetura.com.br",
+  subject: "Planta e orçamento da sala de reunião", date: now - Math.round(0.2 * H),
+  snippet: "Seguem a planta revisada e o orçamento em anexo.", body_text: "Seguem a planta revisada e o orçamento em anexo.\n\nMarina",
+  body_html: `<div style="font-family:Arial,sans-serif;max-width:560px"><img src="${LOGO}" width="160" height="48" alt="Lumen"><p>Oi, Renan! Seguem a <b>planta revisada</b> e o orçamento em anexo.</p><p>Marina</p></div>`,
+  seen: false, flagged: true, reply_addr: "marina@lumenarquitetura.com.br", role: "inbox",
+  to_addrs: "renan@exemplo.com", cc_addrs: "carla.mendes@outlook.com, pedro@antunes.dev",
+  attachments: [
+    { name: "planta-sala-reuniao-v3.pdf", mime: "application/pdf", size: 2_516_582, index: 0 },
+    { name: "orçamento.xlsx", mime: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", size: 48_210, index: 1 },
+    { name: "foto-obra.jpg", mime: "image/jpeg", size: 874_112, index: 2 },
+  ],
 });
 
 // Enviados e Lixeira de exemplo.
@@ -73,12 +94,22 @@ extra.forEach(([role, name, addr, subject, body], i) => {
     id, account: accounts[0].id, uid: id,
     from_name: mine ? "Renan" : name, from_addr: mine ? "renan@exemplo.com" : addr,
     subject, date: now - (i + 1) * 30 * H, snippet: body, body_text: `${body}\n\n${mine ? "Renan" : name}`, body_html: "",
-    seen: true, reply_addr: addr, role,
+    seen: true, flagged: false, reply_addr: addr, attachments: [], to_addrs: mine ? addr : "renan@exemplo.com", cc_addrs: "", role,
   });
 });
 
+// Rascunhos e configurações de exemplo (a tela de Rascunhos e as assinaturas aparecem preenchidas).
+let drafts: StoredDraft[] = [
+  { id: "d-seed-1", account: accounts[0].id, reply_to: null, to: "marina@lumenarquitetura.com.br", subject: "Cronograma da obra", body: "Marina, segue o cronograma revisado. Podemos fechar na segunda?", updated: now - 2 * H },
+  { id: "d-seed-2", account: accounts[0].id, reply_to: null, to: "", subject: "", body: "Lembrar de cobrar o orçamento do marceneiro.", updated: now - 30 * H },
+];
+let settings: Settings = { [`signature:${accounts[0].id}`]: "Renan\nBetinhos Executive Service" };
+
 const norm = (s: string) => s.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase();
-const summary = ({ body_text: _b, body_html: _h, reply_addr: _r, role: _o, ...s }: MockMessage): MessageSummary => s;
+const summary = ({ body_text: _b, body_html: _h, reply_addr: _r, attachments: _a, to_addrs: _t, cc_addrs: _c, ...s }: MockMessage): MessageSummary => s;
+/** Pasta virtual: com estrela e fora de Lixeira e Spam. */
+const inView = (m: MockMessage, view: View) =>
+  view === "starred" ? m.flagged && m.role !== "trash" && m.role !== "junk" : m.role === view;
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 let syncCount = 0;
 
@@ -103,6 +134,32 @@ export const mockApi = {
     accounts = [...accounts.filter((x) => x.id !== acc.id), acc];
     return acc;
   },
+  async removeAccount(id: string): Promise<void> {
+    await wait(400);
+    accounts = accounts.filter((a) => a.id !== id);
+    drafts = drafts.filter((d) => d.account !== id);
+    messages = messages.filter((m) => m.account !== id);
+    delete settings[`signature:${id}`];
+  },
+  async saveDraft(d: Omit<StoredDraft, "updated">): Promise<void> {
+    drafts = [{ ...d, updated: Math.floor(Date.now() / 1000) }, ...drafts.filter((x) => x.id !== d.id)];
+  },
+  async listDrafts(): Promise<StoredDraft[]> {
+    return [...drafts].sort((a, b) => b.updated - a.updated);
+  },
+  async deleteDraft(id: string): Promise<void> {
+    drafts = drafts.filter((d) => d.id !== id);
+  },
+  async settings(): Promise<Settings> {
+    return { ...settings };
+  },
+  async setSetting(key: string, value: string): Promise<void> {
+    settings = { ...settings, [key]: value };
+  },
+  async setFocused(_focused: boolean): Promise<void> {},
+  async requestNotifyPermission(): Promise<boolean> {
+    return true;
+  },
   async folders(): Promise<Role[]> {
     return ["inbox", "sent", "archive", "trash", "junk"];
   },
@@ -119,20 +176,20 @@ export const mockApi = {
       {
         id, account: accounts[0].id, uid: id, from_name: "Marina Duarte", from_addr: "marina@lumenarquitetura.com.br",
         subject: "Orçamento aprovado", date: Math.floor(Date.now() / 1000),
-        snippet: "Tudo certo com o orçamento. Podemos assinar na segunda?", body_text: "Tudo certo com o orçamento. Podemos assinar na segunda?\n\nMarina", body_html: "", seen: false,
-        reply_addr: "marina@lumenarquitetura.com.br", role: "inbox",
+        snippet: "Tudo certo com o orçamento. Podemos assinar na segunda?", body_text: "Tudo certo com o orçamento. Podemos assinar na segunda?\n\nMarina", body_html: "", seen: false, flagged: false,
+        reply_addr: "marina@lumenarquitetura.com.br", attachments: [], to_addrs: "renan@exemplo.com", cc_addrs: "", role: "inbox",
       },
       ...messages,
     ];
     return { fetched: 1, total: messages.length, errors: [], skipped: false };
   },
-  async list(role: Role, limit: number, offset: number): Promise<MessageSummary[]> {
-    return messages.filter((m) => m.role === role).sort((a, b) => b.date - a.date).slice(offset, offset + limit).map(summary);
+  async list(view: View, limit: number, offset: number): Promise<MessageSummary[]> {
+    return messages.filter((m) => inView(m, view)).sort((a, b) => b.date - a.date).slice(offset, offset + limit).map(summary);
   },
-  async search(query: string, role: Role): Promise<MessageSummary[]> {
+  async search(query: string, view: View): Promise<MessageSummary[]> {
     const terms = norm(query).split(/\s+/).filter(Boolean);
     return messages
-      .filter((m) => m.role === role && terms.every((t) => norm(`${m.subject} ${m.from_name} ${m.from_addr} ${m.body_text}`).includes(t)))
+      .filter((m) => inView(m, view) && terms.every((t) => norm(`${m.subject} ${m.from_name} ${m.from_addr} ${m.body_text}`).includes(t)))
       .sort((a, b) => b.date - a.date)
       .map(summary);
   },
@@ -150,9 +207,45 @@ export const mockApi = {
     if (m.subject.toLowerCase().includes("fatura")) throw "IMAP: servidor recusou o MOVE";
     m.role = role;
   },
+  async moveMany(ids: number[], role: Role): Promise<void> {
+    await wait(400);
+    const found = messages.filter((x) => ids.includes(x.id));
+    if (found.some((m) => m.subject.toLowerCase().includes("fatura"))) throw "IMAP: servidor recusou o MOVE";
+    found.forEach((m) => { m.role = role; });
+  },
   async deleteForever(id: number): Promise<void> {
     await wait(400);
     messages = messages.filter((x) => x.id !== id);
+  },
+  /** Para testar a falha: anexo com "falha" no nome. */
+  async saveAttachment(id: number, index: number, _open: boolean): Promise<string> {
+    await wait(500);
+    const a = messages.find((x) => x.id === id)?.attachments.find((x) => x.index === index);
+    if (!a) throw "anexo não encontrado na mensagem";
+    if (a.name.includes("falha")) throw "IMAP: conexão recusada";
+    return `/home/renan/Downloads/${a.name}`;
+  },
+  async deleteForeverMany(ids: number[]): Promise<void> {
+    await wait(400);
+    messages = messages.filter((x) => !ids.includes(x.id));
+  },
+  async setSeen(ids: number[], seen: boolean): Promise<void> {
+    await wait(150);
+    messages.forEach((m) => { if (ids.includes(m.id)) m.seen = seen; });
+  },
+  async setFlagged(ids: number[], flagged: boolean): Promise<void> {
+    await wait(150);
+    messages.forEach((m) => { if (ids.includes(m.id)) m.flagged = flagged; });
+  },
+  async unreadCounts(): Promise<UnreadCounts> {
+    const out: UnreadCounts = {};
+    for (const m of messages) if (!m.seen && m.role) out[m.role] = (out[m.role] ?? 0) + 1;
+    return out;
+  },
+  async forwardAttachments(id: number): Promise<OutAttachment[]> {
+    await wait(200);
+    const list = messages.find((x) => x.id === id)?.attachments ?? [];
+    return list.map((a) => ({ name: a.name, mime: a.mime, data: btoa(`conteúdo de ${a.name}`.replace(/[^\x00-\xff]/g, "?")) }));
   },
   /** Para testar a falha: qualquer destinatário com "erro". */
   async send(d: Draft): Promise<SendReport> {
