@@ -19,12 +19,13 @@ interface Props {
   open: (view: View) => void;
   /** Props de arrastar e soltar para o alvo `key`; vazio quando soltar ali não faz sentido. */
   drop: (key: string, view: View) => DropProps;
+  onContext?: (x: number, y: number, view: View) => void;
   onNew: (parent?: FolderNode) => void;
   onRename: (node: FolderNode) => void;
   onDelete: (node: FolderNode) => void;
 }
 
-export function FolderTree({ nodes, accounts, byAccount, categories, folder, inList, open, drop, onNew, onRename, onDelete }: Props) {
+export function FolderTree({ nodes, accounts, byAccount, categories, folder, inList, open, drop, onContext, onNew, onRename, onDelete }: Props) {
   return (
     <>
       <div className="rail-section" aria-label="Pastas">
@@ -44,7 +45,8 @@ export function FolderTree({ nodes, accounts, byAccount, categories, folder, inL
               )}
               <div className="folder-row" style={{ "--depth": n.depth } as React.CSSProperties}>
                 <button type="button" className="nav-item" title={n.name} onClick={() => open(view)}
-                  aria-current={view === folder && inList ? "page" : undefined} {...drop(view, view)}>
+                  aria-current={view === folder && inList ? "page" : undefined} {...drop(view, view)}
+                  onContextMenu={onContext ? (e) => { e.preventDefault(); onContext(e.clientX, e.clientY, view); } : undefined}>
                   <FolderSimple size={16} weight="bold" />
                   <span>{n.label}</span>
                 </button>
@@ -72,7 +74,8 @@ export function FolderTree({ nodes, accounts, byAccount, categories, folder, inL
             const view = catView(c.id);
             return (
               <button key={c.id} type="button" className="nav-item" title={c.name} onClick={() => open(view)}
-                aria-current={view === folder && inList ? "page" : undefined}>
+                aria-current={view === folder && inList ? "page" : undefined}
+                onContextMenu={onContext ? (e) => { e.preventDefault(); onContext(e.clientX, e.clientY, view); } : undefined}>
                 <CategoryDot color={c.color} />
                 <span>{c.name}</span>
               </button>

@@ -10,7 +10,7 @@ description: Verifica rascunhos, assinatura, remoção de conta, filtro por cont
 3. Com playwright-core (`/home/renan/.codex/worktrees/3b95/Auto-Prime-Interno/node_modules/.pnpm/playwright-core@1.63.0/node_modules/playwright-core`), em 1280x800, confirme:
    - Barra lateral: "Rascunhos" com contagem; clicar lista os rascunhos (destinatário, assunto, trecho); clicar num abre o Composer preenchido.
    - Editar o corpo e esperar ~1,9 s mostra "Rascunho salvo" no rodapé; Esc fecha, mostra o toast "Rascunho salvo" e o texto continua na lista (nunca perde texto).
-   - "Escrever" abre o corpo com `\n\n-- \n<assinatura>\n`; responder coloca a assinatura acima da citação.
+   - "Novo email" (faixa de comandos, Ctrl+N ou o botão flutuante no celular) abre o corpo com `\n\n-- \n<assinatura>\n`; responder coloca a assinatura acima da citação.
    - Lixeira do Composer: rascunho aberto sem edição descarta direto; com edição pede "Descartar rascunho?" e remove da lista.
    - Configurações: switch "Avisar de email novo", textarea de Assinatura (grava ao digitar), lista Contas com "Remover" que abre "Remover conta?" (Cancelar/Esc/clique fora fecham; Remover apaga a conta e os rascunhos dela).
    - Com 2+ contas (adicione uma em "Adicionar conta") a barra lateral mostra "Todas as contas" e cada conta como filtro.

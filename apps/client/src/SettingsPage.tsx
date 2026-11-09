@@ -42,9 +42,10 @@ const SECTIONS = [
 type SectionId = (typeof SECTIONS)[number]["id"];
 
 const SHORTCUTS: [string, string][] = [
-  ["j / ↓", "Próxima mensagem"], ["k / ↑", "Mensagem anterior"], ["/", "Buscar"],
-  ["r", "Responder"], ["a", "Responder a todos"], ["f", "Encaminhar"], ["c", "Escrever"],
-  ["e", "Arquivar"], ["#", "Excluir"], ["s", "Estrela"], ["u", "Marcar como não lida"],
+  ["j / ↓", "Próxima mensagem"], ["k / ↑", "Mensagem anterior"], ["/ / Ctrl+E", "Buscar"],
+  ["r / Ctrl+R", "Responder"], ["a / Ctrl+Shift+R", "Responder a todos"], ["f / Ctrl+F", "Encaminhar"], ["c / Ctrl+N", "Escrever"],
+  ["e", "Arquivar"], ["# / Delete", "Excluir"], ["s / Insert", "Sinalizar com estrela"], ["u / Ctrl+U", "Marcar como não lida"],
+  ["Ctrl+Q", "Marcar como lida"], ["Ctrl+Z", "Desfazer a última ação"], ["Botão direito", "Menu de contexto na lista, nas pastas e na leitura"],
   ["Shift + clique", "Marcar várias mensagens"], ["Clique duplo", "Abrir a mensagem em tela cheia"],
   ["Esc", "Sair da tela cheia, limpar a busca ou a seleção"],
   ["p", "Fixar no topo"],
@@ -249,8 +250,12 @@ export function SettingsPage({ accounts, settings, onSetting, onRemoveAccount, o
                   options={[["s", "P"], ["m", "M"], ["l", "G"]]} />
               </Row>
               <Row title="Densidade da lista">
-                <Segmented label="Densidade da lista" value={settings.density} fallback="comfortable" onChange={(v) => onSetting("density", v)}
-                  options={[["comfortable", "Confortável"], ["compact", "Compacta"]]} />
+                <Segmented label="Densidade da lista" value={settings.density} fallback="medium" onChange={(v) => onSetting("density", v)}
+                  options={[["compact", "Compacta"], ["medium", "Média"], ["comfortable", "Confortável"]]} />
+              </Row>
+              <Row title="Foco e Outros" sub="Separa a Caixa de entrada em Foco (pessoas e conversas suas) e Outros (newsletters e avisos automáticos)">
+                <Segmented label="Foco e Outros" value={settings.focusTabs} fallback="1" onChange={(v) => onSetting("focusTabs", v)}
+                  options={[["1", "Ligado"], ["0", "Desligado"]]} />
               </Row>
               <Row title="Prévia do texto na lista" sub="Primeira linha da mensagem sob o assunto">
                 <Segmented label="Prévia do texto" value={settings.preview} fallback="1" onChange={(v) => onSetting("preview", v)}
