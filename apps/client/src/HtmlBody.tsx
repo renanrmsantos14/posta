@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { isTauri } from "./api";
 
-// Sem scripts, sem formulários, sem fontes externas; imagens só data:/cid: até o usuário liberar https:.
+// Sem scripts, sem formulários, sem fontes externas; imagens só data:/cid: até o usuário liberar a rede.
+// O srcdoc herda a CSP do app (tauri.conf.json), que por isso também precisa permitir https:/http: em img-src.
 const csp = (remote: boolean) =>
-  `default-src 'none'; img-src data: cid:${remote ? " https:" : ""}; style-src 'unsafe-inline'; form-action 'none'; base-uri 'none'`;
+  `default-src 'none'; img-src data: cid:${remote ? " https: http:" : ""}; style-src 'unsafe-inline'; form-action 'none'; base-uri 'none'`;
 
 const REMOTE = /\b(?:src|srcset|background|poster)\s*=\s*["']?\s*https?:|url\(\s*["']?https?:|@import/i;
 const STRIP = "script, meta, base, link, iframe, frame, object, embed, form, noscript";
