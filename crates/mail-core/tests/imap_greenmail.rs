@@ -440,3 +440,62 @@ fn cria_renomeia_e_exclui_pastas_com_subpastas() {
     let (names, _) = imap_sync::list_user_folders(&acc).unwrap();
     assert!(!names.iter().any(|n| n.contains("Projeto")), "{names:?}");
 }
+
+#[test]
+fn fila_offline_reaplica_quando_a_rede_volta() {
+    let (Some(acc), Some(dest)) = (account("fila"), account("dest")) else { return };
+    if acc.smtp.is_none() {
+        return;
+    }
+    let mut s = session(&acc);
+    for i in 0..3 {
+        s.append("INBOX", &raw(i, &format!("F{i}"))).finish().unwrap();
+    }
+    s.logout().ok();
+    let folders = imap_sync::discover_folders(&acc).unwrap();
+    let archive = folders.iter().find(|f| f.role == Role::Archive).unwrap().name.clone();
+    let mut store = Store::open_in_memory().unwrap();
+    store.set_folders(&acc.id, &folders).unwrap();
+    imap_sync::sync_mailbox(&acc, &mut store, "INBOX", None).unwrap();
+    let uids: Vec<u32> = store.list("INBOX", 10, 0).unwrap().iter().map(|m| m.uid).collect();
+
+    // "Sem rede": servidor inalcançável. A fila não perde nada.
+    let mut off = acc.clone();
+    off.port = 1;
+    if let Some(sm) = off.smtp.as_mut() {
+        sm.port = 1;
+    }
+    let out = Outgoing {
+        to: dest.username.clone(),
+        subject: "Enviada depois".into(),
+        body: "Saiu quando a rede voltou.".into(),
+        html: None,
+        cc: String::new(),
+        bcc: String::new(),
+        attachments: vec![],
+    };
+    store.enqueue_op(&acc.id, "INBOX", uids[0], mail_core::OpKind::Seen, "").unwrap();
+    store.enqueue_op(&acc.id, "INBOX", uids[1], mail_core::OpKind::Star, "").unwrap();
+    store.enqueue_op(&acc.id, "INBOX", uids[2], mail_core::OpKind::Move, &archive).unwrap();
+    store.enqueue_op(&acc.id, "INBOX", 9999, mail_core::OpKind::Seen, "").unwrap();
+    store.enqueue_send(&acc.id, &out, None).unwrap();
+    let r = mail_core::outbox::flush(&store, &mut |_| Ok(Some(off.clone()))).unwrap();
+    assert!(r.offline);
+    assert_eq!((store.pending_count().unwrap(), store.outbox_count().unwrap()), (4, 1));
+
+    // "A rede volta".
+    let r = mail_core::outbox::flush(&store, &mut |_| Ok(Some(acc.clone()))).unwrap();
+    assert!(!r.offline);
+    assert_eq!(r.applied + r.discarded, 4, "{r:?}");
+    assert_eq!(r.sent, 1);
+    assert_eq!((store.pending_count().unwrap(), store.outbox_count().unwrap()), (0, 0));
+    assert!(server_flags(&acc, uids[0]).contains(&imap::types::Flag::Seen));
+    assert!(server_flags(&acc, uids[1]).contains(&imap::types::Flag::Flagged));
+    imap_sync::sync_mailbox(&acc, &mut store, &archive, Some(1000)).unwrap();
+    assert_eq!(store.list_folder(Role::Archive, 10, 0).unwrap().len(), 1);
+
+    // Destino recebeu a mensagem enfileirada.
+    let mut theirs = Store::open_in_memory().unwrap();
+    imap_sync::sync_mailbox(&dest, &mut theirs, "INBOX", None).unwrap();
+    assert_eq!(theirs.list("INBOX", 10, 0).unwrap()[0].subject, "Enviada depois");
+}

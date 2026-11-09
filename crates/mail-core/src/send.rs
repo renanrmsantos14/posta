@@ -12,7 +12,7 @@ use crate::imap_sync::{connect, AuthMode, ImapAccount, ImapSession, Security};
 use crate::store::ReplyRef;
 use crate::{Error, Result};
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Outgoing {
     /// Um ou mais endereços separados por vírgula ou ponto e vírgula.
     pub to: String,
@@ -49,6 +49,8 @@ pub struct SendReport {
     pub saved_to_sent: bool,
     /// A mensagem saiu, mas algo depois do envio falhou (ex.: cópia em Enviados).
     pub warning: Option<String>,
+    /// Sem rede: a mensagem foi para a Caixa de saída e sai quando a conexão voltar.
+    pub queued: bool,
 }
 
 fn mailboxes(to: &str) -> Result<Vec<Mailbox>> {
@@ -188,10 +190,11 @@ pub fn send(acc: &ImapAccount, out: &Outgoing, reply: Option<&ReplyRef>) -> Resu
     let raw = msg.formatted();
     transport(acc)?.send(&msg)?;
     Ok(match after_send(acc, &raw, reply) {
-        Ok(saved_to_sent) => SendReport { saved_to_sent, warning: None },
+        Ok(saved_to_sent) => SendReport { saved_to_sent, warning: None, queued: false },
         Err(e) => SendReport {
             saved_to_sent: false,
             warning: Some(format!("Enviada, mas não foi possível guardar em Enviados: {e}")),
+            queued: false,
         },
     })
 }

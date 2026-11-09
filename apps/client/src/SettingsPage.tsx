@@ -1,6 +1,6 @@
 // Configurações em página inteira: menu de seções à esquerda; voltar (botão ou Esc) devolve a caixa de entrada.
 import { useEffect, useState } from "react";
-import { ArrowLeft, ArrowsClockwise, Bell, Gauge, Keyboard, PencilSimple, Plus, Tag, Trash, UserCircle, Layout, X } from "@phosphor-icons/react";
+import { ArrowLeft, ArrowsClockwise, Bell, Gauge, Keyboard, PencilSimple, Plus, Tag, Trash, UserCircle, Layout, WifiSlash, X } from "@phosphor-icons/react";
 import { api, type Account, type Settings } from "./api";
 import { AccountEditDialog } from "./AccountEditDialog";
 import { MAX_CATEGORIES, PALETTE, parseCategories } from "./Categories";
@@ -27,6 +27,7 @@ const SECTIONS = [
   { id: "layout", label: "Leitura e layout", icon: Layout },
   { id: "write", label: "Escrita", icon: PencilSimple },
   { id: "notify", label: "Notificações", icon: Bell },
+  { id: "offline", label: "Offline", icon: WifiSlash },
   { id: "keys", label: "Atalhos", icon: Keyboard },
   { id: "about", label: "Atualizações", icon: Gauge },
 ] as const;
@@ -41,6 +42,7 @@ const SHORTCUTS: [string, string][] = [
 ];
 
 const UNDO_OPTIONS = ["4", "10", "20", "30"];
+const OFFLINE_OPTIONS = ["50", "200", "500", "1000"];
 
 /** Grupo de opções exclusivas; valor ausente ou desconhecido cai no `fallback`. */
 function Segmented({ label, value, fallback, options, onChange }: {
@@ -264,6 +266,16 @@ export function SettingsPage({ accounts, settings, onSetting, onRemoveAccount, o
                 </div>
                 <input type="checkbox" role="switch" className="switch" checked={notify} onChange={(e) => toggleNotify(e.target.checked)} />
               </label>
+            </section>
+          )}
+
+          {section === "offline" && (
+            <section className="settings-group" aria-label="Offline">
+              <Row title="Leitura offline" sub="Quantas mensagens recentes da Entrada ficam baixadas, com o corpo, para ler sem conexão. Anexos só abrem com rede.">
+                <Segmented label="Mensagens para leitura offline" value={settings.offlineN} fallback="200" onChange={(v) => onSetting("offlineN", v)}
+                  options={OFFLINE_OPTIONS.map((n): [string, string] => [n, n])} />
+              </Row>
+              <div className="settings-sub">Sem rede, ler, marcar, mover e excluir continuam funcionando: as ações esperam numa fila e seguem para o servidor quando a conexão volta. O que você escrever vai para a Caixa de saída.</div>
             </section>
           )}
 
