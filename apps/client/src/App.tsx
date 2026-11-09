@@ -4,6 +4,7 @@ import { HtmlBody, hasRemoteImages } from "./HtmlBody";
 import { api, isTauri, type Account, type Attachment, type MessageDetail, type MessageSummary, type OutAttachment, type Role, type Settings, type StoredDraft, type UnreadCounts, type View } from "./api";
 import { AccountDialog } from "./AccountDialog";
 import { Composer, type ComposeInit } from "./Composer";
+import { escapeHtml, textToHtml } from "./richtext";
 import { Toaster, toast } from "./toast";
 import { FOLDERS, LOCAL_VIEWS, SHOWS_UNREAD, withStarred } from "./folders";
 import { fmtSize } from "./format";
@@ -41,15 +42,17 @@ function shortDate(unix: number) {
   return fmtFull.format(d);
 }
 
+/** Original citado com a formatação que ele tinha (o Composer limpa o HTML); sem HTML, o texto. */
+const quoted = (d: MessageDetail) => `<blockquote>${d.body_html || textToHtml(d.body_text.trimEnd())}</blockquote>`;
+
 /** Corpo da resposta: espaço para escrever no topo e a mensagem original citada. */
-function replyBody(d: MessageDetail) {
-  const quoted = d.body_text.trimEnd().split("\n").map((l) => `> ${l}`).join("\n");
-  return `\n\nEm ${fmtLong.format(new Date(d.date * 1000))}, ${d.from_name || d.from_addr} escreveu:\n${quoted}\n`;
+function replyHtml(d: MessageDetail) {
+  const who = escapeHtml(d.from_name || d.from_addr);
+  return `<div><br></div><div><br></div><div>Em ${fmtLong.format(new Date(d.date * 1000))}, ${who} escreveu:</div>${quoted(d)}`;
 }
 
-/** Corpo do encaminhamento: cabeçalho da original e o texto citado. */
-function forwardBody(d: MessageDetail) {
-  const quoted = d.body_text.trimEnd().split("\n").map((l) => `> ${l}`).join("\n");
+/** Corpo do encaminhamento: cabeçalho da original e a mensagem citada. */
+function forwardHtml(d: MessageDetail) {
   const head = [
     "---------- Mensagem encaminhada ----------",
     `De: ${d.from_name ? `${d.from_name} <${d.from_addr}>` : d.from_addr}`,
@@ -58,7 +61,7 @@ function forwardBody(d: MessageDetail) {
     d.to_addrs && `Para: ${d.to_addrs}`,
     d.cc_addrs && `Cc: ${d.cc_addrs}`,
   ].filter(Boolean).join("\n");
-  return `\n\n${head}\n\n${quoted}\n`;
+  return `<div><br></div><div><br></div>${textToHtml(head)}<div><br></div>${quoted(d)}`;
 }
 
 /** Para onde "Arquivar" leva: de Lixeira/Spam volta à entrada. */
@@ -452,18 +455,18 @@ export default function App() {
   /** Assinatura da conta, no padrão "-- " que os leitores de email reconhecem. */
   const signatureFor = (account: string) => {
     const sig = settings[`signature:${account}`]?.trim();
-    return sig ? `\n\n-- \n${sig}\n` : "";
+    return sig ? `<div><br></div>${textToHtml(`-- \n${sig}`)}` : "";
   };
 
   function writeNew() {
     if (!accounts?.length) return setDialog(true);
-    openComposer({ title: "Nova mensagem", account: accounts[0].id, reply_to: null, to: "", subject: "", body: signatureFor(accounts[0].id) });
+    openComposer({ title: "Nova mensagem", account: accounts[0].id, reply_to: null, to: "", subject: "", body: "", html: `<div><br></div>${signatureFor(accounts[0].id)}` });
   }
 
   function openDraft(d: StoredDraft) {
     if (!accounts?.length) return;
     const account = accounts.some((a) => a.id === d.account) ? d.account : accounts[0].id;
-    openComposer({ title: d.reply_to !== null ? "Responder" : "Nova mensagem", draftId: d.id, account, reply_to: d.reply_to, to: d.to, cc: d.cc, bcc: d.bcc, subject: d.subject, body: d.body });
+    openComposer({ title: d.reply_to !== null ? "Responder" : "Nova mensagem", draftId: d.id, account, reply_to: d.reply_to, to: d.to, cc: d.cc, bcc: d.bcc, subject: d.subject, body: d.body, html: d.html || undefined });
   }
 
   function openDrafts() {
@@ -510,7 +513,7 @@ export default function App() {
     if (!detail || !accounts?.length) return;
     const subject = /^re:/i.test(detail.subject) ? detail.subject : `Re: ${detail.subject}`;
     const account = accounts.some((a) => a.id === detail.account) ? detail.account : accounts[0].id;
-    openComposer({ title: "Responder", account, reply_to: detail.id, to: detail.reply_addr, subject, body: signatureFor(account).trimEnd() + replyBody(detail) });
+    openComposer({ title: "Responder", account, reply_to: detail.id, to: detail.reply_addr, subject, body: "", html: signatureFor(account) + replyHtml(detail) });
   }
 
   /** Remetente em Para; os demais destinatários da original em Cc, sem as minhas contas e sem repetir. */
@@ -529,7 +532,7 @@ export default function App() {
     const account = accounts.some((a) => a.id === detail.account) ? detail.account : accounts[0].id;
     openComposer({
       title: "Responder a todos", account, reply_to: detail.id,
-      to: detail.reply_addr, cc: others.join(", "), subject, body: replyBody(detail),
+      to: detail.reply_addr, cc: others.join(", "), subject, body: "", html: replyHtml(detail),
     });
   }
 
@@ -545,7 +548,7 @@ export default function App() {
         toast(`Anexos não incluídos no encaminhamento: ${e}`, "error");
       }
     }
-    openComposer({ title: "Encaminhar", account, reply_to: null, to: "", subject, body: forwardBody(detail), attachments });
+    openComposer({ title: "Encaminhar", account, reply_to: null, to: "", subject, body: "", html: forwardHtml(detail), attachments });
   }
 
   // O painel fecha na hora; o envio espera o "Desfazer" expirar. Se falhar, o rascunho volta intacto.

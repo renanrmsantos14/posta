@@ -12,7 +12,7 @@ pub use attachments::Attachment;
 pub use folders::{Folder, Role};
 pub use imap_sync::{AuthMode, IdleEnd, ImapAccount, MsgFlag, Security, SmtpServer, SyncReport};
 pub use send::{OutAttachment, Outgoing, SendReport};
-pub use store::{DraftRecord, MessageDetail, MessageSummary, ReplyRef, Store};
+pub use store::{Contact, DraftRecord, MessageDetail, MessageSummary, ReplyRef, Store};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

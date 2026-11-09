@@ -134,6 +134,7 @@ fn responde_por_smtp_guarda_em_enviados_e_marca_respondida() {
         to: ana.username.clone(),
         subject: "Re: Translado sexta".into(),
         body: "Confirmado: 7h40 no saguão.".into(),
+        html: None,
         cc: String::new(),
         bcc: String::new(),
         attachments: vec![],
@@ -277,6 +278,7 @@ fn envia_com_anexo_e_cc_e_le_de_volta() {
         to: ana.username.clone(),
         subject: "Contrato com anexo".into(),
         body: "Segue o arquivo.".into(),
+        html: Some("<p>Segue o <b>arquivo</b>.</p>".into()),
         cc: bia.username.clone(),
         bcc: String::new(),
         attachments: vec![OutAttachment {
@@ -304,6 +306,9 @@ fn envia_com_anexo_e_cc_e_le_de_volta() {
         assert_eq!(d.attachments.len(), 1, "{:?}", d.attachments);
         let a = &d.attachments[0];
         assert_eq!((a.name.as_str(), a.size), ("contrato.bin", 5000));
+        // Corpo HTML + texto (multipart/alternative dentro do mixed) chegam juntos.
+        assert!(d.body_html.contains("<b>arquivo</b>"), "{:?}", d.body_html);
+        assert!(d.body_text.contains("Segue o arquivo."), "{:?}", d.body_text);
 
         // O conteúdo vem do servidor sob demanda e bate byte a byte.
         let raw = imap_sync::fetch_raw(quem, "INBOX", got.uid).unwrap().unwrap();

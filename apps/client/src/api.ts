@@ -81,7 +81,10 @@ export interface Draft {
   reply_to: number | null;
   to: string;
   subject: string;
+  /** Texto simples (parte `text/plain`); no Composer é derivado de `html`. */
   body: string;
+  /** Corpo formatado; ausente = só texto. */
+  html?: string;
   /** Vários endereços separados por vírgula ou ponto e vírgula. */
   cc?: string;
   bcc?: string;
@@ -98,8 +101,17 @@ export interface StoredDraft {
   bcc?: string;
   subject: string;
   body: string;
+  /** Vazio em rascunhos só de texto (versões antigas). */
+  html?: string;
   /** Unix, em segundos. */
   updated: number;
+}
+
+/** Pessoa já vista nas mensagens, para autocompletar destinatários. */
+export interface Contact {
+  name: string;
+  addr: string;
+  count: number;
 }
 
 /** Configurações: `signature:<id da conta>`, `notify` ("0" desliga as notificações) e `group` ("0" desliga o agrupamento por conversa). */
@@ -161,6 +173,7 @@ export const api = isTauri
       saveDraft: (draft: Omit<StoredDraft, "updated">) => invoke<void>("save_draft", { draft }),
       listDrafts: () => invoke<StoredDraft[]>("list_drafts"),
       deleteDraft: (id: string) => invoke<void>("delete_draft", { id }),
+      suggestContacts: (query: string, limit: number) => invoke<Contact[]>("suggest_contacts", { query, limit }),
       settings: () => invoke<Settings>("get_settings"),
       setSetting: (key: string, value: string) => invoke<void>("set_setting", { key, value }),
       setFocused: (focused: boolean) => invoke<void>("set_focused", { focused }),

@@ -1,7 +1,7 @@
 //! Ponte entre a UI e o mail-core. Leituras vêm do SQLite local; rede só em sync e flags.
 
 use mail_core::oauth::{self, Provider};
-use mail_core::{imap_sync, send, AuthMode, DraftRecord, IdleEnd, ImapAccount, MessageDetail, MessageSummary, MsgFlag, Outgoing, ReplyRef, Role, SendReport, Store};
+use mail_core::{imap_sync, send, AuthMode, Contact, DraftRecord, IdleEnd, ImapAccount, MessageDetail, MessageSummary, MsgFlag, Outgoing, ReplyRef, Role, SendReport, Store};
 use serde::{Deserialize, Serialize};
 use std::{collections::{HashMap, HashSet}, fs, path::PathBuf, sync::{atomic::{AtomicBool, Ordering}, Mutex}, time::{Duration, Instant}};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -723,6 +723,11 @@ fn list_drafts(state: State<'_, AppState>) -> CmdResult<Vec<DraftRecord>> {
 }
 
 #[tauri::command]
+fn suggest_contacts(state: State<'_, AppState>, query: String, limit: Option<usize>) -> CmdResult<Vec<Contact>> {
+    state.store.lock().unwrap().suggest_contacts(&query, limit.unwrap_or(8).min(50)).map_err(err)
+}
+
+#[tauri::command]
 fn delete_draft(state: State<'_, AppState>, id: String) -> CmdResult<()> {
     state.store.lock().unwrap().delete_draft(&id).map_err(err)
 }
@@ -803,6 +808,7 @@ pub fn run() {
             save_draft,
             list_drafts,
             delete_draft,
+            suggest_contacts,
             get_settings,
             set_setting,
             set_focused,

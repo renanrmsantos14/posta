@@ -17,7 +17,11 @@ pub struct Outgoing {
     /// Um ou mais endereços separados por vírgula ou ponto e vírgula.
     pub to: String,
     pub subject: String,
+    /// Texto simples (parte `text/plain`); a UI o gera a partir do HTML.
     pub body: String,
+    /// Corpo formatado; quando presente a mensagem sai como `multipart/alternative` (texto + HTML).
+    #[serde(default)]
+    pub html: Option<String>,
     /// Cópia visível (vários endereços, como em `to`).
     #[serde(default)]
     pub cc: String,
@@ -100,11 +104,19 @@ pub fn build(acc: &ImapAccount, out: &Outgoing, reply: Option<&ReplyRef>) -> Res
     if !bcc.is_empty() {
         b = b.mailbox(header::Bcc::from(bcc.into_iter().collect::<Mailboxes>()));
     }
+    let html = out.html.as_deref().filter(|h| !h.trim().is_empty());
     if out.attachments.is_empty() {
-        return Ok(b.header(header::ContentType::TEXT_PLAIN).body(out.body.clone())?);
+        return Ok(match html {
+            Some(h) => b.multipart(MultiPart::alternative_plain_html(out.body.clone(), h.to_string()))?,
+            None => b.header(header::ContentType::TEXT_PLAIN).body(out.body.clone())?,
+        });
     }
     let mut total = 0;
-    let mut multi = MultiPart::mixed().singlepart(SinglePart::plain(out.body.clone()));
+    let mut multi = match html {
+        Some(h) => MultiPart::mixed().multipart(MultiPart::alternative_plain_html(out.body.clone(), h.to_string())),
+        None => MultiPart::mixed().singlepart(SinglePart::plain(out.body.clone())),
+    };
+
     for a in &out.attachments {
         let data = base64::engine::general_purpose::STANDARD
             .decode(a.data.trim())
@@ -194,7 +206,7 @@ mod tests {
     }
 
     fn out(to: &str) -> Outgoing {
-        Outgoing { to: to.into(), subject: "Re: Orçamento".into(), body: "Combinado, até amanhã.".into(), cc: String::new(), bcc: String::new(), attachments: vec![] }
+        Outgoing { to: to.into(), subject: "Re: Orçamento".into(), body: "Combinado, até amanhã.".into(), html: None, cc: String::new(), bcc: String::new(), attachments: vec![] }
     }
 
     #[test]
@@ -253,6 +265,30 @@ mod tests {
         let (_, data) = crate::attachments::extract(&raw, 1).unwrap();
         assert_eq!(data, [0, 1, 2, 255]);
         assert_eq!(parsed.body_text(0).unwrap().trim(), "Combinado, até amanhã.");
+    }
+
+    #[test]
+    fn html_vira_multipart_alternative_com_texto_e_html() {
+        let mut o = out("ana@x.com");
+        o.body = "Olá, *Ana*".into();
+        o.html = Some("<p>Olá, <b>Ana</b></p>".into());
+        let raw = build(&acc(), &o, None).unwrap().formatted();
+        assert!(String::from_utf8_lossy(&raw).contains("multipart/alternative"));
+        let parsed = mail_parser::MessageParser::default().parse(&raw).unwrap();
+        assert_eq!(parsed.body_text(0).unwrap().trim(), "Olá, *Ana*");
+        assert_eq!(parsed.body_html(0).unwrap().trim(), "<p>Olá, <b>Ana</b></p>");
+        // Com anexo: mixed contendo o alternative.
+        o.attachments = vec![att("a.pdf", "application/pdf", b"%PDF")];
+        let raw = build(&acc(), &o, None).unwrap().formatted();
+        let text = String::from_utf8_lossy(&raw);
+        assert!(text.contains("multipart/mixed") && text.contains("multipart/alternative"), "{text}");
+        let parsed = mail_parser::MessageParser::default().parse(&raw).unwrap();
+        assert_eq!(parsed.body_html(0).unwrap().trim(), "<p>Olá, <b>Ana</b></p>");
+        assert_eq!(crate::attachments::list(&parsed, "").len(), 1);
+        // HTML em branco = texto simples.
+        o.html = Some("  ".into());
+        o.attachments.clear();
+        assert!(!String::from_utf8_lossy(&build(&acc(), &o, None).unwrap().formatted()).contains("multipart"));
     }
 
     #[test]
