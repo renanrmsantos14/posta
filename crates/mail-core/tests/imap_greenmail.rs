@@ -442,3 +442,36 @@ fn cria_renomeia_e_exclui_pastas_com_subpastas() {
     let (names, _) = imap_sync::list_user_folders(&acc).unwrap();
     assert!(!names.iter().any(|n| n.contains("Projeto")), "{names:?}");
 }
+
+#[test]
+fn envia_com_alias_como_remetente() {
+    let (Some(eu), Some(ana)) = (account("eu"), account("ana")) else { return };
+    if eu.smtp.is_none() {
+        return;
+    }
+    let out = Outgoing {
+        to: ana.username.clone(),
+        subject: "Enviado pelo alias".into(),
+        body: "Mensagem vinda do alias.".into(),
+        html: None,
+        cc: String::new(),
+        bcc: String::new(),
+        attachments: vec![],
+        from: Some("Reservas Betinhos <reservas@betinhos.exemplo>".into()),
+    };
+    send::send(&eu, &out, None).unwrap();
+
+    let mut store = Store::open_in_memory().unwrap();
+    let mut got = None;
+    for _ in 0..20 {
+        imap_sync::sync_mailbox(&ana, &mut store, "INBOX", None).unwrap();
+        got = store.search("alias", 5).unwrap().into_iter().find(|m| m.subject == "Enviado pelo alias");
+        if got.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let got = got.expect("mensagem do alias chegou");
+    assert_eq!(got.from_addr, "reservas@betinhos.exemplo");
+    assert_eq!(got.from_name, "Reservas Betinhos");
+}

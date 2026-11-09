@@ -145,6 +145,8 @@ export default function App() {
   const [dropKey, setDropKey] = useState<string | null>(null);
   const known = useRef<Set<number> | null>(null);
   const folderRef = useRef(folder);
+  /** Verdadeiro enquanto uma ação de deslizar roda (takeOut não troca a seleção). */
+  const swiping = useRef(false);
   folderRef.current = folder;
   const loadingMore = useRef(false);
   /** Mensagens no intervalo do "Desfazer": ainda estão no banco local, mas não devem voltar à lista. */
@@ -763,14 +765,18 @@ export default function App() {
     const drop = (l: MessageSummary[]) => l.filter((x) => x.id !== m.id);
     setMessages(drop);
     setResults((r) => r && drop(r));
-    if (next) select(next.id, true);
+    // Deslizar na lista não abre mensagem: no celular o leitor cobriria a lista e o próximo gesto cairia nele.
+    const quiet = swiping.current;
+    if (quiet) {
+      if (selectedId === m.id) { setSelectedId(null); setDetail(null); setReaderOpen(false); }
+    } else if (next) select(next.id, true);
     else { setSelectedId(null); setDetail(null); setReaderOpen(false); }
     return () => {
       if (folderRef.current !== from) return;
       const put = (l: MessageSummary[]) => (l.some((x) => x.id === m.id) ? l : [...l.slice(0, idx), m, ...l.slice(idx)]);
       setMessages(put);
       setResults((r) => r && put(r));
-      select(m.id, true);
+      if (!quiet) select(m.id, true);
     };
   }
 
@@ -822,9 +828,14 @@ export default function App() {
   };
   function swipeRow(row: Row, dir: SwipeDir) {
     const what = swipeAction(dir);
-    if (what === "archive") archive(row.members);
-    else if (what === "trash") remove(row.members);
-    else if (what === "read") markSeen(row.members, row.members.some((x) => !x.seen));
+    swiping.current = true;
+    try {
+      if (what === "archive") archive(row.members);
+      else if (what === "trash") remove(row.members);
+      else if (what === "read") markSeen(row.members, row.members.some((x) => !x.seen));
+    } finally {
+      swiping.current = false;
+    }
   }
 
   /** Agrupa por destino: na pasta "Com estrela" cada mensagem pode ter um destino diferente. */
