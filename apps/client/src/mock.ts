@@ -1,5 +1,5 @@
 // Dados de exemplo para rodar a UI no navegador (pnpm dev), sem Tauri e sem rede.
-import type { Account, Draft, Provider, MessageDetail, MessageSummary, NewAccount, Role, SendReport, SyncResult } from "./api";
+import type { Account, Draft, Provider, MessageDetail, MessageSummary, NewAccount, Role, SendReport, Settings, StoredDraft, SyncResult } from "./api";
 
 const now = Math.floor(Date.now() / 1000);
 const H = 3600;
@@ -77,6 +77,13 @@ extra.forEach(([role, name, addr, subject, body], i) => {
   });
 });
 
+// Rascunhos e configurações de exemplo (a tela de Rascunhos e as assinaturas aparecem preenchidas).
+let drafts: StoredDraft[] = [
+  { id: "d-seed-1", account: accounts[0].id, reply_to: null, to: "marina@lumenarquitetura.com.br", subject: "Cronograma da obra", body: "Marina, segue o cronograma revisado. Podemos fechar na segunda?", updated: now - 2 * H },
+  { id: "d-seed-2", account: accounts[0].id, reply_to: null, to: "", subject: "", body: "Lembrar de cobrar o orçamento do marceneiro.", updated: now - 30 * H },
+];
+let settings: Settings = { [`signature:${accounts[0].id}`]: "Renan\nBetinhos Executive Service" };
+
 const norm = (s: string) => s.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase();
 const summary = ({ body_text: _b, body_html: _h, reply_addr: _r, role: _o, ...s }: MockMessage): MessageSummary => s;
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -102,6 +109,32 @@ export const mockApi = {
     const acc: Account = { id: `voce@${host}`, host, port: 993, security: "tls", username: "voce@exemplo.com", auth: provider };
     accounts = [...accounts.filter((x) => x.id !== acc.id), acc];
     return acc;
+  },
+  async removeAccount(id: string): Promise<void> {
+    await wait(400);
+    accounts = accounts.filter((a) => a.id !== id);
+    drafts = drafts.filter((d) => d.account !== id);
+    messages = messages.filter((m) => m.account !== id);
+    delete settings[`signature:${id}`];
+  },
+  async saveDraft(d: Omit<StoredDraft, "updated">): Promise<void> {
+    drafts = [{ ...d, updated: Math.floor(Date.now() / 1000) }, ...drafts.filter((x) => x.id !== d.id)];
+  },
+  async listDrafts(): Promise<StoredDraft[]> {
+    return [...drafts].sort((a, b) => b.updated - a.updated);
+  },
+  async deleteDraft(id: string): Promise<void> {
+    drafts = drafts.filter((d) => d.id !== id);
+  },
+  async settings(): Promise<Settings> {
+    return { ...settings };
+  },
+  async setSetting(key: string, value: string): Promise<void> {
+    settings = { ...settings, [key]: value };
+  },
+  async setFocused(_focused: boolean): Promise<void> {},
+  async requestNotifyPermission(): Promise<boolean> {
+    return true;
   },
   async folders(): Promise<Role[]> {
     return ["inbox", "sent", "archive", "trash", "junk"];

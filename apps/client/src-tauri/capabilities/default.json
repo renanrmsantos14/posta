@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Janela principal",
   "windows": ["main"],
-  "permissions": ["core:default", "opener:allow-open-url"]
+  "permissions": ["core:default", "core:window:allow-set-title", "notification:default", "opener:allow-open-url"]
 }

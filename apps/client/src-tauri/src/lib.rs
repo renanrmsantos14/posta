@@ -1,10 +1,11 @@
 //! Ponte entre a UI e o mail-core. Leituras vêm do SQLite local; rede só em sync e flags.
 
 use mail_core::oauth::{self, Provider};
-use mail_core::{imap_sync, send, AuthMode, IdleEnd, ImapAccount, MessageDetail, MessageSummary, Outgoing, ReplyRef, Role, SendReport, Store};
+use mail_core::{imap_sync, send, AuthMode, IdleEnd, ImapAccount, DraftRecord, MessageDetail, MessageSummary, Outgoing, ReplyRef, Role, SendReport, Store};
 use serde::{Deserialize, Serialize};
-use std::{collections::{HashMap, HashSet}, fs, path::PathBuf, sync::Mutex, time::{Duration, Instant}};
+use std::{collections::{HashMap, HashSet}, fs, path::PathBuf, sync::{atomic::{AtomicBool, Ordering}, Mutex}, time::{Duration, Instant}};
 use tauri::{AppHandle, Emitter, Manager, State};
+use tauri_plugin_notification::NotificationExt;
 
 mod secret;
 
@@ -17,6 +18,8 @@ struct AppState {
     tokens: Mutex<HashMap<String, (String, Instant)>>,
     /// Contas que já têm thread de IDLE.
     watching: Mutex<HashSet<String>>,
+    /// A UI avisa (`set_focused`) quando a janela ganha ou perde o foco; sem foco, email novo notifica.
+    focused: AtomicBool,
 }
 
 type CmdResult<T> = Result<T, String>;
@@ -132,6 +135,30 @@ fn sync_account_inbox(st: &AppState, id: &str) -> CmdResult<usize> {
     Ok(imap_sync::sync_mailbox(&acc, &mut store, "INBOX", None).map_err(err)?.fetched)
 }
 
+/// Mostra a notificação do sistema para `fetched` mensagens novas da Caixa de entrada, se a janela está sem foco
+/// e a opção `notify` não foi desligada. Até 3 mensagens aparecem uma a uma (remetente e assunto); mais que isso vira um resumo.
+fn notify_new(app: &AppHandle, st: &AppState, account: &str, fetched: usize) {
+    if fetched == 0 || st.focused.load(Ordering::Relaxed) {
+        return;
+    }
+    let enabled = st.store.lock().unwrap().setting("notify").ok().flatten().as_deref() != Some("0");
+    if !enabled {
+        return;
+    }
+    let Ok(store) = Store::open(st.db_path()) else { return };
+    let Ok(new) = store.newest_unseen(account, "INBOX", fetched.min(50) as u32) else { return };
+    let n = app.notification();
+    if new.len() > 3 {
+        n.builder().title("Posta").body(format!("{} mensagens novas em {account}", new.len())).show().ok();
+        return;
+    }
+    for m in new {
+        let who = if m.from_name.is_empty() { m.from_addr } else { m.from_name };
+        let subject = if m.subject.is_empty() { "(sem assunto)".to_string() } else { m.subject };
+        n.builder().title(who).body(subject).show().ok();
+    }
+}
+
 /// Um ciclo: espera o IDLE e sincroniza ao fim. Também sincroniza no prazo (`TimedOut`): o que chegou
 /// entre o fim do IDLE anterior e este SELECT não gera aviso, então o ciclo renovado serve de varredura.
 fn idle_cycle(app: &AppHandle, id: &str) -> CmdResult<()> {
@@ -146,6 +173,7 @@ fn idle_cycle(app: &AppHandle, id: &str) -> CmdResult<()> {
         }
     };
     let fetched = sync_account_inbox(&st, id)?;
+    notify_new(app, &st, id, fetched);
     if changed || fetched > 0 {
         app.emit("mail-changed", fetched).ok();
     }
@@ -164,6 +192,11 @@ fn watch_inbox(app: &AppHandle, id: String) {
             match idle_cycle(&app, &id) {
                 Ok(()) => backoff = Duration::from_secs(5),
                 Err(e) => {
+                    // Conta removida: encerra a thread (e libera o id, caso a conta volte).
+                    if !app.state::<AppState>().accounts().map_or(true, |l| l.iter().any(|a| a.id == id)) {
+                        app.state::<AppState>().watching.lock().unwrap().remove(&id);
+                        return;
+                    }
                     eprintln!("IDLE de {id}: {e}");
                     std::thread::sleep(backoff);
                     backoff = (backoff * 2).min(BACKOFF_MAX);
@@ -292,7 +325,8 @@ struct SyncResult {
 
 #[tauri::command]
 async fn sync_inbox(app: AppHandle) -> CmdResult<SyncResult> {
-    blocking(app, |st| {
+    let handle = app.clone();
+    blocking(app, move |st| {
         let Ok(_guard) = st.syncing.try_lock() else {
             return Ok(SyncResult { skipped: true, ..Default::default() });
         };
@@ -309,6 +343,7 @@ async fn sync_inbox(app: AppHandle) -> CmdResult<SyncResult> {
                 Ok(r) => {
                     result.fetched += r.fetched;
                     result.total += r.total;
+                    notify_new(&handle, st, &acc.id, r.fetched);
                 }
                 Err(e) => result.errors.push(format!("{}: {e}", acc.id)),
             }
@@ -473,6 +508,67 @@ async fn send_message(app: AppHandle, draft: Draft) -> CmdResult<SendReport> {
     .await
 }
 
+/// Remove a conta: senha e refresh token do cofre, lista de contas, mensagens, pastas, rascunhos e assinatura locais.
+/// O servidor não é tocado. A thread de IDLE da conta encerra sozinha no próximo ciclo.
+#[tauri::command]
+async fn remove_account(app: AppHandle, id: String) -> CmdResult<()> {
+    blocking(app, move |st| {
+        // Espera um sync em andamento terminar: senão ele regravaria mensagens da conta já apagada.
+        let _guard = st.syncing.lock().unwrap_or_else(|p| p.into_inner());
+        let mut accounts = st.accounts()?;
+        let Some(acc) = accounts.iter().find(|a| a.id == id).cloned() else {
+            return Err(format!("conta {id} não encontrada"));
+        };
+        secret::delete(&id).map_err(|e| format!("não consegui apagar a senha do cofre do sistema: {e}"))?;
+        if acc.auth.provider().is_some() {
+            secret::delete(&refresh_key(&id)).map_err(|e| format!("não consegui apagar o refresh token do cofre do sistema: {e}"))?;
+        }
+        accounts.retain(|a| a.id != id);
+        st.save_accounts(&accounts)?;
+        st.tokens.lock().unwrap().remove(&id);
+        st.store.lock().unwrap().remove_account(&id).map_err(err)
+    })
+    .await
+}
+
+#[tauri::command]
+fn save_draft(state: State<'_, AppState>, draft: DraftRecord) -> CmdResult<()> {
+    state.store.lock().unwrap().save_draft(&draft).map_err(err)
+}
+
+#[tauri::command]
+fn list_drafts(state: State<'_, AppState>) -> CmdResult<Vec<DraftRecord>> {
+    state.store.lock().unwrap().list_drafts().map_err(err)
+}
+
+#[tauri::command]
+fn delete_draft(state: State<'_, AppState>, id: String) -> CmdResult<()> {
+    state.store.lock().unwrap().delete_draft(&id).map_err(err)
+}
+
+/// Assinaturas por conta (`signature:<id>`) e `notify` ("0" desliga as notificações).
+#[tauri::command]
+fn get_settings(state: State<'_, AppState>) -> CmdResult<HashMap<String, String>> {
+    state.store.lock().unwrap().settings().map_err(err)
+}
+
+#[tauri::command]
+fn set_setting(state: State<'_, AppState>, key: String, value: String) -> CmdResult<()> {
+    state.store.lock().unwrap().set_setting(&key, &value).map_err(err)
+}
+
+#[tauri::command]
+fn set_focused(state: State<'_, AppState>, focused: bool) {
+    state.focused.store(focused, Ordering::Relaxed);
+}
+
+/// Pede a permissão de notificações (Android 13+ mostra o diálogo do sistema); true se concedida.
+#[tauri::command]
+fn request_notify_permission(app: AppHandle) -> CmdResult<bool> {
+    let state = app.notification().request_permission().map_err(err)?;
+    Ok(state == tauri_plugin_notification::PermissionState::Granted)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // O rustls-native-certs não conhece os certificados do Android; aponta para a pasta do sistema.
@@ -481,6 +577,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             // Atualização pelo próprio app: só no desktop (no Android, reinstala-se o APK).
             #[cfg(desktop)]
@@ -490,7 +587,7 @@ pub fn run() {
             let dir = app.path().app_data_dir()?;
             fs::create_dir_all(&dir)?;
             let store = Store::open(dir.join("mail.sqlite"))?;
-            app.manage(AppState { dir, store: Mutex::new(store), syncing: Mutex::new(()), tokens: Mutex::new(HashMap::new()), watching: Mutex::new(HashSet::new()) });
+            app.manage(AppState { dir, store: Mutex::new(store), syncing: Mutex::new(()), tokens: Mutex::new(HashMap::new()), watching: Mutex::new(HashSet::new()), focused: AtomicBool::new(true) });
             let st = app.state::<AppState>();
             for acc in st.accounts().unwrap_or_default() {
                 watch_inbox(app.handle(), acc.id);
@@ -510,7 +607,15 @@ pub fn run() {
             list_messages,
             search_messages,
             open_message,
-            send_message
+            send_message,
+            remove_account,
+            save_draft,
+            list_drafts,
+            delete_draft,
+            get_settings,
+            set_setting,
+            set_focused,
+            request_notify_permission
         ])
         .run(tauri::generate_context!())
         .expect("erro ao iniciar o Posta");

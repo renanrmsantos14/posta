@@ -56,6 +56,21 @@ export interface Draft {
   body: string;
 }
 
+/** Rascunho salvo localmente pelo Composer. */
+export interface StoredDraft {
+  id: string;
+  account: string;
+  reply_to: number | null;
+  to: string;
+  subject: string;
+  body: string;
+  /** Unix, em segundos. */
+  updated: number;
+}
+
+/** Configurações: `signature:<id da conta>` e `notify` ("0" desliga as notificações). */
+export type Settings = Record<string, string>;
+
 export interface SendReport {
   saved_to_sent: boolean;
   warning: string | null;
@@ -90,6 +105,14 @@ export const api = isTauri
       deleteForever: (id: number) => invoke<void>("delete_forever", { id }),
       open: (id: number) => invoke<MessageDetail | null>("open_message", { id }),
       send: (draft: Draft) => invoke<SendReport>("send_message", { draft }),
+      removeAccount: (id: string) => invoke<void>("remove_account", { id }),
+      saveDraft: (draft: Omit<StoredDraft, "updated">) => invoke<void>("save_draft", { draft }),
+      listDrafts: () => invoke<StoredDraft[]>("list_drafts"),
+      deleteDraft: (id: string) => invoke<void>("delete_draft", { id }),
+      settings: () => invoke<Settings>("get_settings"),
+      setSetting: (key: string, value: string) => invoke<void>("set_setting", { key, value }),
+      setFocused: (focused: boolean) => invoke<void>("set_focused", { focused }),
+      requestNotifyPermission: () => invoke<boolean>("request_notify_permission"),
     }
   : mockApi;
 

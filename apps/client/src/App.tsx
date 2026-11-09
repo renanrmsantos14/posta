@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, ArrowBendUpLeft, ArrowsClockwise, Archive, MagnifyingGlass, NotePencil, Plus, Trash, Tray, EnvelopeSimple, GearSix } from "@phosphor-icons/react";
+import { ArrowLeft, ArrowBendUpLeft, ArrowsClockwise, Archive, MagnifyingGlass, NotePencil, Plus, Trash, Tray, EnvelopeSimple, GearSix, FileText } from "@phosphor-icons/react";
 import { HtmlBody, hasRemoteImages } from "./HtmlBody";
-import { api, isTauri, type Account, type MessageDetail, type MessageSummary, type Role } from "./api";
+import { api, isTauri, type Account, type MessageDetail, type MessageSummary, type Role, type Settings, type StoredDraft } from "./api";
 import { AccountDialog } from "./AccountDialog";
 import { Composer, type ComposeInit } from "./Composer";
 import { Toaster, toast } from "./toast";
@@ -58,7 +58,7 @@ export default function App() {
   const [dialog, setDialog] = useState(false);
   const [readerOpen, setReaderOpen] = useState(false);
   const [compose, setCompose] = useState<ComposeInit | null>(null);
-  const [settings, setSettings] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [update, setUpdate] = useState<Update | null>(null);
   /** Remonta o painel a cada abertura, mesmo com o mesmo rascunho. */
   const [composeKey, setComposeKey] = useState(0);
@@ -73,6 +73,12 @@ export default function App() {
   const [serverTotal, setServerTotal] = useState<number | null>(null);
   const [loadingFolder, setLoadingFolder] = useState(true);
   const [inboxUnread, setInboxUnread] = useState(0);
+  /** Rascunhos locais, a configuração (assinaturas, notificações) e os filtros de visão. */
+  const [drafts, setDrafts] = useState<StoredDraft[]>([]);
+  const [settings, setSettings] = useState<Settings>({});
+  const [showDrafts, setShowDrafts] = useState(false);
+  /** Conta escolhida na barra lateral; null = todas as caixas juntas. */
+  const [accountFilter, setAccountFilter] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const known = useRef<Set<number> | null>(null);
@@ -84,7 +90,9 @@ export default function App() {
   const searchRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLUListElement>(null);
 
-  const visible = results ?? messages;
+  const shown = results ?? messages;
+  const visible = useMemo(() => (accountFilter ? shown.filter((m) => m.account === accountFilter) : shown), [shown, accountFilter]);
+  const draftsShown = useMemo(() => (accountFilter ? drafts.filter((d) => d.account === accountFilter) : drafts), [drafts, accountFilter]);
   const unread = useMemo(() => messages.filter((m) => !m.seen).length, [messages]);
 
   const current = visible.find((m) => m.id === selectedId) ?? null;
@@ -141,10 +149,43 @@ export default function App() {
     }
   }, [reload, syncFolder, folder, keep, messages.length]);
 
+  const refreshDrafts = useCallback(() => api.listDrafts().then(setDrafts).catch(() => {}), []);
+
   useEffect(() => {
     api.listAccounts().then(setAccounts);
     api.folders().then(setFolderList).catch(() => {});
+    refreshDrafts();
+    api.settings().then((s) => {
+      setSettings(s);
+      // Android 13+ só mostra notificações depois do aceite; no desktop a chamada é inofensiva.
+      if (s.notify !== "0") api.listAccounts().then((a) => (a.length ? api.requestNotifyPermission() : false)).catch(() => {});
+    }).catch(() => {});
+  }, [refreshDrafts]);
+
+  // Fechar ou enviar o painel muda os rascunhos salvos.
+  useEffect(() => { if (!compose) refreshDrafts(); }, [compose, refreshDrafts]);
+
+  // O backend só notifica com a janela sem foco: avisa a cada mudança de foco ou visibilidade.
+  useEffect(() => {
+    const report = () => api.setFocused(document.hasFocus() && document.visibilityState === "visible").catch(() => {});
+    report();
+    window.addEventListener("focus", report);
+    window.addEventListener("blur", report);
+    document.addEventListener("visibilitychange", report);
+    return () => {
+      window.removeEventListener("focus", report);
+      window.removeEventListener("blur", report);
+      document.removeEventListener("visibilitychange", report);
+    };
   }, []);
+
+  // Contagem de não lidas no título da janela.
+  useEffect(() => {
+    const title = inboxUnread > 0 ? `(${inboxUnread}) Posta` : "Posta";
+    document.title = title;
+    if (!isTauri) return;
+    import("@tauri-apps/api/window").then(({ getCurrentWindow }) => getCurrentWindow().setTitle(title)).catch(() => {});
+  }, [inboxUnread]);
 
   // Carga da pasta: o banco local responde na hora; fora da Caixa de entrada, o servidor vem depois.
   useEffect(() => {
@@ -228,6 +269,7 @@ export default function App() {
   }, [query, folder]);
 
   function openFolder(role: Role) {
+    setShowDrafts(false);
     if (role === folder) return;
     setQuery("");
     setResults(null);
@@ -258,16 +300,53 @@ export default function App() {
     setCompose(init);
   }
 
+  /** Assinatura da conta, no padrão "-- " que os leitores de email reconhecem. */
+  const signatureFor = (account: string) => {
+    const sig = settings[`signature:${account}`]?.trim();
+    return sig ? `\n\n-- \n${sig}\n` : "";
+  };
+
   function writeNew() {
     if (!accounts?.length) return setDialog(true);
-    openComposer({ title: "Nova mensagem", account: accounts[0].id, reply_to: null, to: "", subject: "", body: "" });
+    openComposer({ title: "Nova mensagem", account: accounts[0].id, reply_to: null, to: "", subject: "", body: signatureFor(accounts[0].id) });
+  }
+
+  function openDraft(d: StoredDraft) {
+    if (!accounts?.length) return;
+    const account = accounts.some((a) => a.id === d.account) ? d.account : accounts[0].id;
+    openComposer({ title: d.reply_to !== null ? "Responder" : "Nova mensagem", draftId: d.id, account, reply_to: d.reply_to, to: d.to, subject: d.subject, body: d.body });
+  }
+
+  function openDrafts() {
+    setShowDrafts(true);
+    setReaderOpen(false);
+    refreshDrafts();
+  }
+
+  function changeSetting(key: string, value: string) {
+    setSettings((s) => ({ ...s, [key]: value }));
+    api.setSetting(key, value).catch((e) => toast(`Não consegui salvar a configuração: ${e}`, "error"));
+  }
+
+  async function removeAccount(id: string) {
+    await api.removeAccount(id);
+    setAccounts((l) => (l ?? []).filter((a) => a.id !== id));
+    setSettings((s) => Object.fromEntries(Object.entries(s).filter(([k]) => k !== `signature:${id}`)));
+    setAccountFilter((f) => (f === id ? null : f));
+    setSelectedId(null);
+    setDetail(null);
+    setReaderOpen(false);
+    api.folders().then(setFolderList).catch(() => {});
+    refreshDrafts();
+    reload().catch(() => {});
+    toast("Conta removida", "success");
   }
 
   function reply() {
     if (!detail || !accounts?.length) return;
     const subject = /^re:/i.test(detail.subject) ? detail.subject : `Re: ${detail.subject}`;
     const account = accounts.some((a) => a.id === detail.account) ? detail.account : accounts[0].id;
-    openComposer({ title: "Responder", account, reply_to: detail.id, to: detail.reply_addr, subject, body: replyBody(detail) });
+    openComposer({ title: "Responder", account, reply_to: detail.id, to: detail.reply_addr, subject, body: signatureFor(account).trimEnd() + replyBody(detail) });
   }
 
   // O painel fecha na hora; o envio espera o "Desfazer" expirar. Se falhar, o rascunho volta intacto.
@@ -277,9 +356,11 @@ export default function App() {
       action: { label: "Desfazer", onClick: () => openComposer({ ...d, restored: true }) },
       onClose: async (reason) => {
         if (reason === "action") return;
-        const { title: _t, restored: _r, ...draft } = d;
+        const { title: _t, restored: _r, draftId, ...draft } = d;
         try {
           const r = await api.send(draft);
+          // Enviada: o rascunho cumpriu o papel. Se o envio falhar ou for desfeito, ele continua salvo.
+          if (draftId) api.deleteDraft(draftId).then(refreshDrafts).catch(() => {});
           toast("Mensagem enviada", "success");
           if (r.warning) toast(r.warning, "info");
         } catch (e) {
@@ -411,11 +492,12 @@ export default function App() {
   // Atalhos: j/k ou setas navegam, / busca, r responde, c escreve, u sincroniza, e arquiva, # exclui, Esc limpa a busca ou volta.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (dialog || compose || settings || update) return;
+      if (dialog || compose || settingsOpen || update) return;
       if (confirmDelete) {
         if (e.key === "Escape" && !deleting) setConfirmDelete(false);
         return;
       }
+      if (showDrafts && !(e.key === "c" || e.key === "Escape")) return;
       const t = e.target;
       const typing = t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement || t instanceof HTMLSelectElement;
       if (e.key === "Escape") {
@@ -472,17 +554,35 @@ export default function App() {
             const Icon = FOLDERS[r].icon;
             return (
               <button key={r} className="nav-item" title={FOLDERS[r].label} onClick={() => openFolder(r)}
-                aria-current={r === folder ? "page" : undefined}>
+                aria-current={r === folder && !showDrafts ? "page" : undefined}>
                 <Icon size={16} weight="bold" />
                 <span>{FOLDERS[r].label}</span>
                 {r === "inbox" && inboxUnread > 0 && <span className="count">{inboxUnread}</span>}
               </button>
             );
           })}
+          <button className="nav-item" title="Rascunhos" onClick={openDrafts} aria-current={showDrafts ? "page" : undefined}>
+            <FileText size={16} weight="bold" />
+            <span>Rascunhos</span>
+            {drafts.length > 0 && <span className="count plain">{drafts.length}</span>}
+          </button>
         </nav>
         <div className="rail-section">
           <div className="rail-label">Contas</div>
-          {accounts?.map((a) => (
+          {accounts && accounts.length > 1 && (
+            <button type="button" className="account account-btn" title="Todas as caixas juntas" aria-pressed={!accountFilter}
+              onClick={() => setAccountFilter(null)}>
+              <span className="avatar" aria-hidden>*</span>
+              <span className="account-name">Todas as contas</span>
+            </button>
+          )}
+          {accounts?.map((a) => accounts.length > 1 ? (
+            <button key={a.id} type="button" className="account account-btn" title={a.id} aria-pressed={accountFilter === a.id}
+              onClick={() => setAccountFilter(accountFilter === a.id ? null : a.id)}>
+              <span className="avatar" aria-hidden>{a.username[0]?.toUpperCase()}</span>
+              <span className="account-name">{a.username}</span>
+            </button>
+          ) : (
             <div key={a.id} className="account" title={a.id}>
               <span className="avatar" aria-hidden>{a.username[0]?.toUpperCase()}</span>
               <span className="account-name">{a.username}</span>
@@ -501,7 +601,7 @@ export default function App() {
           <span><kbd>e</kbd> arquivar</span>
           <span><kbd>#</kbd> excluir</span>
         </div>
-        <button className="btn ghost small settings-btn" onClick={() => setSettings(true)} aria-label="Configurações">
+        <button className="btn ghost small settings-btn" onClick={() => setSettingsOpen(true)} aria-label="Configurações">
           <GearSix size={15} weight="bold" /> <span>Configurações</span>
         </button>
       </aside>
@@ -521,7 +621,7 @@ export default function App() {
           <button className="icon-btn mobile-only" onClick={() => setDialog(true)} aria-label="Adicionar conta">
             <Plus size={16} weight="bold" />
           </button>
-          <button className="icon-btn mobile-only" onClick={() => setSettings(true)} aria-label="Configurações">
+          <button className="icon-btn mobile-only" onClick={() => setSettingsOpen(true)} aria-label="Configurações">
             <GearSix size={16} weight="bold" />
           </button>
         </div>
@@ -530,17 +630,36 @@ export default function App() {
             const Icon = FOLDERS[r].icon;
             return (
               <button key={r} className="btn ghost small" onClick={() => openFolder(r)}
-                aria-current={r === folder ? "page" : undefined}>
+                aria-current={r === folder && !showDrafts ? "page" : undefined}>
                 <Icon size={14} weight="bold" /> {FOLDERS[r].label}
               </button>
             );
           })}
+          <button className="btn ghost small" onClick={openDrafts} aria-current={showDrafts ? "page" : undefined}>
+            <FileText size={14} weight="bold" /> Rascunhos
+          </button>
         </div>
-        {results && (
+        {results && !showDrafts && (
           <div className="result-meta">{plural(results.length, "resultado", "resultados")} para “{query.trim()}”</div>
         )}
 
-        {empty ? (
+        {showDrafts ? (
+          draftsShown.length === 0 ? (
+            <div className="empty quiet"><p>Nenhum rascunho</p></div>
+          ) : (
+            <ul className="list" role="listbox" aria-label="Rascunhos">
+              {draftsShown.map((d) => (
+                <li key={d.id} role="option" aria-selected={false} className="row draft-row" onClick={() => openDraft(d)}>
+                  <span className="dot" aria-hidden />
+                  <span className="from">{d.to.trim() || "(sem destinatário)"}</span>
+                  <time className="date" dateTime={new Date(d.updated * 1000).toISOString()}>{shortDate(d.updated)}</time>
+                  <span className="subject">{d.subject || "(sem assunto)"}</span>
+                  <span className="snippet">{d.body.trim().replace(/\s+/g, " ").slice(0, 200)}</span>
+                </li>
+              ))}
+            </ul>
+          )
+        ) : empty ? (
           <div className="empty">
             <EnvelopeSimple size={28} weight="duotone" />
             <h2>Conecte sua primeira conta</h2>
@@ -644,6 +763,7 @@ export default function App() {
           onClose={() => setDialog(false)}
           onAdded={(a) => {
             setAccounts((l) => [...(l ?? []).filter((x) => x.id !== a.id), a]);
+            if (settings.notify !== "0") api.requestNotifyPermission().catch(() => {});
             toast(`Conta ${a.username} conectada`, "success");
           }}
         />
@@ -651,11 +771,14 @@ export default function App() {
       {compose && accounts && (
         <Composer key={composeKey} init={compose} accounts={accounts} onSend={send} onDiscard={() => setCompose(null)} />
       )}
-      {settings && <SettingsDialog onClose={() => setSettings(false)} onUpdate={showUpdate} />}
+      {settingsOpen && (
+        <SettingsDialog accounts={accounts ?? []} settings={settings} onSetting={changeSetting} onRemoveAccount={removeAccount}
+          onClose={() => setSettingsOpen(false)} onUpdate={showUpdate} />
+      )}
       {update && (
         <UpdateDialog update={update} onLater={() => { skip(update.version); setUpdate(null); }} />
       )}
-      {!compose && !dialog && !settings && !update && (
+      {!compose && !dialog && !settingsOpen && !update && (
         <button className="fab mobile-only" onClick={writeNew} aria-label="Escrever">
           <NotePencil size={22} weight="bold" />
         </button>

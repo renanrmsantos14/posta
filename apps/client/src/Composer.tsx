@@ -1,13 +1,17 @@
 // Escrever e responder. Painel fixo, sem cobrir a mensagem que está sendo respondida.
-// Esc ou X perguntam antes de descartar; Ctrl/Cmd+Enter envia.
+// Salva sozinho como rascunho (debounce de 1,5 s); Esc e X guardam o rascunho e fecham, a lixeira descarta
+// (com confirmação se há texto). Ctrl/Cmd+Enter envia.
 import { useEffect, useRef, useState } from "react";
 import { PaperPlaneTilt, Trash, X } from "@phosphor-icons/react";
-import type { Account, Draft } from "./api";
+import { api, type Account, type Draft } from "./api";
+import { toast } from "./toast";
 
 export interface ComposeInit extends Draft {
   title: string;
   /** Voltou de um envio desfeito ou com falha: conta como alterado. */
   restored?: boolean;
+  /** Rascunho salvo que este painel continua; ausente = o painel cria um id novo. */
+  draftId?: string;
 }
 
 interface Props {
@@ -18,6 +22,7 @@ interface Props {
 }
 
 const EXIT_MS = 150;
+const AUTOSAVE_MS = 1500;
 const mac = /Mac|iPhone|iPad/.test(navigator.platform);
 
 /** Cada destinatário precisa ter algo@algo. */
@@ -36,6 +41,10 @@ export function Composer({ init, accounts, onSend, onDiscard }: Props) {
   const [leaving, setLeaving] = useState(false);
   const toRef = useRef<HTMLInputElement>(null);
   const bodyRef = useRef<HTMLTextAreaElement>(null);
+  const [draftId] = useState(() => init.draftId ?? crypto.randomUUID());
+  const [saved, setSaved] = useState(false);
+  /** Última versão gravada; evita regravar o mesmo texto. */
+  const savedKey = useRef("");
 
   const dirty = !!init.restored || draft.to !== init.to || draft.subject !== init.subject || draft.body !== init.body;
 
@@ -50,14 +59,72 @@ export function Composer({ init, accounts, onSend, onDiscard }: Props) {
     }
   }, [init]);
 
+  const isBlank = !draft.to.trim() && !draft.subject.trim() && !draft.body.trim();
+  const latest = useRef(draft);
+  latest.current = draft;
+
+  /** Grava o rascunho atual; texto todo em branco apaga o rascunho. Devolve false se não gravou. */
+  async function persist(): Promise<boolean> {
+    const d = latest.current;
+    const key = JSON.stringify([d.account, d.to, d.subject, d.body]);
+    if (key === savedKey.current) return true;
+    try {
+      if (!d.to.trim() && !d.subject.trim() && !d.body.trim()) await api.deleteDraft(draftId);
+      else await api.saveDraft({ id: draftId, account: d.account, reply_to: d.reply_to, to: d.to, subject: d.subject, body: d.body });
+      savedKey.current = key;
+      setSaved(!!(d.to.trim() || d.subject.trim() || d.body.trim()));
+      return true;
+    } catch (e) {
+      toast(`Não consegui salvar o rascunho: ${e}`, "error");
+      return false;
+    }
+  }
+
+  useEffect(() => {
+    if (!dirty) return;
+    const t = setTimeout(() => { persist(); }, AUTOSAVE_MS);
+    return () => clearTimeout(t);
+  }, [draft.account, draft.to, draft.subject, draft.body, dirty]);
+
+  // Janela escondida ou fechando: não espera o debounce.
+  useEffect(() => {
+    const flush = () => { if (document.visibilityState === "hidden" && dirty) persist(); };
+    document.addEventListener("visibilitychange", flush);
+    return () => document.removeEventListener("visibilitychange", flush);
+  });
+
+  // Painel substituído ou desmontado com texto ainda no debounce (exceto descarte): grava antes de sumir.
+  const skipFlush = useRef(false);
+  const dirtyRef = useRef(dirty);
+  dirtyRef.current = dirty;
+  useEffect(() => () => { if (dirtyRef.current && !skipFlush.current) persist(); }, []);
+
+  /** Fecha guardando o texto: só sai se a gravação deu certo (nunca perde o que foi digitado). */
+  async function saveAndClose() {
+    if (!dirty || isBlank) return leave(onDiscard);
+    if (!(await persist())) return;
+    toast("Rascunho salvo", "info");
+    leave(onDiscard);
+  }
+
+  function discard() {
+    skipFlush.current = true;
+    api.deleteDraft(draftId).catch(() => {});
+    leave(onDiscard);
+  }
+
   function leave(then: () => void) {
     setLeaving(true);
     setTimeout(then, EXIT_MS);
   }
 
   function requestClose() {
-    if (dirty) setConfirming(true);
-    else leave(onDiscard);
+    saveAndClose();
+  }
+
+  function requestDiscard() {
+    if (dirty && !isBlank) setConfirming(true);
+    else discard();
   }
 
   function send() {
@@ -68,7 +135,7 @@ export function Composer({ init, accounts, onSend, onDiscard }: Props) {
       toRef.current?.focus();
       return;
     }
-    leave(() => onSend(draft));
+    leave(() => onSend({ ...draft, draftId }));
   }
 
   useEffect(() => {
@@ -89,6 +156,7 @@ export function Composer({ init, accounts, onSend, onDiscard }: Props) {
 
   const set = <K extends keyof ComposeInit>(k: K, v: ComposeInit[K]) => {
     setDraft((d) => ({ ...d, [k]: v }));
+    setSaved(false);
     if (k === "to") setError("");
   };
 
@@ -135,7 +203,8 @@ export function Composer({ init, accounts, onSend, onDiscard }: Props) {
           <PaperPlaneTilt size={15} weight="fill" /> Enviar
         </button>
         <span className="hint-keys"><kbd>{mac ? "⌘" : "Ctrl"}</kbd><kbd>↵</kbd></span>
-        <button type="button" className="icon-btn push" aria-label="Descartar rascunho" onClick={() => leave(onDiscard)}>
+        {saved && <span className="draft-saved" role="status">Rascunho salvo</span>}
+        <button type="button" className="icon-btn push" aria-label="Descartar rascunho" onClick={requestDiscard}>
           <Trash size={16} weight="bold" />
         </button>
       </footer>
@@ -145,7 +214,7 @@ export function Composer({ init, accounts, onSend, onDiscard }: Props) {
           <p id="discard-title">Descartar rascunho?</p>
           <div className="confirm-actions">
             <button type="button" className="btn" onClick={() => setConfirming(false)} autoFocus>Continuar editando</button>
-            <button type="button" className="btn danger" onClick={() => leave(onDiscard)}>Descartar</button>
+            <button type="button" className="btn danger" onClick={discard}>Descartar</button>
           </div>
         </div>
       )}

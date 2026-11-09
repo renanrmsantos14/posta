@@ -9,7 +9,7 @@ pub mod store;
 pub use folders::{Folder, Role};
 pub use imap_sync::{AuthMode, IdleEnd, ImapAccount, Security, SmtpServer, SyncReport};
 pub use send::{Outgoing, SendReport};
-pub use store::{MessageDetail, MessageSummary, ReplyRef, Store};
+pub use store::{DraftRecord, MessageDetail, MessageSummary, ReplyRef, Store};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

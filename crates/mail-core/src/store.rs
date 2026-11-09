@@ -1,7 +1,7 @@
 //! Cópia local da caixa em SQLite. Toda leitura da UI vem daqui, nunca da rede.
 
 use rusqlite::{params, Connection, OptionalExtension};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 use crate::folders::{Folder, Role};
@@ -45,6 +45,20 @@ CREATE TABLE IF NOT EXISTS folders (
   PRIMARY KEY (account, role)
 );
 CREATE INDEX IF NOT EXISTS messages_by_box ON messages (account, mailbox, date DESC);
+-- Dados do usuário (não são cópia do servidor): sobrevivem à recriação do esquema acima.
+CREATE TABLE IF NOT EXISTS drafts (
+  id TEXT PRIMARY KEY,
+  account TEXT NOT NULL,
+  reply_to INTEGER,
+  to_addr TEXT NOT NULL DEFAULT '',
+  subject TEXT NOT NULL DEFAULT '',
+  body TEXT NOT NULL DEFAULT '',
+  updated INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5 (
   subject, from_name, from_addr, body_text,
   content = 'messages', content_rowid = 'id',
@@ -112,6 +126,22 @@ pub struct MessageDetail {
     /// Vazio quando a mensagem só tem texto.
     pub body_html: String,
     pub reply_addr: String,
+}
+
+/// Rascunho guardado só localmente (o Composer salva sozinho).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DraftRecord {
+    /// Gerado pela UI; o mesmo id sobrescreve o rascunho anterior.
+    pub id: String,
+    pub account: String,
+    /// Id local da mensagem respondida.
+    pub reply_to: Option<i64>,
+    pub to: String,
+    pub subject: String,
+    pub body: String,
+    /// Unix, em segundos; preenchido ao salvar.
+    #[serde(default)]
+    pub updated: i64,
 }
 
 pub struct Store {
@@ -418,6 +448,97 @@ impl Store {
         Ok(rows)
     }
 
+    /// Mensagens novas (não lidas) mais recentes de uma pasta de uma conta, para a notificação.
+    pub fn newest_unseen(&self, account: &str, mailbox: &str, limit: u32) -> Result<Vec<MessageSummary>> {
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT {SUMMARY_COLS} FROM messages m WHERE m.account = ?1 AND m.mailbox = ?2 AND m.seen = 0
+             ORDER BY m.date DESC, m.id DESC LIMIT ?3"
+        ))?;
+        let rows = stmt
+            .query_map(params![account, mailbox, limit], row_to_summary)?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(rows)
+    }
+
+    /// Grava (ou atualiza) o rascunho; `updated` vem do relógio local.
+    pub fn save_draft(&self, d: &DraftRecord) -> Result<()> {
+        if d.id.trim().is_empty() {
+            return Err(crate::Error::Invalid("rascunho sem id".into()));
+        }
+        self.conn.execute(
+            "INSERT INTO drafts (id, account, reply_to, to_addr, subject, body, updated)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, strftime('%s','now'))
+             ON CONFLICT (id) DO UPDATE SET account = ?2, reply_to = ?3, to_addr = ?4, subject = ?5, body = ?6,
+               updated = strftime('%s','now')",
+            params![d.id, d.account, d.reply_to, d.to, d.subject, d.body],
+        )?;
+        Ok(())
+    }
+
+    /// Rascunhos, o mais recente primeiro.
+    pub fn list_drafts(&self) -> Result<Vec<DraftRecord>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT id, account, reply_to, to_addr, subject, body, updated FROM drafts ORDER BY updated DESC, rowid DESC",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(DraftRecord {
+                    id: r.get(0)?,
+                    account: r.get(1)?,
+                    reply_to: r.get(2)?,
+                    to: r.get(3)?,
+                    subject: r.get(4)?,
+                    body: r.get(5)?,
+                    updated: r.get(6)?,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(rows)
+    }
+
+    pub fn delete_draft(&self, id: &str) -> Result<()> {
+        self.conn.execute("DELETE FROM drafts WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    pub fn setting(&self, key: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row("SELECT value FROM settings WHERE key = ?1", params![key], |r| r.get(0))
+            .optional()?)
+    }
+
+    pub fn settings(&self) -> Result<std::collections::HashMap<String, String>> {
+        let mut stmt = self.conn.prepare_cached("SELECT key, value FROM settings")?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(rows)
+    }
+
+    pub fn set_setting(&self, key: &str, value: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2) ON CONFLICT (key) DO UPDATE SET value = ?2",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
+    /// Apaga tudo o que é local de uma conta: mensagens (e FTS), estado das pastas, pastas, rascunhos e assinatura.
+    pub fn remove_account(&mut self, account: &str) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        for sql in [
+            "DELETE FROM messages WHERE account = ?1",
+            "DELETE FROM mailbox_state WHERE account = ?1",
+            "DELETE FROM folders WHERE account = ?1",
+            "DELETE FROM drafts WHERE account = ?1",
+            "DELETE FROM settings WHERE key = 'signature:' || ?1",
+        ] {
+            tx.execute(sql, params![account])?;
+        }
+        Ok(tx.commit()?)
+    }
+
     /// Apaga a cópia local (o gatilho limpa o FTS). Usado depois que o servidor confirmou mover/excluir.
     pub fn remove(&self, id: i64) -> Result<()> {
         self.conn.execute("DELETE FROM messages WHERE id = ?1", params![id])?;
@@ -575,5 +696,86 @@ mod tests {
         assert_eq!(d.body_html, "<p>oferta de <b>inverno</b></p>");
         assert_eq!(d.body_text, "oferta de inverno");
         assert!(s.search("strong", 10).unwrap().is_empty());
+    }
+
+    fn draft(id: &str, account: &str, body: &str) -> DraftRecord {
+        DraftRecord { id: id.into(), account: account.into(), reply_to: None, to: "bia@exemplo.com".into(), subject: "Oi".into(), body: body.into(), updated: 0 }
+    }
+
+    #[test]
+    fn rascunho_salva_atualiza_lista_e_apaga() {
+        let s = Store::open_in_memory().unwrap();
+        s.save_draft(&draft("d1", "a", "primeira versão")).unwrap();
+        s.save_draft(&draft("d2", "a", "outro")).unwrap();
+        // Mesmo id sobrescreve; reply_to é preservado.
+        let mut d1 = draft("d1", "a", "segunda versão");
+        d1.reply_to = Some(7);
+        s.save_draft(&d1).unwrap();
+        let all = s.list_drafts().unwrap();
+        assert_eq!(all.len(), 2);
+        let got = all.iter().find(|d| d.id == "d1").unwrap();
+        assert_eq!((got.body.as_str(), got.reply_to), ("segunda versão", Some(7)));
+        assert!(got.updated > 0);
+        s.delete_draft("d1").unwrap();
+        assert_eq!(s.list_drafts().unwrap().iter().map(|d| d.id.as_str()).collect::<Vec<_>>(), ["d2"]);
+        assert!(s.save_draft(&draft(" ", "a", "x")).is_err());
+    }
+
+    #[test]
+    fn rascunho_sobrevive_a_recriacao_do_esquema() {
+        let dir = std::env::temp_dir().join(format!("posta-draft-{}.sqlite", std::process::id()));
+        {
+            let s = Store::open(&dir).unwrap();
+            s.save_draft(&draft("d1", "a", "texto")).unwrap();
+            s.conn.pragma_update(None, "user_version", SCHEMA_VERSION - 1).unwrap();
+        }
+        let s = Store::open(&dir).unwrap();
+        assert_eq!(s.list_drafts().unwrap().len(), 1);
+        drop(s);
+        for ext in ["", "-wal", "-shm"] {
+            std::fs::remove_file(format!("{}{ext}", dir.display())).ok();
+        }
+    }
+
+    #[test]
+    fn remover_conta_apaga_so_os_dados_dela() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.set_folders("a", &folders_a()).unwrap();
+        s.set_folders("b", &folders_a()).unwrap();
+        s.set_uid_validity("a", "INBOX", 1).unwrap();
+        s.set_uid_validity("b", "INBOX", 1).unwrap();
+        s.insert_messages("a", "INBOX", &[msg(1, "Cotação a", "", 1)]).unwrap();
+        s.insert_messages("b", "INBOX", &[msg(1, "Cotação b", "", 2)]).unwrap();
+        s.save_draft(&draft("da", "a", "x")).unwrap();
+        s.save_draft(&draft("db", "b", "y")).unwrap();
+        s.set_setting("signature:a", "Ana").unwrap();
+        s.set_setting("signature:b", "Beto").unwrap();
+        s.set_setting("notify", "0").unwrap();
+
+        s.remove_account("a").unwrap();
+
+        assert!(s.local_uids("a", "INBOX").unwrap().is_empty());
+        assert!(s.folders("a").unwrap().is_empty());
+        assert_eq!(s.uid_validity("a", "INBOX").unwrap(), None);
+        assert_eq!(s.list("INBOX", 10, 0).unwrap().len(), 1);
+        assert_eq!(s.search("cotacao", 10).unwrap()[0].subject, "Cotação b", "FTS limpo só da conta removida");
+        assert_eq!(s.list_drafts().unwrap()[0].id, "db");
+        assert_eq!(s.setting("signature:a").unwrap(), None);
+        assert_eq!(s.setting("signature:b").unwrap().as_deref(), Some("Beto"));
+        assert_eq!(s.setting("notify").unwrap().as_deref(), Some("0"));
+    }
+
+    #[test]
+    fn configuracoes_e_novas_nao_lidas() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.set_setting("k", "1").unwrap();
+        s.set_setting("k", "2").unwrap();
+        assert_eq!(s.settings().unwrap().get("k").map(String::as_str), Some("2"));
+        let mut lida = msg(3, "lida", "", 30);
+        lida.seen = true;
+        s.insert_messages("a", "INBOX", &[msg(1, "velha", "", 10), msg(2, "nova", "", 20), lida]).unwrap();
+        let n = s.newest_unseen("a", "INBOX", 5).unwrap();
+        assert_eq!(n.iter().map(|m| m.subject.as_str()).collect::<Vec<_>>(), ["nova", "velha"]);
+        assert_eq!(s.newest_unseen("a", "INBOX", 1).unwrap().len(), 1);
     }
 }

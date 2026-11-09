@@ -43,6 +43,14 @@ A chave de assinatura fica em `~/.tauri/posta.key` (senha em `~/.tauri/posta.key
 
 `j`/`k` ou setas navegam, `/` busca, `r` responde, `c` escreve, `u` sincroniza, `Esc` limpa a busca ou volta à lista. No painel de escrita, `Ctrl`/`⌘` + `Enter` envia.
 
+## Rascunhos, assinatura e contas
+
+O painel de escrita salva sozinho (1,5 s após parar de digitar) no banco local; a pasta **Rascunhos** da barra lateral lista e reabre. Fechar com Esc ou X guarda o rascunho; a lixeira descarta (pergunta se há texto); enviar remove o rascunho quando o envio dá certo. Os rascunhos ficam só neste aparelho (não são sincronizados com a pasta Drafts do IMAP).
+
+Em **Configurações**: assinatura por conta (entra em mensagens novas e respostas), notificações de email novo e **Remover conta** ("Remover conta?" apaga senha/refresh do cofre e mensagens, pastas e rascunhos locais; o servidor não é tocado). Com várias contas, a Caixa de entrada junta todas e a barra lateral filtra por conta ("Todas as contas" volta).
+
+Notificações: quando a IDLE ou o sync traz mensagens novas e a janela não está em foco, o sistema mostra remetente e assunto (até 3; acima disso, um resumo). O título da janela leva a contagem de não lidas. No Android 13+ o app pede a permissão ao abrir. O clique na notificação só abre o app no Android; no desktop o plugin não expõe o clique.
+
 ## Envio
 
 SMTP com servidor e porta sugeridos pelo domínio (465 = TLS, outras = STARTTLS). Depois de clicar em Enviar há 4 s para desfazer; se o envio falhar, o rascunho volta intacto. Respostas levam `In-Reply-To`/`References`, a original ganha `\Answered` e uma cópia vai para Enviados (exceto Gmail, que já guarda sozinho; Outlook pode duplicar).
@@ -57,5 +65,5 @@ SMTP com servidor e porta sugeridos pelo domínio (465 = TLS, outras = STARTTLS)
 2. Arquivar e excluir; pastas além da caixa de entrada.
 3. ~~IMAP IDLE para chegada instantânea.~~ Feito.
 4. ~~OAuth (Google e Microsoft).~~ Feito, sem Graph/Gmail API: IMAP/SMTP com XOAUTH2. Falta validar com contas reais (veja `docs/oauth.md`).
-5. ~~Android: APK, senha no Keystore.~~ Feito. Falta sincronizar em segundo plano (WorkManager, 15 min), notificações e login OAuth no Android.
+5. ~~Android: APK, senha no Keystore.~~ Feito. Falta sincronizar em segundo plano (WorkManager, 15 min) e login OAuth no Android; as notificações só chegam com o app aberto (sem serviço em segundo plano).
 6. ~~Emails em HTML, exibidos em iframe isolado.~~ Feito: sem scripts, imagens remotas só com "Mostrar imagens", links no navegador do sistema.
