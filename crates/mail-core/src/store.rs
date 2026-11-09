@@ -33,10 +33,13 @@ CREATE TABLE IF NOT EXISTS messages (
   body_text TEXT NOT NULL DEFAULT '',
   body_html TEXT NOT NULL DEFAULT '',
   seen INTEGER NOT NULL DEFAULT 0,
+  flagged INTEGER NOT NULL DEFAULT 0,
   message_id TEXT NOT NULL DEFAULT '',
   refs TEXT NOT NULL DEFAULT '',
   reply_addr TEXT NOT NULL DEFAULT '',
   attachments TEXT NOT NULL DEFAULT '[]',
+  to_addrs TEXT NOT NULL DEFAULT '',
+  cc_addrs TEXT NOT NULL DEFAULT '',
   UNIQUE (account, mailbox, uid)
 );
 CREATE INDEX IF NOT EXISTS messages_by_date ON messages (date DESC);
@@ -74,6 +77,8 @@ pub struct NewMessage {
     /// HTML original; vazio quando a mensagem só tem texto. A busca continua sobre `body_text`.
     pub body_html: String,
     pub seen: bool,
+    /// Estrela (`\Flagged`).
+    pub flagged: bool,
     /// Message-ID sem os sinais < >.
     pub message_id: String,
     /// IDs de References, separados por espaço, sem < >.
@@ -81,6 +86,9 @@ pub struct NewMessage {
     /// Para quem a resposta vai: Reply-To, ou o remetente.
     pub reply_addr: String,
     pub attachments: Vec<Attachment>,
+    /// Endereços de To e Cc, separados por vírgula (para "Responder a todos").
+    pub to_addrs: String,
+    pub cc_addrs: String,
 }
 
 /// O que é preciso para responder mantendo a conversa agrupada.
@@ -105,6 +113,9 @@ pub struct MessageSummary {
     pub date: i64,
     pub snippet: String,
     pub seen: bool,
+    pub flagged: bool,
+    /// Papel da pasta onde a mensagem está (`inbox`, `trash`...); `None` se a pasta não tem papel.
+    pub role: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -116,6 +127,8 @@ pub struct MessageDetail {
     pub body_html: String,
     pub reply_addr: String,
     pub attachments: Vec<Attachment>,
+    pub to_addrs: String,
+    pub cc_addrs: String,
 }
 
 pub struct Store {
@@ -127,8 +140,12 @@ const IN_ROLE: &str = "m.mailbox = COALESCE(
     (SELECT f.name FROM folders f WHERE f.account = m.account AND f.role = ?1),
     CASE ?1 WHEN 'inbox' THEN 'INBOX' END)";
 
-const SUMMARY_COLS: &str =
-    "m.id, m.account, m.uid, m.from_name, m.from_addr, m.subject, m.date, m.snippet, m.seen";
+const SUMMARY_COLS: &str = "m.id, m.account, m.uid, m.from_name, m.from_addr, m.subject, m.date, m.snippet, m.seen, m.flagged,
+    COALESCE((SELECT f.role FROM folders f WHERE f.account = m.account AND f.name = m.mailbox),
+    CASE WHEN m.mailbox = 'INBOX' THEN 'inbox' END)";
+
+/// Fora da Lixeira e do Spam.
+const NOT_DISCARDED: &str = "COALESCE((SELECT f.role FROM folders f WHERE f.account = m.account AND f.name = m.mailbox), '') NOT IN ('trash', 'junk')";
 
 fn row_to_summary(r: &rusqlite::Row) -> rusqlite::Result<MessageSummary> {
     Ok(MessageSummary {
@@ -141,6 +158,8 @@ fn row_to_summary(r: &rusqlite::Row) -> rusqlite::Result<MessageSummary> {
         date: r.get(6)?,
         snippet: r.get(7)?,
         seen: r.get(8)?,
+        flagged: r.get(9)?,
+        role: r.get(10)?,
     })
 }
 
@@ -228,8 +247,8 @@ impl Store {
             let mut stmt = tx.prepare_cached(
                 "INSERT OR IGNORE INTO messages
                  (account, mailbox, uid, from_name, from_addr, subject, date, snippet, body_text, body_html, seen,
-                  message_id, refs, reply_addr, attachments)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                  message_id, refs, reply_addr, attachments, flagged, to_addrs, cc_addrs)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
             )?;
             for m in msgs {
                 stmt.execute(params![
@@ -247,21 +266,25 @@ impl Store {
                     m.message_id,
                     m.refs,
                     m.reply_addr,
-                    serde_json::to_string(&m.attachments).unwrap_or_else(|_| "[]".into())
+                    serde_json::to_string(&m.attachments).unwrap_or_else(|_| "[]".into()),
+                    m.flagged,
+                    m.to_addrs,
+                    m.cc_addrs
                 ])?;
             }
         }
         Ok(tx.commit()?)
     }
 
-    /// Aplica o estado do servidor: remove o que sumiu e atualiza a flag de lida.
-    pub fn apply_server_state(&mut self, account: &str, mailbox: &str, server: &[(u32, bool)]) -> Result<()> {
+    /// Aplica o estado do servidor: remove o que sumiu e atualiza as flags de lida e estrela.
+    /// Cada item é `(uid, lida, estrela)`.
+    pub fn apply_server_state(&mut self, account: &str, mailbox: &str, server: &[(u32, bool, bool)]) -> Result<()> {
         let tx = self.conn.transaction()?;
-        tx.execute_batch("CREATE TEMP TABLE IF NOT EXISTS server_uids (uid INTEGER PRIMARY KEY, seen INTEGER); DELETE FROM server_uids;")?;
+        tx.execute_batch("CREATE TEMP TABLE IF NOT EXISTS server_uids (uid INTEGER PRIMARY KEY, seen INTEGER, flagged INTEGER); DELETE FROM server_uids;")?;
         {
-            let mut ins = tx.prepare_cached("INSERT OR REPLACE INTO server_uids (uid, seen) VALUES (?1, ?2)")?;
-            for (uid, seen) in server {
-                ins.execute(params![uid, seen])?;
+            let mut ins = tx.prepare_cached("INSERT OR REPLACE INTO server_uids (uid, seen, flagged) VALUES (?1, ?2, ?3)")?;
+            for (uid, seen, flagged) in server {
+                ins.execute(params![uid, seen, flagged])?;
             }
         }
         tx.execute(
@@ -270,9 +293,10 @@ impl Store {
             params![account, mailbox],
         )?;
         tx.execute(
-            "UPDATE messages SET seen = (SELECT s.seen FROM server_uids s WHERE s.uid = messages.uid)
-             WHERE account = ?1 AND mailbox = ?2
-             AND seen <> (SELECT s.seen FROM server_uids s WHERE s.uid = messages.uid)",
+            "UPDATE messages SET seen = s.seen, flagged = s.flagged
+             FROM server_uids s
+             WHERE s.uid = messages.uid AND messages.account = ?1 AND messages.mailbox = ?2
+             AND (messages.seen <> s.seen OR messages.flagged <> s.flagged)",
             params![account, mailbox],
         )?;
         Ok(tx.commit()?)
@@ -282,6 +306,49 @@ impl Store {
         self.conn
             .execute("UPDATE messages SET seen = ?2 WHERE id = ?1", params![id, seen])?;
         Ok(())
+    }
+
+    pub fn set_flagged(&self, id: i64, flagged: bool) -> Result<()> {
+        self.conn
+            .execute("UPDATE messages SET flagged = ?2 WHERE id = ?1", params![id, flagged])?;
+        Ok(())
+    }
+
+    /// Não lidas por papel de pasta, somando as contas (papéis sem pasta ficam em 0).
+    pub fn unread_counts(&self) -> Result<Vec<(Role, u32)>> {
+        let mut stmt = self
+            .conn
+            .prepare_cached(&format!("SELECT COUNT(*) FROM messages m WHERE m.seen = 0 AND {IN_ROLE}"))?;
+        Role::ALL
+            .iter()
+            .map(|r| Ok((*r, stmt.query_row(params![r.as_str()], |row| row.get(0))?)))
+            .collect()
+    }
+
+    /// Pasta virtual "Com estrela": todas as contas, exceto Lixeira e Spam.
+    pub fn list_starred(&self, limit: u32, offset: u32) -> Result<Vec<MessageSummary>> {
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT {SUMMARY_COLS} FROM messages m WHERE m.flagged = 1 AND {NOT_DISCARDED}
+             ORDER BY m.date DESC, m.id DESC LIMIT ?1 OFFSET ?2"
+        ))?;
+        let rows = stmt
+            .query_map(params![limit, offset], row_to_summary)?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(rows)
+    }
+
+    pub fn search_starred(&self, query: &str, limit: u32) -> Result<Vec<MessageSummary>> {
+        let Some(q) = fts_query(query) else {
+            return Ok(Vec::new());
+        };
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT {SUMMARY_COLS} FROM messages_fts f JOIN messages m ON m.id = f.rowid
+             WHERE messages_fts MATCH ?1 AND m.flagged = 1 AND {NOT_DISCARDED} ORDER BY m.date DESC LIMIT ?2"
+        ))?;
+        let rows = stmt
+            .query_map(params![q, limit], row_to_summary)?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(rows)
     }
 
     /// Caixa unificada: todas as contas, mais recentes primeiro.
@@ -314,15 +381,17 @@ impl Store {
         Ok(self
             .conn
             .query_row(
-                &format!("SELECT {SUMMARY_COLS}, m.body_text, m.body_html, m.reply_addr, m.attachments FROM messages m WHERE m.id = ?1"),
+                &format!("SELECT {SUMMARY_COLS}, m.body_text, m.body_html, m.reply_addr, m.attachments, m.to_addrs, m.cc_addrs FROM messages m WHERE m.id = ?1"),
                 params![id],
                 |r| {
                     Ok(MessageDetail {
                         summary: row_to_summary(r)?,
-                        body_text: r.get(9)?,
-                        body_html: r.get(10)?,
-                        reply_addr: r.get(11)?,
-                        attachments: serde_json::from_str(&r.get::<_, String>(12)?).unwrap_or_default(),
+                        body_text: r.get(11)?,
+                        body_html: r.get(12)?,
+                        reply_addr: r.get(13)?,
+                        attachments: serde_json::from_str(&r.get::<_, String>(14)?).unwrap_or_default(),
+                        to_addrs: r.get(15)?,
+                        cc_addrs: r.get(16)?,
                     })
                 },
             )
@@ -449,6 +518,9 @@ mod tests {
             message_id: format!("{uid}@exemplo.com"),
             refs: String::new(),
             reply_addr: "ana@exemplo.com".into(),
+            flagged: false,
+            to_addrs: "eu@exemplo.com, bia@exemplo.com".into(),
+            cc_addrs: String::new(),
         }
     }
 
@@ -474,7 +546,7 @@ mod tests {
         let mut s = Store::open_in_memory().unwrap();
         s.set_uid_validity("a", "INBOX", 1).unwrap();
         s.insert_messages("a", "INBOX", &[msg(1, "x", "", 1), msg(2, "y", "", 2)]).unwrap();
-        s.apply_server_state("a", "INBOX", &[(2, true)]).unwrap();
+        s.apply_server_state("a", "INBOX", &[(2, true, false)]).unwrap();
         let list = s.list("INBOX", 50, 0).unwrap();
         assert_eq!(list.len(), 1);
         assert!(list[0].seen);
@@ -582,5 +654,59 @@ mod tests {
         assert_eq!(d.body_html, "<p>oferta de <b>inverno</b></p>");
         assert_eq!(d.body_text, "oferta de inverno");
         assert!(s.search("strong", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn estrela_e_lida_vem_do_servidor_e_do_usuario() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.set_uid_validity("a", "INBOX", 1).unwrap();
+        s.insert_messages("a", "INBOX", &[msg(1, "x", "", 1), msg(2, "y", "", 2)]).unwrap();
+        let id1 = s.list("INBOX", 5, 0).unwrap().iter().find(|m| m.uid == 1).unwrap().id;
+        s.set_flagged(id1, true).unwrap();
+        s.set_seen(id1, true).unwrap();
+        let m = s.list("INBOX", 5, 0).unwrap().into_iter().find(|m| m.uid == 1).unwrap();
+        assert!(m.flagged && m.seen);
+        assert_eq!(m.role.as_deref(), Some("inbox"));
+        // O servidor manda: tirou a estrela da 1 e marcou a 2.
+        s.apply_server_state("a", "INBOX", &[(1, true, false), (2, false, true)]).unwrap();
+        let list = s.list("INBOX", 5, 0).unwrap();
+        assert!(!list.iter().find(|m| m.uid == 1).unwrap().flagged);
+        assert!(list.iter().find(|m| m.uid == 2).unwrap().flagged);
+    }
+
+    #[test]
+    fn nao_lidas_por_pasta_e_pasta_com_estrela() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.set_folders("a", &folders_a()).unwrap();
+        s.insert_messages("a", "INBOX", &[msg(1, "a", "", 1), msg(2, "b cotacao", "", 2)]).unwrap();
+        s.insert_messages("a", "Lixeira", &[msg(3, "lixo", "", 3)]).unwrap();
+        let get = |s: &Store, role| s.unread_counts().unwrap().into_iter().find(|(r, _)| *r == role).unwrap().1;
+        assert_eq!((get(&s, Role::Inbox), get(&s, Role::Trash), get(&s, Role::Junk)), (2, 1, 0));
+        let ids: Vec<_> = s.list("INBOX", 5, 0).unwrap().iter().map(|m| m.id).collect();
+        s.set_seen(ids[0], true).unwrap();
+        assert_eq!(get(&s, Role::Inbox), 1);
+
+        // Estrela em mensagem da Entrada e da Lixeira: a Lixeira fica fora da pasta virtual.
+        let trash_id = s.list_folder(Role::Trash, 5, 0).unwrap()[0].id;
+        s.set_flagged(trash_id, true).unwrap();
+        s.set_flagged(ids[0], true).unwrap();
+        let starred = s.list_starred(10, 0).unwrap();
+        assert_eq!(starred.len(), 1);
+        assert_eq!(starred[0].id, ids[0]);
+        assert_eq!(s.search_starred("cotacao", 10).unwrap().len(), 1);
+        assert!(s.search_starred("lixo", 10).unwrap().is_empty());
+        s.set_flagged(ids[0], false).unwrap();
+        assert!(s.list_starred(10, 0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn detalhe_traz_to_e_cc_para_responder_a_todos() {
+        let mut s = Store::open_in_memory().unwrap();
+        let mut m = msg(1, "x", "", 1);
+        m.cc_addrs = "carla@exemplo.com".into();
+        s.insert_messages("a", "INBOX", &[m]).unwrap();
+        let id = s.list("INBOX", 1, 0).unwrap()[0].id;
+        let d = s.get(id).unwrap().unwrap();
+        assert_eq!((d.to_addrs.as_str(), d.cc_addrs.as_str()), ("eu@exemplo.com, bia@exemplo.com", "carla@exemplo.com"));
     }
 }

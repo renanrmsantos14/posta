@@ -9,7 +9,7 @@ pub mod store;
 
 pub use attachments::Attachment;
 pub use folders::{Folder, Role};
-pub use imap_sync::{AuthMode, IdleEnd, ImapAccount, Security, SmtpServer, SyncReport};
+pub use imap_sync::{AuthMode, IdleEnd, ImapAccount, MsgFlag, Security, SmtpServer, SyncReport};
 pub use send::{OutAttachment, Outgoing, SendReport};
 pub use store::{MessageDetail, MessageSummary, ReplyRef, Store};
 

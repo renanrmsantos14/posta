@@ -311,3 +311,84 @@ fn envia_com_anexo_e_cc_e_le_de_volta() {
         assert_eq!(data, conteudo);
     }
 }
+
+fn server_flags(acc: &ImapAccount, uid: u32) -> Vec<imap::types::Flag<'static>> {
+    let mut s = session(acc);
+    s.select("INBOX").unwrap();
+    let f = s.uid_fetch(uid.to_string(), "FLAGS").unwrap();
+    let flags = f.iter().next().unwrap().flags().iter().map(|f| f.clone().into_owned()).collect();
+    s.logout().ok();
+    flags
+}
+
+#[test]
+fn marca_lida_e_estrela_no_servidor_e_em_lote() {
+    use imap::types::Flag;
+    let Some(acc) = account("flg") else { return };
+    let mut s = session(&acc);
+    s.append("INBOX", &raw(1, "Um")).finish().unwrap();
+    s.append("INBOX", &raw(2, "Dois")).finish().unwrap();
+    s.append("INBOX", &raw(3, "Tres")).flag(Flag::Flagged).finish().unwrap();
+    s.logout().ok();
+
+    let mut store = Store::open_in_memory().unwrap();
+    imap_sync::sync_mailbox(&acc, &mut store, "INBOX", None).unwrap();
+    let list = store.list("INBOX", 10, 0).unwrap();
+    let by = |subject: &str| list.iter().find(|m| m.subject == subject).unwrap().clone();
+    // A estrela que já estava no servidor chega ao banco local.
+    assert!(by("Tres").flagged && !by("Um").flagged);
+    assert_eq!(store.list_starred(10, 0).unwrap().len(), 1);
+
+    // Estrela e lida no servidor, conferidas direto nele e depois pelo sync.
+    let (um, dois) = (by("Um").uid, by("Dois").uid);
+    imap_sync::set_flag(&acc, "INBOX", &[um], imap_sync::MsgFlag::Flagged, true).unwrap();
+    imap_sync::set_seen(&acc, "INBOX", um, true).unwrap();
+    let flags = server_flags(&acc, um);
+    assert!(flags.contains(&Flag::Flagged) && flags.contains(&Flag::Seen), "{flags:?}");
+    assert!(!server_flags(&acc, dois).contains(&Flag::Seen));
+
+    // Lote: marca as duas como lidas de uma vez e tira a estrela da terceira.
+    imap_sync::set_flag(&acc, "INBOX", &[um, dois], imap_sync::MsgFlag::Seen, true).unwrap();
+    imap_sync::set_flag(&acc, "INBOX", &[by("Tres").uid], imap_sync::MsgFlag::Flagged, false).unwrap();
+    imap_sync::set_flag(&acc, "INBOX", &[um], imap_sync::MsgFlag::Seen, false).unwrap();
+    assert!(!server_flags(&acc, um).contains(&Flag::Seen));
+    assert!(server_flags(&acc, dois).contains(&Flag::Seen));
+    assert!(!server_flags(&acc, by("Tres").uid).contains(&Flag::Flagged));
+
+    imap_sync::sync_mailbox(&acc, &mut store, "INBOX", None).unwrap();
+    let list = store.list("INBOX", 10, 0).unwrap();
+    let by = |subject: &str| list.iter().find(|m| m.subject == subject).unwrap().clone();
+    assert!(by("Um").flagged && !by("Um").seen);
+    assert!(by("Dois").seen && !by("Tres").flagged);
+    assert_eq!(store.list_starred(10, 0).unwrap().len(), 1);
+}
+
+#[test]
+fn move_e_exclui_varias_de_uma_vez() {
+    let Some(acc) = account("lote") else { return };
+    let mut s = session(&acc);
+    for i in 0..4 {
+        s.append("INBOX", &raw(i, &format!("M{i}"))).finish().unwrap();
+    }
+    s.logout().ok();
+    let folders = imap_sync::discover_folders(&acc).unwrap();
+    let archive = folders.iter().find(|f| f.role == Role::Archive).unwrap().name.clone();
+
+    let mut store = Store::open_in_memory().unwrap();
+    store.set_folders(&acc.id, &folders).unwrap();
+    imap_sync::sync_mailbox(&acc, &mut store, "INBOX", None).unwrap();
+    let uids: Vec<u32> = store.list("INBOX", 10, 0).unwrap().iter().map(|m| m.uid).collect();
+
+    imap_sync::move_messages(&acc, "INBOX", &uids[..3], &archive).unwrap();
+    imap_sync::sync_mailbox(&acc, &mut store, "INBOX", None).unwrap();
+    imap_sync::sync_mailbox(&acc, &mut store, &archive, Some(1000)).unwrap();
+    assert_eq!(store.list_folder(Role::Inbox, 10, 0).unwrap().len(), 1);
+    let arquivo = store.list_folder(Role::Archive, 10, 0).unwrap();
+    assert_eq!(arquivo.len(), 3);
+    assert_eq!(arquivo[0].role.as_deref(), Some("archive"));
+
+    let alvo: Vec<u32> = arquivo.iter().map(|m| m.uid).collect();
+    imap_sync::delete_forever_many(&acc, &archive, &alvo).unwrap();
+    imap_sync::sync_mailbox(&acc, &mut store, &archive, Some(1000)).unwrap();
+    assert!(store.list_folder(Role::Archive, 10, 0).unwrap().is_empty());
+}

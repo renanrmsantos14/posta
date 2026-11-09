@@ -1,5 +1,5 @@
 // Dados de exemplo para rodar a UI no navegador (pnpm dev), sem Tauri e sem rede.
-import type { Account, Draft, Provider, MessageDetail, MessageSummary, NewAccount, Role, SendReport, SyncResult } from "./api";
+import type { Account, Draft, Provider, MessageDetail, MessageSummary, NewAccount, Role, SendReport, SyncResult, UnreadCounts, View } from "./api";
 
 const now = Math.floor(Date.now() / 1000);
 const H = 3600;
@@ -36,8 +36,11 @@ let messages: MockMessage[] = Array.from({ length: 60 }, (_, i) => {
     body_text: `${body}\n\nAbraço,\n${from_name.split(" ")[0]}`,
     body_html: "",
     seen: i > 2 && i % 4 !== 0,
+    flagged: i % 7 === 2,
     reply_addr: from_addr,
     attachments: [],
+    to_addrs: "renan@exemplo.com",
+    cc_addrs: i % 3 === 0 ? "carla.mendes@outlook.com, pedro@antunes.dev" : "",
     role: "inbox",
   };
 });
@@ -55,7 +58,7 @@ htmlSamples.forEach(([from_name, from_addr, subject, text, html, hoursAgo], i) =
   messages.unshift({
     id, account: accounts[0].id, uid: id, from_name, from_addr, subject,
     date: now - Math.round(hoursAgo * H), snippet: text, body_text: text, body_html: html,
-    seen: false, reply_addr: from_addr, attachments: [], role: "inbox",
+    seen: false, flagged: false, reply_addr: from_addr, attachments: [], to_addrs: "renan@exemplo.com", cc_addrs: "", role: "inbox",
   });
 });
 
@@ -90,12 +93,15 @@ extra.forEach(([role, name, addr, subject, body], i) => {
     id, account: accounts[0].id, uid: id,
     from_name: mine ? "Renan" : name, from_addr: mine ? "renan@exemplo.com" : addr,
     subject, date: now - (i + 1) * 30 * H, snippet: body, body_text: `${body}\n\n${mine ? "Renan" : name}`, body_html: "",
-    seen: true, reply_addr: addr, attachments: [], role,
+    seen: true, flagged: false, reply_addr: addr, attachments: [], to_addrs: mine ? addr : "renan@exemplo.com", cc_addrs: "", role,
   });
 });
 
 const norm = (s: string) => s.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase();
-const summary = ({ body_text: _b, body_html: _h, reply_addr: _r, attachments: _a, role: _o, ...s }: MockMessage): MessageSummary => s;
+const summary = ({ body_text: _b, body_html: _h, reply_addr: _r, attachments: _a, to_addrs: _t, cc_addrs: _c, ...s }: MockMessage): MessageSummary => s;
+/** Pasta virtual: com estrela e fora de Lixeira e Spam. */
+const inView = (m: MockMessage, view: View) =>
+  view === "starred" ? m.flagged && m.role !== "trash" && m.role !== "junk" : m.role === view;
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 let syncCount = 0;
 
@@ -136,20 +142,20 @@ export const mockApi = {
       {
         id, account: accounts[0].id, uid: id, from_name: "Marina Duarte", from_addr: "marina@lumenarquitetura.com.br",
         subject: "Orçamento aprovado", date: Math.floor(Date.now() / 1000),
-        snippet: "Tudo certo com o orçamento. Podemos assinar na segunda?", body_text: "Tudo certo com o orçamento. Podemos assinar na segunda?\n\nMarina", body_html: "", seen: false,
-        reply_addr: "marina@lumenarquitetura.com.br", attachments: [], role: "inbox",
+        snippet: "Tudo certo com o orçamento. Podemos assinar na segunda?", body_text: "Tudo certo com o orçamento. Podemos assinar na segunda?\n\nMarina", body_html: "", seen: false, flagged: false,
+        reply_addr: "marina@lumenarquitetura.com.br", attachments: [], to_addrs: "renan@exemplo.com", cc_addrs: "", role: "inbox",
       },
       ...messages,
     ];
     return { fetched: 1, total: messages.length, errors: [], skipped: false };
   },
-  async list(role: Role, limit: number, offset: number): Promise<MessageSummary[]> {
-    return messages.filter((m) => m.role === role).sort((a, b) => b.date - a.date).slice(offset, offset + limit).map(summary);
+  async list(view: View, limit: number, offset: number): Promise<MessageSummary[]> {
+    return messages.filter((m) => inView(m, view)).sort((a, b) => b.date - a.date).slice(offset, offset + limit).map(summary);
   },
-  async search(query: string, role: Role): Promise<MessageSummary[]> {
+  async search(query: string, view: View): Promise<MessageSummary[]> {
     const terms = norm(query).split(/\s+/).filter(Boolean);
     return messages
-      .filter((m) => m.role === role && terms.every((t) => norm(`${m.subject} ${m.from_name} ${m.from_addr} ${m.body_text}`).includes(t)))
+      .filter((m) => inView(m, view) && terms.every((t) => norm(`${m.subject} ${m.from_name} ${m.from_addr} ${m.body_text}`).includes(t)))
       .sort((a, b) => b.date - a.date)
       .map(summary);
   },
@@ -167,6 +173,12 @@ export const mockApi = {
     if (m.subject.toLowerCase().includes("fatura")) throw "IMAP: servidor recusou o MOVE";
     m.role = role;
   },
+  async moveMany(ids: number[], role: Role): Promise<void> {
+    await wait(400);
+    const found = messages.filter((x) => ids.includes(x.id));
+    if (found.some((m) => m.subject.toLowerCase().includes("fatura"))) throw "IMAP: servidor recusou o MOVE";
+    found.forEach((m) => { m.role = role; });
+  },
   async deleteForever(id: number): Promise<void> {
     await wait(400);
     messages = messages.filter((x) => x.id !== id);
@@ -178,6 +190,28 @@ export const mockApi = {
     if (!a) throw "anexo não encontrado na mensagem";
     if (a.name.includes("falha")) throw "IMAP: conexão recusada";
     return `/home/renan/Downloads/${a.name}`;
+  },
+  async deleteForeverMany(ids: number[]): Promise<void> {
+    await wait(400);
+    messages = messages.filter((x) => !ids.includes(x.id));
+  },
+  async setSeen(ids: number[], seen: boolean): Promise<void> {
+    await wait(150);
+    messages.forEach((m) => { if (ids.includes(m.id)) m.seen = seen; });
+  },
+  async setFlagged(ids: number[], flagged: boolean): Promise<void> {
+    await wait(150);
+    messages.forEach((m) => { if (ids.includes(m.id)) m.flagged = flagged; });
+  },
+  async unreadCounts(): Promise<UnreadCounts> {
+    const out: UnreadCounts = {};
+    for (const m of messages) if (!m.seen && m.role) out[m.role] = (out[m.role] ?? 0) + 1;
+    return out;
+  },
+  async forwardAttachments(id: number): Promise<OutAttachment[]> {
+    await wait(200);
+    const list = messages.find((x) => x.id === id)?.attachments ?? [];
+    return list.map((a) => ({ name: a.name, mime: a.mime, data: btoa(`conteúdo de ${a.name}`.replace(/[^\x00-\xff]/g, "?")) }));
   },
   /** Para testar a falha: qualquer destinatário com "erro". */
   async send(d: Draft): Promise<SendReport> {

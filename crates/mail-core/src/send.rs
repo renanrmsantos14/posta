@@ -29,7 +29,7 @@ pub struct Outgoing {
 }
 
 /// Arquivo anexado ao rascunho; o conteúdo vem em base64.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OutAttachment {
     pub name: String,
     #[serde(default)]

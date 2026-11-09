@@ -77,6 +77,19 @@ pub fn extract(raw: &[u8], index: u32) -> Option<(Attachment, Vec<u8>)> {
     Some((att, data))
 }
 
+/// Anexos listados de uma mensagem, prontos para reenviar (encaminhar): conteúdo em base64.
+pub fn to_outgoing(raw: &[u8], listed: &[Attachment]) -> Vec<crate::send::OutAttachment> {
+    listed
+        .iter()
+        .filter_map(|a| extract(raw, a.index))
+        .map(|(a, data)| crate::send::OutAttachment {
+            name: a.name,
+            mime: a.mime,
+            data: base64::engine::general_purpose::STANDARD.encode(data),
+        })
+        .collect()
+}
+
 /// Nome seguro para gravar em disco: sem pastas, sem caracteres proibidos no Windows.
 pub fn safe_name(name: &str) -> String {
     let base = name.rsplit(['/', '\\']).next().unwrap_or("");
@@ -123,6 +136,15 @@ Content-Type: multipart/mixed; boundary=\"m\"\r\n\r\n\
         let (_, txt) = extract(RAW, l[1].index).unwrap();
         assert_eq!(txt, b"linha um");
         assert!(extract(RAW, 99).is_none());
+    }
+
+    #[test]
+    fn prepara_anexos_para_encaminhar() {
+        let l = list(&MessageParser::default().parse(RAW).unwrap(), "<img src=\"cid:logo@x\">");
+        let out = to_outgoing(RAW, &l);
+        assert_eq!(out.len(), 2);
+        assert_eq!((out[0].name.as_str(), out[0].data.as_str()), ("proposta.pdf", "SGVsbG8gUERG"));
+        assert_eq!(out[1].mime, "text/plain");
     }
 
     #[test]
