@@ -212,6 +212,7 @@ fn parse(uid: u32, raw: &[u8], seen: bool, flagged: bool, fallback_date: i64, ow
         reply_addr,
         to_addrs: msg.as_ref().map(|m| addresses(m.to())).unwrap_or_default(),
         cc_addrs: msg.as_ref().map(|m| addresses(m.cc())).unwrap_or_default(),
+        header_only: false,
     }
 }
 

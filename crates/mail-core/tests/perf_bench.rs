@@ -181,7 +181,7 @@ fn bench_local() {
             body_html: m.html_body().filter_map(|p| p.text()).collect::<Vec<_>>().join("\n"),
             attachments: vec![], seen: i % 10 < 3, flagged: false, message_id: format!("m{i}@x"),
             refs: if i % 5 == 4 { format!("m{}@x", i - 1) } else { String::new() },
-            reply_addr: format!("p{}@ex{}.com", i % 300, i % 30), to_addrs: "eu@exemplo.com".into(), cc_addrs: format!("c{}@ex.com", i % 50),
+            reply_addr: format!("p{}@ex{}.com", i % 300, i % 30), to_addrs: "eu@exemplo.com".into(), cc_addrs: format!("c{}@ex.com", i % 50), ..Default::default()
         }
     };
     let t0 = Instant::now();

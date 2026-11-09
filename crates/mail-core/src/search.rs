@@ -324,7 +324,7 @@ mod tests {
             body_text: "corpo do translado".into(), body_html: String::new(),
             attachments: if att { vec![crate::Attachment { name: "a.pdf".into(), mime: "application/pdf".into(), size: 1, index: 1 }] } else { vec![] },
             seen, message_id: format!("{uid}@x"), refs: String::new(), reply_addr: String::new(), flagged: false,
-            to_addrs: "eu@y.com".into(), cc_addrs: String::new(),
+            to_addrs: "eu@y.com".into(), cc_addrs: String::new(), ..Default::default()
         }
     }
 
