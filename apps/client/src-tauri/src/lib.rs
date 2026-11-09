@@ -1584,11 +1584,21 @@ fn start_scheduler(app: AppHandle) {
     });
 }
 
+/// O rustls-native-certs não conhece os certificados do Android; aponta para a pasta do sistema.
+/// Uma pasta só: o imap usa rustls-native-certs 0.7, que não aceita lista separada por ':'
+/// (vira um caminho inexistente e o IMAP fica sem nenhuma raiz confiável).
+/// Vale para o app e para o processo aberto só pelo `SyncWorker`.
+#[cfg(target_os = "android")]
+pub(crate) fn android_cert_dir() {
+    let apex = "/apex/com.android.conscrypt/cacerts";
+    let dir = if std::path::Path::new(apex).is_dir() { apex } else { "/system/etc/security/cacerts" };
+    std::env::set_var("SSL_CERT_DIR", dir);
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // O rustls-native-certs não conhece os certificados do Android; aponta para a pasta do sistema.
     #[cfg(target_os = "android")]
-    std::env::set_var("SSL_CERT_DIR", "/apex/com.android.conscrypt/cacerts:/system/etc/security/cacerts");
+    android_cert_dir();
     tauri::Builder::default()
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_opener::init())
