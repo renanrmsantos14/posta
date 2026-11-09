@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowBendUpLeft, ArrowBendDoubleUpLeft, ArrowBendUpRight, ArrowsClockwise, Archive, Copy, FolderOpen, FolderSimple, NotePencil, Star, Tag, Trash, EnvelopeSimple, EnvelopeSimpleOpen, FloppyDisk, PaperPlaneTilt, Printer, PushPin, Clock } from "@phosphor-icons/react";
+import { ArrowBendUpLeft, ArrowBendDoubleUpLeft, ArrowBendUpRight, ArrowsClockwise, Archive, Copy, FolderOpen, FolderSimple, NotePencil, Star, Tag, Trash, EnvelopeSimple, EnvelopeSimpleOpen, FloppyDisk, Printer, PushPin, Clock } from "@phosphor-icons/react";
 import { api, isTauri, type Account, type Attachment, type MailDelta, type MessageDetail, type MessageSummary, type OutAttachment, type OutboxItem, type Role, type Settings, type StoredDraft, type UnreadCounts, type UserFolder, type View } from "./api";
 import { AccountDialog } from "./AccountDialog";
 import { parseCategories } from "./Categories";
 import { FolderDialog, type FolderDialogState } from "./FolderDialog";
 import { OutboxPane, useQueue } from "./Offline";
+import { DraftList, ScheduledList } from "./DraftLists";
 import { boxView, catView, parseBox, parseCat, roleOf } from "./views";
 import { Composer, type ComposeInit } from "./Composer";
 import { aliasFor, aliasLines, addrOf } from "./aliases";
@@ -29,7 +30,7 @@ import { MessageList, type Density, type ListHandle, type ListRow } from "./Mess
 import { PAGE, useMessageList } from "./useMessageList";
 import { ContextMenu, type MenuItem, type MenuState } from "./ContextMenu";
 import { ContactCard, parseContact, type ContactState } from "./ContactCard";
-import { fmtLong, shortDate } from "./dates";
+import { fmtLong } from "./dates";
 import { isFocused, repliedThreads } from "./focus";
 import { dropUndo, popUndo, pushUndo } from "./undo";
 import { isTyping, ownsKeys, shortcutOf, type ShortcutAction } from "./shortcuts";
@@ -1495,44 +1496,11 @@ export default function App() {
           )}
 
           {showScheduled ? (
-            scheduled.length === 0 ? (
-              <div className="empty quiet"><p>Nenhuma mensagem agendada</p></div>
-            ) : (
-              <ul className="plain-list" aria-label="Agendados">
-                {scheduled.map((s) => (
-                  <li key={s.id} className="row plain-row draft-row" tabIndex={0} onClick={() => editScheduled(s)}
-                    onKeyDown={(e) => { if (e.key === "Enter" && e.target === e.currentTarget) editScheduled(s); }}>
-                    <PaperPlaneTilt size={13} weight="bold" className="sched-icon" aria-hidden />
-                    <span className="from">{s.to.trim() || "(sem destinatário)"}</span>
-                    <time className="date" dateTime={new Date(s.send_at * 1000).toISOString()}>{whenLabel(s.send_at)}</time>
-                    <span className="subject">{s.subject || "(sem assunto)"}</span>
-                    <span className="snippet sched-status" data-failed={s.status === "failed" || undefined}>
-                      {s.status === "failed" ? `Falhou: ${s.error}` : s.status === "sending" ? "Enviando…" : "Aguardando a hora"}
-                      <button type="button" className="btn ghost small" onClick={(e) => { e.stopPropagation(); cancelScheduled(s); }}>Cancelar envio</button>
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            )
+            <ScheduledList items={scheduled} onEdit={editScheduled} onCancel={cancelScheduled} />
           ) : showOutbox ? (
             <OutboxPane items={outbox} accounts={(accounts ?? []).map((a) => a.id)} online={net.online} onChange={refreshOutbox} />
           ) : showDrafts ? (
-            draftsShown.length === 0 ? (
-              <div className="empty quiet"><p>Nenhum rascunho</p></div>
-            ) : (
-              <ul className="plain-list" aria-label="Rascunhos">
-                {draftsShown.map((d) => (
-                  <li key={d.id} className="row plain-row draft-row" tabIndex={0} onClick={() => openDraft(d)}
-                    onKeyDown={(e) => { if (e.key === "Enter" && e.target === e.currentTarget) openDraft(d); }}>
-                    <span className="dot" aria-hidden />
-                    <span className="from">{d.to.trim() || "(sem destinatário)"}</span>
-                    <time className="date" dateTime={new Date(d.updated * 1000).toISOString()}>{shortDate(d.updated)}</time>
-                    <span className="subject">{d.subject || "(sem assunto)"}</span>
-                    <span className="snippet">{d.body.trim().replace(/\s+/g, " ").slice(0, 200)}</span>
-                  </li>
-                ))}
-              </ul>
-            )
+            <DraftList items={draftsShown} onOpen={openDraft} />
           ) : empty ? (
             <div className="empty">
               <EnvelopeSimple size={28} weight="duotone" />
