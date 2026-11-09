@@ -41,7 +41,15 @@ A chave de assinatura fica em `~/.tauri/posta.key` (senha em `~/.tauri/posta.key
 
 ## Atalhos
 
-`j`/`k` ou setas navegam, `/` busca, `r` responde, `a` responde a todos, `f` encaminha, `c` escreve, `e` arquiva, `#` exclui, `s` marca com estrela, `u` marca como não lida, `Esc` limpa a busca, a seleção ou volta à lista. Com mensagens marcadas (caixa de seleção; Shift marca um intervalo), `e`, `#`, `s` e `u` valem para todas. Atalhos por teclado não têm animação. "Com estrela" é uma visão local (exclui Lixeira e Spam); lida e estrela sincronizam com o servidor (`\Seen`, `\Flagged`). No painel de escrita, `Ctrl`/`⌘` + `Enter` envia.
+`j`/`k` ou setas navegam, `/` busca, `r` responde, `a` responde a todos (remetente em Para, os demais em Cc, sem você), `f` encaminha (leva os anexos da original), `c` escreve, `e` arquiva, `#` exclui, `s` marca com estrela, `u` marca como não lida, `Esc` limpa a busca, a seleção ou volta à lista. Com mensagens marcadas (caixa de seleção; Shift marca um intervalo), `e`, `#`, `s` e `u` valem para todas. Atalhos por teclado não têm animação. "Com estrela" é uma visão local (exclui Lixeira e Spam); lida e estrela sincronizam com o servidor (`\Seen`, `\Flagged`). No painel de escrita, `Ctrl`/`⌘` + `Enter` envia.
+
+## Rascunhos, assinatura e contas
+
+O painel de escrita salva sozinho (1,5 s após parar de digitar; Cc e Bcc entram no rascunho, anexos não) no banco local; a pasta **Rascunhos** da barra lateral lista e reabre. Fechar com Esc ou X guarda o rascunho; a lixeira descarta (pergunta se há texto); enviar remove o rascunho quando o envio dá certo. Os rascunhos ficam só neste aparelho (não são sincronizados com a pasta Drafts do IMAP).
+
+Em **Configurações**: assinatura por conta (entra em mensagens novas e respostas), notificações de email novo e **Remover conta** ("Remover conta?" apaga senha/refresh do cofre e mensagens, pastas e rascunhos locais; o servidor não é tocado). Com várias contas, a Caixa de entrada junta todas e a barra lateral filtra por conta ("Todas as contas" volta).
+
+Notificações: quando a IDLE ou o sync traz mensagens novas e a janela não está em foco, o sistema mostra remetente e assunto (até 3; acima disso, um resumo). O título da janela leva a contagem de não lidas. No Android 13+ o app pede a permissão ao abrir. O clique na notificação só abre o app no Android; no desktop o plugin não expõe o clique.
 
 ## Envio
 
@@ -57,5 +65,5 @@ SMTP com servidor e porta sugeridos pelo domínio (465 = TLS, outras = STARTTLS)
 2. Arquivar e excluir; pastas além da caixa de entrada.
 3. ~~IMAP IDLE para chegada instantânea.~~ Feito.
 4. ~~OAuth (Google e Microsoft).~~ Feito, sem Graph/Gmail API: IMAP/SMTP com XOAUTH2. Falta validar com contas reais (veja `docs/oauth.md`).
-5. ~~Android: APK, senha no Keystore.~~ Feito. Falta sincronizar em segundo plano (WorkManager, 15 min), notificações e login OAuth no Android.
+5. ~~Android: APK, senha no Keystore.~~ Feito. Falta sincronizar em segundo plano (WorkManager, 15 min) e login OAuth no Android; as notificações só chegam com o app aberto (sem serviço em segundo plano).
 6. ~~Emails em HTML, exibidos em iframe isolado.~~ Feito: sem scripts, imagens remotas só com "Mostrar imagens", links no navegador do sistema.

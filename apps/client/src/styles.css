@@ -441,6 +441,23 @@ kbd {
 .switch:checked::after { transform: translateX(14px); }
 .switch:focus-visible { outline: 2px solid var(--muted); outline-offset: 2px; }
 
+.settings-col { display: flex; flex-direction: column; gap: 8px; padding: 8px 0 12px; border-top: 1px solid var(--line); }
+.settings-col select, .signature-input {
+  width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px;
+  background: var(--bg); color: var(--strong);
+}
+.signature-input { resize: vertical; min-height: 72px; font: inherit; line-height: 1.45; }
+.settings-col select:focus, .signature-input:focus { outline: 0; border-color: var(--muted); background: var(--surface); }
+.settings-account { min-width: 0; }
+.settings-account > div { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.draft-saved { font-size: 12px; color: var(--faint); animation: fade-in 200ms ease; }
+@keyframes fade-in { from { opacity: 0; } }
+.nav-item .count.plain { background: var(--selected); color: var(--muted); }
+.account-btn { width: 100%; background: transparent; border: 0; text-align: left; cursor: pointer; border-radius: 8px; }
+.account-btn:hover { background: var(--selected); }
+.account-btn[aria-pressed="true"] { background: var(--selected); color: var(--strong); }
+.draft-row { cursor: pointer; }
+.draft-row .from { font-weight: 500; }
 .update-versions { margin: -6px 0 0; font: 13px/1 var(--mono); color: var(--muted); }
 .update-versions strong { color: var(--green); font-weight: 500; }
 .update-notes {
