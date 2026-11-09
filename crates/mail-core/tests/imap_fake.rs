@@ -678,6 +678,22 @@ fn mover_sem_move_nao_duplica_quando_a_copia_ja_foi_feita() {
 }
 
 #[test]
+fn copiar_mantem_a_original_e_repetir_nao_duplica() {
+    let (acc, srv, _) = start("IDLE MOVE UIDPLUS");
+    srv.lock().unwrap().add(0);
+    srv.lock().unwrap().add(0);
+    let hub = Hub::new();
+    mail_core::outbox::apply_op_via(&hub, &acc, "INBOX", &[1], mail_core::OpKind::Copy, "Clientes").unwrap();
+    assert_eq!((count_in(&srv, "INBOX"), count_in(&srv, "Clientes")), (2, 1));
+    // Repetição depois de uma queda: o Message-ID já está no destino.
+    mail_core::outbox::apply_op_via(&hub, &acc, "INBOX", &[1], mail_core::OpKind::Copy, "Clientes").unwrap();
+    assert_eq!(count_in(&srv, "Clientes"), 1);
+    // Lote com um já copiado e um novo; UID inexistente é ignorado.
+    mail_core::outbox::apply_op_via(&hub, &acc, "INBOX", &[1, 2, 99], mail_core::OpKind::Copy, "Clientes").unwrap();
+    assert_eq!((count_in(&srv, "INBOX"), count_in(&srv, "Clientes")), (2, 2));
+}
+
+#[test]
 fn excluir_de_vez_repetido_e_sucesso() {
     let (acc, srv, _) = start("IDLE UIDPLUS");
     srv.lock().unwrap().add(0);

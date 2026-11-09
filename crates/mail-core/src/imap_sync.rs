@@ -722,6 +722,35 @@ pub fn move_messages_on(live: &mut Live, from: &str, uids: &[u32], to: &str) -> 
     Ok(())
 }
 
+/// Copia para `to` mantendo a original. Idempotente: o que já existe no destino (mesmo Message-ID)
+/// não é copiado de novo, então repetir depois de uma queda não duplica.
+pub fn copy_messages_on(live: &mut Live, from: &str, uids: &[u32], to: &str) -> Result<()> {
+    if uids.is_empty() || from == to {
+        return Ok(());
+    }
+    live.s.select(from)?;
+    let here = present(&mut live.s, uids)?;
+    if here.is_empty() {
+        return Ok(());
+    }
+    live.s.select(to)?;
+    let mut to_copy: Vec<u32> = Vec::new();
+    for (uid, id) in &here {
+        let known = match id {
+            Some(id) => !live.s.uid_search(format!("HEADER Message-ID \"{}\"", id.replace(['\\', '"'], "")))?.is_empty(),
+            None => false,
+        };
+        if !known {
+            to_copy.push(*uid);
+        }
+    }
+    if !to_copy.is_empty() {
+        live.s.select(from)?;
+        live.s.uid_copy(uid_set(&to_copy), to)?;
+    }
+    Ok(())
+}
+
 /// Apaga de vez (usado dentro da Lixeira).
 pub fn delete_forever(acc: &ImapAccount, mailbox: &str, uid: u32) -> Result<()> {
     delete_forever_many(acc, mailbox, &[uid])
