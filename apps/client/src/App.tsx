@@ -1649,7 +1649,7 @@ export default function App() {
             ) : (
               <ul className="plain-list" aria-label="Agendados">
                 {scheduled.map((s) => (
-                  <li key={s.id} className="plain-row draft-row" tabIndex={0} onClick={() => editScheduled(s)}
+                  <li key={s.id} className="row plain-row draft-row" tabIndex={0} onClick={() => editScheduled(s)}
                     onKeyDown={(e) => { if (e.key === "Enter" && e.target === e.currentTarget) editScheduled(s); }}>
                     <PaperPlaneTilt size={13} weight="bold" className="sched-icon" aria-hidden />
                     <span className="from">{s.to.trim() || "(sem destinatário)"}</span>
@@ -1671,7 +1671,7 @@ export default function App() {
             ) : (
               <ul className="plain-list" aria-label="Rascunhos">
                 {draftsShown.map((d) => (
-                  <li key={d.id} className="plain-row draft-row" tabIndex={0} onClick={() => openDraft(d)}
+                  <li key={d.id} className="row plain-row draft-row" tabIndex={0} onClick={() => openDraft(d)}
                     onKeyDown={(e) => { if (e.key === "Enter" && e.target === e.currentTarget) openDraft(d); }}>
                     <span className="dot" aria-hidden />
                     <span className="from">{d.to.trim() || "(sem destinatário)"}</span>

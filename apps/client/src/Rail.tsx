@@ -3,7 +3,7 @@ import { FileText, PaperPlaneTilt, Plus, Clock } from "@phosphor-icons/react";
 import type { Account, Category, UserFolder, View } from "./api";
 import { FolderTree } from "./FolderTree";
 import { PageLayout } from "./layout/primitives";
-import { FOLDERS, viewInfo, type FolderNode } from "./folders";
+import { viewInfo, type FolderNode } from "./folders";
 
 type NavView = "all" | "inbox" | "starred" | "sent" | "archive" | "trash" | "junk";
 
@@ -43,17 +43,17 @@ export function Rail(p: Props) {
     const { label, icon: Icon } = viewInfo(view, p.userFolders, p.categories);
     const n = p.unread(view);
     return (
-      <button key={key} type="button" className="nav-item" title={label} aria-current={here(view)} onClick={() => p.open(view)}
+      <button key={key} type="button" className="nav-item" title={label} aria-label={n > 0 ? `${label}, ${n} não lidas` : label} aria-current={here(view)} onClick={() => p.open(view)}
         onContextMenu={(e) => { e.preventDefault(); p.onContext(e.clientX, e.clientY, view); }}
         {...(view === "starred" || view === "all" ? {} : p.drop(view, view))}>
-        <span className="nav-icon"><Icon size={16} weight="bold" />{n > 0 && <span className="count" aria-label={`${n} não lidas`}>{n}</span>}</span>
+        <span className="nav-icon"><Icon size={16} weight="bold" />{n > 0 && <span className="count" aria-hidden>{n}</span>}</span>
         <span className="nav-label">{label}</span>
       </button>
     );
   };
   const extra = (label: string, Icon: typeof FileText, n: number, current: boolean, run: () => void) => (
-    <button type="button" className="nav-item" title={label} onClick={run} aria-current={current ? "page" : undefined}>
-      <span className="nav-icon"><Icon size={16} weight="bold" />{n > 0 && <span className="count plain" aria-label={`${n}`}>{n}</span>}</span>
+    <button type="button" className="nav-item" title={label} aria-label={n > 0 ? `${label}, ${n}` : label} onClick={run} aria-current={current ? "page" : undefined}>
+      <span className="nav-icon"><Icon size={16} weight="bold" />{n > 0 && <span className="count plain" aria-hidden>{n}</span>}</span>
       <span className="nav-label">{label}</span>
     </button>
   );
@@ -96,12 +96,10 @@ export function Rail(p: Props) {
             <span className="account-name">{a.username}</span>
           </div>
         ))}
-        <button type="button" className="btn ghost small add-account" onClick={p.onAddAccount}>
+        <button type="button" className="btn ghost small add-account" aria-label="Adicionar conta" onClick={p.onAddAccount}>
           <Plus size={14} weight="bold" /> <span>Adicionar conta</span>
         </button>
       </div>
     </PageLayout>
   );
 }
-
-export { FOLDERS };
