@@ -960,6 +960,7 @@ async fn remove_account(app: AppHandle, id: String) -> CmdResult<()> {
         st.save_accounts(&accounts)?;
         st.tokens.lock().unwrap().remove(&id);
         st.hub.drop_account(&id);
+        send::forget(&id);
         st.store.lock().unwrap().remove_account(&id).map_err(err)
     })
     .await
