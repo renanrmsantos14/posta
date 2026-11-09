@@ -26,6 +26,8 @@ struct Server {
     log: Vec<String>,
     /// Derruba a conexão, sem responder, quando chegar um comando que comece com isto (uma vez).
     drop_on: Option<String>,
+    /// Imita o Greenmail: sem espaço entre `BODY[]<0>` e o literal.
+    no_space: bool,
     conns: usize,
 }
 
@@ -76,6 +78,7 @@ fn start(caps: &str) -> (ImapAccount, Shared, Arc<AtomicUsize>) {
         msgs: Vec::new(),
         log: Vec::new(),
         drop_on: None,
+        no_space: false,
         conns: 0,
     }));
     let count = Arc::new(AtomicUsize::new(0));
@@ -190,7 +193,8 @@ fn serve(conn: TcpStream, srv: Shared) {
                 };
                 match body {
                     Some((name, data)) => {
-                        bin.extend(format!("* {} FETCH ({item} {name} {{{}}}\r\n", i + 1, data.len()).as_bytes());
+                        let sp = if s.no_space && name.contains('<') { "" } else { " " };
+                        bin.extend(format!("* {} FETCH ({item} {name}{sp}{{{}}}\r\n", i + 1, data.len()).as_bytes());
                         bin.extend(&data);
                         bin.extend(b")\r\n");
                     }
@@ -359,6 +363,46 @@ fn mensagem_grande_vem_sem_corpo_e_o_corpo_e_baixado_sob_demanda() {
     // A sessão persistente foi reaproveitada: uma conexão só para tudo isso.
     assert_eq!(count.load(Ordering::SeqCst), 1);
     assert!(hub.is_open(&acc.id, Kind::Cmd));
+}
+
+#[test]
+fn servidor_que_nao_le_resposta_parcial_cai_para_mensagem_inteira() {
+    let (acc, srv, _) = start("IDLE");
+    {
+        let mut s = srv.lock().unwrap();
+        s.no_space = true;
+        s.add(0);
+        s.add(600);
+    }
+    let mut store = Store::open_in_memory().unwrap();
+    // A primeira tentativa tropeça na resposta; a repetição baixa sem leitura parcial.
+    let r = imap_sync::sync_mailbox(&acc, &mut store, "INBOX", None).unwrap();
+    assert_eq!(r.fetched, 2);
+    assert!(r.delta.inserted.iter().all(|id| store.get(*id).unwrap().unwrap().body_loaded));
+    // Daqui em diante nem tenta a leitura parcial.
+    srv.lock().unwrap().add(600);
+    srv.lock().unwrap().log.clear();
+    assert_eq!(imap_sync::sync_mailbox(&acc, &mut store, "INBOX", None).unwrap().fetched, 1);
+    assert!(!cmds(&srv).iter().any(|c| c.contains("<0.")), "{:?}", cmds(&srv));
+}
+
+#[test]
+fn janela_menor_que_a_pasta_amplia_baixando_so_o_que_falta() {
+    let (acc, srv, _) = start("IDLE CONDSTORE ENABLE");
+    {
+        let mut s = srv.lock().unwrap();
+        for _ in 0..5 {
+            s.add(0);
+        }
+    }
+    let mut store = Store::open_in_memory().unwrap();
+    assert_eq!(imap_sync::sync_mailbox(&acc, &mut store, "INBOX", Some(2)).unwrap().fetched, 2);
+    // Janela já preenchida: segue incremental, sem baixar nada.
+    let r = imap_sync::sync_mailbox(&acc, &mut store, "INBOX", Some(2)).unwrap();
+    assert_eq!((r.fetched, r.mode), (0, "condstore"));
+    // Janela maior: completa só o que falta.
+    assert_eq!(imap_sync::sync_mailbox(&acc, &mut store, "INBOX", Some(4)).unwrap().fetched, 2);
+    assert_eq!(imap_sync::sync_mailbox(&acc, &mut store, "INBOX", None).unwrap().fetched, 1);
 }
 
 #[test]

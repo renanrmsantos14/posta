@@ -4,6 +4,7 @@ use imap::{ClientBuilder, ConnectionMode, Session};
 use mail_parser::{MessageParser, PartKind};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashSet};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use imap::types::UnsolicitedResponse;
@@ -118,6 +119,18 @@ const PREVIEW_BYTES: usize = 8192;
 const BODY_BATCH: usize = 10;
 /// Quantas das mensagens mais novas (por UID) a sync incremental sem QRESYNC reconfere (flags e exclusões).
 const RECENT_WINDOW: u32 = 500;
+
+/// Servidores cuja resposta a `BODY[]<0.N>` não deu para ler (o Greenmail, por exemplo, omite o espaço
+/// antes do literal, contra o RFC 3501). Neles a sync baixa a mensagem inteira, como antes.
+static NO_PARTIAL: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+fn server_key(acc: &ImapAccount) -> String {
+    format!("{}:{}", acc.host, acc.port)
+}
+
+fn partial_broken(acc: &ImapAccount) -> bool {
+    NO_PARTIAL.lock().unwrap_or_else(|p| p.into_inner()).contains(&server_key(acc))
+}
 
 pub(crate) type ImapSession = Session<imap::Connection>;
 
@@ -258,10 +271,17 @@ fn is_flagged(fetch: &imap::types::Fetch) -> bool {
 /// Traz a pasta para o banco local numa conexão só dela (abre e fecha). Para repetir sync, prefira `Hub` + `sync_on`.
 /// `Some(n)`: só baixa as n mais recentes do servidor; as locais mais antigas ficam.
 pub fn sync_mailbox(acc: &ImapAccount, store: &mut Store, mailbox: &str, keep: Option<usize>) -> Result<SyncReport> {
-    let mut live = Live::open(acc)?;
-    let report = sync_on(&mut live, acc, store, mailbox, keep);
-    live.logout();
-    report
+    loop {
+        let was_broken = partial_broken(acc);
+        let mut live = Live::open(acc)?;
+        let report = sync_on(&mut live, acc, store, mailbox, keep);
+        live.logout();
+        // O servidor acabou de se revelar incompatível com a leitura parcial: repete já sem ela.
+        if report.is_err() && !was_broken && partial_broken(acc) {
+            continue;
+        }
+        return report;
+    }
 }
 
 /// Flags (UID, lida, estrela) das mensagens do conjunto `set` que casam com `query`.
@@ -292,7 +312,9 @@ pub fn sync_on(live: &mut Live, acc: &ImapAccount, store: &mut Store, mailbox: &
     let validity = sel.uid_validity.unwrap_or(0);
     let prev = store.sync_state(&acc.id, mailbox)?;
     store.set_uid_validity(&acc.id, mailbox, validity)?;
-    let base = prev.filter(|p| p.uid_validity == validity && p.uid_next > 0);
+    // Cópia incompleta (janela anterior): só segue incremental se a janela pedida agora já está preenchida.
+    let have = store.count_box(&acc.id, mailbox)? as usize;
+    let base = prev.filter(|p| p.uid_validity == validity && p.uid_next > 0 && (p.complete || keep.is_some_and(|n| have >= n)));
     let (highest, uid_next) = (sel.highest_mod_seq.unwrap_or(0), sel.uid_next.unwrap_or(0));
     let mut report = SyncReport { total: sel.exists as usize, ..Default::default() };
 
@@ -354,17 +376,31 @@ pub fn sync_on(live: &mut Live, acc: &ImapAccount, store: &mut Store, mailbox: &
 /// (`body_loaded = 0`) até alguém abrir a mensagem ou o prefetch chegar nela. Devolve os ids gravados.
 fn download(session: &mut ImapSession, acc: &ImapAccount, store: &mut Store, mailbox: &str, uids: &[u32]) -> Result<Vec<i64>> {
     let mut ids = Vec::new();
-    let query = format!("(UID FLAGS INTERNALDATE BODYSTRUCTURE BODY.PEEK[]<0.{PREVIEW_BYTES}>)");
+    let partial = !partial_broken(acc);
+    let query = if partial {
+        format!("(UID FLAGS INTERNALDATE BODYSTRUCTURE BODY.PEEK[]<0.{PREVIEW_BYTES}>)")
+    } else {
+        "(UID FLAGS INTERNALDATE BODYSTRUCTURE BODY.PEEK[])".to_string()
+    };
     for chunk in uids.chunks(BATCH) {
         let set = chunk.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
-        let fetches = session.uid_fetch(&set, &query)?;
+        let fetches = match session.uid_fetch(&set, &query) {
+            Ok(f) => f,
+            // Resposta ilegível: a conexão ficou dessincronizada. Anota o servidor e derruba a sessão;
+            // a nova tentativa (Hub ou sync_mailbox) já baixa sem leitura parcial.
+            Err(e) if partial && !matches!(e, imap::Error::Io(_) | imap::Error::ConnectionLost) => {
+                NO_PARTIAL.lock().unwrap_or_else(|p| p.into_inner()).push(server_key(acc));
+                return Err(imap::Error::ConnectionLost.into());
+            }
+            Err(e) => return Err(e.into()),
+        };
         let msgs: Vec<NewMessage> = fetches
             .iter()
             .filter_map(|f| {
                 let date = f.internal_date().map(|d| d.timestamp()).unwrap_or(0);
                 let raw = f.body()?;
                 let mut m = parse(f.uid?, raw, is_seen(f), is_flagged(f), date, &acc.username);
-                if raw.len() >= PREVIEW_BYTES {
+                if partial && raw.len() >= PREVIEW_BYTES {
                     // Cortada: o HTML pela metade não serve, e a lista de anexos vem da estrutura MIME.
                     m.header_only = true;
                     m.body_html.clear();
