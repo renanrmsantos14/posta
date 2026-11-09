@@ -260,7 +260,15 @@ pub fn sync_mailbox(acc: &ImapAccount, store: &mut Store, mailbox: &str, keep: O
     let missing: Vec<u32> = newest.into_iter().filter(|u| !local.contains(u)).collect();
 
     let mut report = SyncReport { fetched: 0, total: server.len() };
-    for chunk in missing.chunks(BATCH) {
+    report.fetched = download(&mut session, acc, store, mailbox, &missing)?;
+    session.logout().ok();
+    Ok(report)
+}
+
+/// Baixa e grava as mensagens de `uids` (já com a pasta selecionada). Devolve quantas gravou.
+fn download(session: &mut ImapSession, acc: &ImapAccount, store: &mut Store, mailbox: &str, uids: &[u32]) -> Result<usize> {
+    let mut fetched = 0;
+    for chunk in uids.chunks(BATCH) {
         let set = chunk.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
         let fetches = session.uid_fetch(&set, "(UID FLAGS INTERNALDATE BODY.PEEK[])")?;
         let msgs: Vec<NewMessage> = fetches
@@ -270,11 +278,27 @@ pub fn sync_mailbox(acc: &ImapAccount, store: &mut Store, mailbox: &str, keep: O
                 Some(parse(f.uid?, f.body()?, is_seen(f), is_flagged(f), date, &acc.username))
             })
             .collect();
-        report.fetched += msgs.len();
+        fetched += msgs.len();
         store.insert_messages(&acc.id, mailbox, &msgs)?;
     }
+    Ok(fetched)
+}
+
+/// Busca no servidor (IMAP SEARCH) na pasta. Mensagens que ainda não estão no banco local são baixadas,
+/// para a lista poder mostrá-las. Devolve os UIDs encontrados, em ordem decrescente.
+pub fn search_server(acc: &ImapAccount, store: &mut Store, mailbox: &str, filters: &crate::search::Filters) -> Result<Vec<u32>> {
+    let Some(query) = filters.imap_query() else {
+        return Ok(Vec::new());
+    };
+    let mut session = connect(acc)?;
+    session.select(mailbox)?;
+    let mut found: Vec<u32> = session.uid_search(&query)?.into_iter().collect();
+    found.sort_unstable_by(|a, b| b.cmp(a));
+    let local: HashSet<u32> = store.local_uids(&acc.id, mailbox)?.into_iter().collect();
+    let missing: Vec<u32> = found.iter().copied().filter(|u| !local.contains(u)).collect();
+    download(&mut session, acc, store, mailbox, &missing)?;
     session.logout().ok();
-    Ok(report)
+    Ok(found)
 }
 
 fn special(attrs: &[NameAttribute]) -> Option<&'static str> {

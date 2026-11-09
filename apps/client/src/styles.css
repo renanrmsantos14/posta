@@ -903,3 +903,29 @@ kbd {
   background: var(--bg); color: var(--text); font-size: 14px;
 }
 .cat-name:focus { outline: 0; border-color: var(--muted); background: var(--surface); }
+
+/* Produtividade: adiar/agendar, regras, modelos, fixadas */
+.when-menu { min-width: 220px; }
+.when-menu small { margin-left: auto; color: var(--faint); font-size: 12px; }
+.when-menu[data-up] { top: auto; bottom: calc(100% + 4px); transform-origin: bottom right; }
+.when-custom { display: flex; gap: 6px; align-items: center; padding: 6px 4px 2px; border-top: 1px solid var(--line); margin-top: 4px; }
+.when-custom input { flex: 1; min-width: 0; height: 32px; padding: 0 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); font-size: 13px; }
+.rule-row { flex-wrap: wrap; gap: 8px; align-items: center; }
+.rule-row[data-off] { opacity: 0.55; }
+.rule-row select, .rule-row .rule-text {
+  height: 32px; padding: 0 8px; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--bg); color: var(--text); font-size: 13px; min-width: 0;
+}
+.rule-row .rule-text { flex: 1 1 140px; }
+.rule-if { color: var(--muted); font-size: 13px; }
+.rule-warn { color: #b3261e; font-size: 12px; }
+.rule-actions { gap: 8px; flex-wrap: wrap; }
+.tpl-card { gap: 6px; }
+.tpl-head { display: flex; gap: 6px; align-items: center; }
+.vacation-on { justify-content: space-between; }
+.pin-mark { flex: none; margin-right: 4px; color: var(--muted); vertical-align: -1px; }
+.sched-icon { flex: none; color: var(--muted); }
+.sched-status { display: flex; align-items: center; gap: 8px; }
+.sched-status[data-failed] { color: #b3261e; }
+.result-meta { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.actions .cat-menu { right: auto; left: 0; transform-origin: top left; }

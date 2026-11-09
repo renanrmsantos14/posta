@@ -1,8 +1,9 @@
 // Configurações em página inteira: menu de seções à esquerda; voltar (botão ou Esc) devolve a caixa de entrada.
 import { useEffect, useState } from "react";
-import { ArrowLeft, ArrowsClockwise, Bell, Gauge, Keyboard, PencilSimple, Plus, Tag, Trash, UserCircle, Layout, X } from "@phosphor-icons/react";
+import { AirplaneTilt, ArrowLeft, ArrowsClockwise, Bell, ChatTeardropText, FunnelSimple, Gauge, Keyboard, PencilSimple, Plus, Tag, Trash, UserCircle, Layout, X } from "@phosphor-icons/react";
 import { api, type Account, type Settings } from "./api";
 import { AccountEditDialog } from "./AccountEditDialog";
+import { RulesSection, TemplatesSection, VacationSection } from "./ProductivitySettings";
 import { MAX_CATEGORIES, PALETTE, parseCategories } from "./Categories";
 import { autoCheck, checkUpdate, setAutoCheck, type Update } from "./updater";
 import { toast } from "./toast";
@@ -19,11 +20,16 @@ interface Props {
   onAccountSaved: (a: Account) => void;
   onClose: () => void;
   onUpdate: (u: Update) => void;
+  /** "Aplicar agora à Entrada": roda as regras e atualiza a lista. */
+  onApplyRules: () => Promise<void>;
 }
 
 const SECTIONS = [
   { id: "accounts", label: "Contas", icon: UserCircle },
   { id: "categories", label: "Categorias", icon: Tag },
+  { id: "rules", label: "Regras", icon: FunnelSimple },
+  { id: "templates", label: "Respostas prontas", icon: ChatTeardropText },
+  { id: "vacation", label: "Férias", icon: AirplaneTilt },
   { id: "layout", label: "Leitura e layout", icon: Layout },
   { id: "write", label: "Escrita", icon: PencilSimple },
   { id: "notify", label: "Notificações", icon: Bell },
@@ -38,6 +44,8 @@ const SHORTCUTS: [string, string][] = [
   ["e", "Arquivar"], ["#", "Excluir"], ["s", "Estrela"], ["u", "Marcar como não lida"],
   ["Shift + clique", "Marcar várias mensagens"], ["Clique duplo", "Abrir a mensagem em tela cheia"],
   ["Esc", "Sair da tela cheia, limpar a busca ou a seleção"],
+  ["p", "Fixar no topo"],
+  ["de: para: assunto: tem:anexo é:não-lida antes: depois:", "Filtros da busca"],
 ];
 
 const UNDO_OPTIONS = ["4", "10", "20", "30"];
@@ -68,7 +76,7 @@ function Row({ title, sub, children }: { title: string; sub?: string; children: 
   );
 }
 
-export function SettingsPage({ accounts, settings, onSetting, onRemoveAccount, onAddAccount, onAccountSaved, onClose, onUpdate }: Props) {
+export function SettingsPage({ accounts, settings, onSetting, onRemoveAccount, onAddAccount, onAccountSaved, onClose, onUpdate, onApplyRules }: Props) {
   const [section, setSection] = useState<SectionId>("accounts");
   const [auto, setAuto] = useState(autoCheck);
   const [checking, setChecking] = useState(false);
@@ -201,6 +209,10 @@ export function SettingsPage({ accounts, settings, onSetting, onRemoveAccount, o
               </div>
             </section>
           )}
+
+          {section === "rules" && <RulesSection settings={settings} onSetting={onSetting} onApply={onApplyRules} />}
+          {section === "templates" && <TemplatesSection settings={settings} onSetting={onSetting} />}
+          {section === "vacation" && <VacationSection settings={settings} onSetting={onSetting} />}
 
           {section === "layout" && (
             <section className="settings-group" aria-label="Leitura e layout">

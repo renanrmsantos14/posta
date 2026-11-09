@@ -3,12 +3,14 @@
 // (com confirmação se há texto). Ctrl/Cmd+Enter envia.
 // O corpo é um editor formatado (contentEditable); `draft.html` é a fonte e `draft.body` o texto simples derivado.
 import { useEffect, useRef, useState } from "react";
-import { Eraser, File as FileIcon, LinkSimple, ListBullets, ListNumbers, Paperclip, PaperPlaneTilt, Quotes, TextB, TextItalic, TextUnderline, Trash, X } from "@phosphor-icons/react";
+import { ChatTeardropText, Clock, Eraser, File as FileIcon, LinkSimple, ListBullets, ListNumbers, Paperclip, PaperPlaneTilt, Quotes, TextB, TextItalic, TextUnderline, Trash, X } from "@phosphor-icons/react";
 import { api, type Account, type Draft, type OutAttachment } from "./api";
 import { fmtSize } from "./format";
 import { Recipients } from "./Recipients";
 import { escapeHtml, htmlToText, outgoingHtml, sanitizeHtml, textToHtml } from "./richtext";
 import { toast } from "./toast";
+import { type Template } from "./productivity";
+import { useDismiss, WhenMenu } from "./WhenMenu";
 
 export interface ComposeInit extends Draft {
   title: string;
@@ -22,6 +24,10 @@ interface Props {
   init: ComposeInit;
   accounts: Account[];
   onSend: (draft: ComposeInit) => void;
+  /** Agenda o envio para `at` (Unix). Resolve quando o app guardou; rejeita com o motivo (o painel continua aberto). */
+  onSchedule: (draft: ComposeInit, at: number) => Promise<void>;
+  /** Respostas prontas para inserir no corpo. */
+  templates: Template[];
   onDiscard: () => void;
 }
 
@@ -58,7 +64,7 @@ function readBase64(file: File): Promise<string> {
   });
 }
 
-export function Composer({ init, accounts, onSend, onDiscard }: Props) {
+export function Composer({ init, accounts, onSend, onSchedule, templates, onDiscard }: Props) {
   const [base] = useState(() => { const html = initialHtml(init); return { html, body: htmlToText(html) }; });
   const [draft, setDraft] = useState<ComposeInit>(() => ({ ...init, ...base }));
   const [link, setLink] = useState<string | null>(null);
@@ -169,7 +175,8 @@ export function Composer({ init, accounts, onSend, onDiscard }: Props) {
     else discard();
   }
 
-  function send() {
+  /** Confere os destinatários; devolve a mensagem pronta para sair, ou null (e mostra o erro). */
+  function ready(): ComposeInit | null {
     // `latest` já traz o chip recém-confirmado, que o render ainda não refletiu.
     const draft = latest.current;
     const problem = invalidRecipient(draft.to);
@@ -177,16 +184,48 @@ export function Composer({ init, accounts, onSend, onDiscard }: Props) {
       setError(problem);
       setErrorKey((k) => k + 1);
       toRef.current?.focus();
-      return;
+      return null;
     }
     const badCopy = badAddress(draft.cc ?? "") ?? badAddress(draft.bcc ?? "");
     if (badCopy) {
       setShowCc(true);
       setError(`Endereço inválido: ${badCopy}`);
       setErrorKey((k) => k + 1);
-      return;
+      return null;
     }
-    leave(() => onSend({ ...draft, html: outgoingHtml(draft.html ?? ""), draftId }));
+    return { ...draft, html: outgoingHtml(draft.html ?? ""), draftId };
+  }
+
+  function send() {
+    const out = ready();
+    if (out) leave(() => onSend(out));
+  }
+
+  async function schedule(at: number) {
+    const out = ready();
+    if (!out) return;
+    try {
+      await onSchedule(out, at);
+    } catch (e) {
+      setError(`Não foi possível agendar: ${e}`);
+      setErrorKey((k) => k + 1);
+    }
+  }
+
+  /** Insere a resposta pronta onde está o cursor (ou no fim do corpo). */
+  function insertTemplate(t: Template) {
+    const el = bodyRef.current;
+    if (!el) return;
+    el.focus();
+    if (!el.contains(window.getSelection()?.anchorNode ?? null)) {
+      const r = document.createRange();
+      r.selectNodeContents(el);
+      r.collapse(false);
+      window.getSelection()?.removeAllRanges();
+      window.getSelection()?.addRange(r);
+    }
+    document.execCommand("insertHTML", false, textToHtml(t.body));
+    onEditorInput();
   }
 
   useEffect(() => {
@@ -388,6 +427,10 @@ export function Composer({ init, accounts, onSend, onDiscard }: Props) {
         <button type="button" className="btn primary" onClick={send}>
           <PaperPlaneTilt size={15} weight="fill" /> Enviar
         </button>
+        <WhenMenu label="Enviar mais tarde" className="icon-btn" up onPick={schedule}>
+          <Clock size={16} weight="bold" />
+        </WhenMenu>
+        <TemplateMenu templates={templates} onPick={insertTemplate} />
         <input ref={fileRef} type="file" multiple hidden onChange={(e) => void addFiles(e.target.files)} />
         <button type="button" className="icon-btn" aria-label="Anexar arquivos" title="Anexar arquivos"
           onClick={() => fileRef.current?.click()}>
@@ -410,5 +453,30 @@ export function Composer({ init, accounts, onSend, onDiscard }: Props) {
         </div>
       )}
     </section>
+  );
+}
+
+/** Botão "Modelos": lista as respostas prontas e insere a escolhida. */
+function TemplateMenu({ templates, onPick }: { templates: Template[]; onPick: (t: Template) => void }) {
+  const [open, setOpen] = useState(false);
+  const root = useRef<HTMLSpanElement>(null);
+  useDismiss(open, () => setOpen(false), root);
+  return (
+    <span className="cat-picker" ref={root}>
+      <button type="button" className="icon-btn" aria-label="Modelos de resposta" title="Modelos de resposta" aria-haspopup="menu" aria-expanded={open}
+        onMouseDown={(e) => e.preventDefault()} onClick={() => setOpen((o) => !o)}>
+        <ChatTeardropText size={16} weight="bold" />
+      </button>
+      {open && (
+        <div className="cat-menu when-menu" data-up role="menu" aria-label="Modelos de resposta">
+          {templates.filter((t) => t.body.trim()).map((t) => (
+            <button key={t.id} type="button" role="menuitem" onClick={() => { setOpen(false); onPick(t); }}>
+              <span>{t.name || "(sem nome)"}</span>
+            </button>
+          ))}
+          {!templates.some((t) => t.body.trim()) && <p className="cat-empty">Crie modelos em Configurações, Respostas prontas.</p>}
+        </div>
+      )}
+    </span>
   );
 }
