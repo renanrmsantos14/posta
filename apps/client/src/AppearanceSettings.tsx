@@ -54,13 +54,23 @@ export function AppearanceSection({ settings, onSetting, onPreview, accentAdjust
 
   // Cor do seletor: confirma ~0,4 s depois do último movimento (a tela já mostra o resultado enquanto arrasta).
   const timer = useRef<number | undefined>(undefined);
-  useEffect(() => () => window.clearTimeout(timer.current), []);
+  const pending = useRef<string | null>(null);
+  const commit = useRef(onSetting);
+  commit.current = onSetting;
+  const flush = () => {
+    window.clearTimeout(timer.current);
+    if (pending.current !== null) commit.current("accent", pending.current);
+    pending.current = null;
+  };
+  useEffect(() => flush, []); // sair da página antes dos 0,4 s não perde a cor
   function dragAccent(value: string) {
     onPreview("accent", value);
+    pending.current = value;
     window.clearTimeout(timer.current);
-    timer.current = window.setTimeout(() => onSetting("accent", value), 400);
+    timer.current = window.setTimeout(flush, 400);
   }
   function setAccent(value: string) {
+    pending.current = null;
     window.clearTimeout(timer.current);
     onSetting("accent", value);
     toast(value ? "Cor de destaque aplicada" : "Cor de destaque do tema restaurada", "success");
