@@ -1,5 +1,5 @@
 // Dados de exemplo para rodar a UI no navegador (pnpm dev), sem Tauri e sem rede.
-import type { Account, Contact, Draft, FlushReport, MailDelta, MessagePage, OutboxItem, QueueStatus, Provider, MessageDetail, MessageSummary, NewAccount, OutAttachment, Role, ScheduledEdit, SendReport, Settings, StoredDraft, SyncResult, UnreadCounts, UserFolder, View } from "./api";
+import type { Account, Contact, Draft, DragFiles, FlushReport, FolderUnread, MailDelta, MessagePage, OutboxItem, QueueStatus, Provider, MessageDetail, MessageSummary, NewAccount, OutAttachment, Role, ScheduledEdit, SendReport, Settings, StoredDraft, SyncResult, UnreadCounts, UserFolder, View } from "./api";
 import { parseRules, type ScheduledItem } from "./productivity";
 import { parseBox, parseCat } from "./views";
 
@@ -138,7 +138,7 @@ let settings: Settings = { [`signature:${accounts[0].id}`]: "Renan\nBetinhos Exe
 try { settings = { ...settings, ...JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? "{}") }; } catch { /* sem armazenamento */ }
 
 // Pastas do usuário de exemplo (separador "/"), com duas mensagens na subpasta.
-let userFolders: UserFolder[] = ["Clientes", "Clientes/Lumen"].map((name) => ({ account: accounts[0].id, name, delimiter: "/" }));
+let userFolders: UserFolder[] = ["Clientes", "Clientes/Lumen", "Clientes/Lumen/Obras", "Projetos"].map((name) => ({ account: accounts[0].id, name, delimiter: "/" }));
 messages.filter((m) => m.id === 1 || m.id === 5).forEach((m) => { m.role = null; m.box = "Clientes/Lumen"; });
 const inTree = (m: MockMessage, name: string) => !!m.box && (m.box === name || m.box.startsWith(`${name}/`));
 const leaf = (name: string) => {
@@ -414,6 +414,37 @@ export const mockApi = {
     if (found.some((m) => m.subject.toLowerCase().includes("fatura"))) throw "IMAP: servidor recusou o MOVE";
     found.forEach((m) => { m.role = null; m.box = folder; });
     return found.length;
+  },
+  /** Copia sem tirar da origem; devolve quantas foram copiadas (só as da mesma conta da pasta). */
+  async copyToFolder(ids: number[], account: string, folder: string): Promise<number> {
+    await wait(400);
+    const found = messages.filter((x) => ids.includes(x.id) && x.account === account && x.box !== folder);
+    if (found.some((m) => m.subject.toLowerCase().includes("fatura"))) throw "IMAP: servidor recusou o COPY";
+    const top = Math.max(...messages.map((m) => m.id));
+    found.forEach((m, i) => messages.push({ ...m, id: top + 1 + i, role: null, box: folder }));
+    return found.length;
+  },
+  async copyMany(ids: number[], role: Role): Promise<number> {
+    await wait(400);
+    const found = messages.filter((x) => ids.includes(x.id) && x.role !== role);
+    const top = Math.max(...messages.map((m) => m.id));
+    found.forEach((m, i) => messages.push({ ...m, id: top + 1 + i, role, box: undefined }));
+    return found.length;
+  },
+  async userFolderUnread(): Promise<FolderUnread[]> {
+    const out = new Map<string, FolderUnread>();
+    for (const m of messages) {
+      if (!m.box || m.seen) continue;
+      const k = `${m.account}\u0000${m.box}`;
+      out.set(k, { account: m.account, name: m.box, unread: (out.get(k)?.unread ?? 0) + 1 });
+    }
+    return [...out.values()];
+  },
+  async prepareDragEml(_ids: number[]): Promise<DragFiles> {
+    throw "arrastar para fora só funciona no app instalado";
+  },
+  async prepareDragAttachment(_id: number, _index: number): Promise<DragFiles> {
+    throw "arrastar para fora só funciona no app instalado";
   },
   async setCategory(ids: number[], category: string | null): Promise<void> {
     await wait(100);

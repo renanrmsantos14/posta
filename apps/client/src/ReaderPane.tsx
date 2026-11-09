@@ -38,6 +38,8 @@ export interface ReaderPaneProps {
   onToggleThread: (id: number) => void;
   onShowImages: (id: number) => void;
   onSaveAttachment: (id: number, a: Attachment) => void;
+  /** Botão pressionado no anexo: arrastar para fora da janela entrega o arquivo ao sistema. */
+  onDragAttachment: (e: React.PointerEvent, id: number, a: Attachment) => void;
 }
 
 function Recipients({ label, v, onContact }: { label: string; v: string; onContact: ReaderPaneProps["onContact"] }) {
@@ -86,7 +88,8 @@ function MessageView({ d, fold, p }: { d: MessageDetail; fold: boolean; p: Reade
           {d.attachments.map((a) => (
             <li key={a.index}>
               <button type="button" className="chip attachment" disabled={p.savingAtt === `${d.id}:${a.index}`}
-                title={`Salvar e abrir ${a.name}`} onClick={() => p.onSaveAttachment(d.id, a)}>
+                title={`Salvar e abrir ${a.name}`} onClick={() => p.onSaveAttachment(d.id, a)}
+                onPointerDown={(e) => p.onDragAttachment(e, d.id, a)}>
                 <Paperclip size={14} weight="bold" aria-hidden />
                 <span className="chip-name">{a.name}</span>
                 <span className="chip-size">{fmtSize(a.size)}</span>

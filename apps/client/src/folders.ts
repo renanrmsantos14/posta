@@ -75,3 +75,38 @@ export function viewInfo(view: View, folders: UserFolder[], categories: Category
   if (cat) return { label: categories.find((c) => c.id === cat)?.name ?? "Categoria", icon: Tag, empty: "Nenhuma mensagem nesta categoria" };
   return FOLDERS[view as Role | "starred" | "all"];
 }
+
+/** Pastas abertas ou fechadas à mão: chave da pasta -> aberta. Sem entrada, vale o padrão (só o primeiro nível aberto). */
+export type OpenMap = Record<string, boolean>;
+
+export const folderKey = (n: { account: string; name: string }) => `${n.account}\u0000${n.name}`;
+
+const isChild = (p: FolderNode, c: FolderNode) => c.account === p.account && c.name.startsWith(p.name + p.delimiter);
+
+/** Quantas pastas logo depois de `i` são descendentes dela (a árvore ordenada as deixa contíguas). */
+export function descendants(nodes: FolderNode[], i: number): number {
+  let n = 0;
+  while (i + 1 + n < nodes.length && isChild(nodes[i], nodes[i + 1 + n])) n++;
+  return n;
+}
+
+export const isFolderOpen = (n: FolderNode, open: OpenMap) => open[folderKey(n)] ?? n.depth === 0;
+
+/** Índices das pastas visíveis: as que têm algum ancestral fechado ficam de fora. */
+export function visibleFolders(nodes: FolderNode[], open: OpenMap): number[] {
+  const out: number[] = [];
+  for (let i = 0; i < nodes.length; i++) {
+    out.push(i);
+    if (!isFolderOpen(nodes[i], open)) i += descendants(nodes, i);
+  }
+  return out;
+}
+
+export function parseOpenMap(raw: string | undefined): OpenMap {
+  try {
+    const v: unknown = JSON.parse(raw ?? "{}");
+    return v && typeof v === "object" && !Array.isArray(v) ? (v as OpenMap) : {};
+  } catch {
+    return {};
+  }
+}

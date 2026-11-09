@@ -70,6 +70,8 @@ function readBase64(file: File): Promise<string> {
 export function Composer({ init, accounts, settings, onSend, onSchedule, templates, onDiscard }: Props) {
   const [base] = useState(() => { const html = initialHtml(init); return { html, body: htmlToText(html) }; });
   const [draft, setDraft] = useState<ComposeInit>(() => ({ ...init, ...base }));
+  /** Arquivo do sistema passando por cima do compositor: realça e, ao soltar, anexa. */
+  const [fileOver, setFileOver] = useState(false);
   const [link, setLink] = useState<string | null>(null);
   const linkRange = useRef<Range | null>(null);
   const [error, setError] = useState("");
@@ -335,13 +337,20 @@ export function Composer({ init, accounts, settings, onSend, onSchedule, templat
     setAttachNote(refused.length ? `Não anexado (limite de 25 MB no total ou falha na leitura): ${refused.join(", ")}` : "");
   }
 
+  const hasFiles = (e: React.DragEvent) => Array.from(e.dataTransfer.types).includes("Files");
+  const fileDrop = {
+    onDragOver: (e: React.DragEvent) => { if (!hasFiles(e)) return; e.preventDefault(); e.dataTransfer.dropEffect = "copy"; setFileOver(true); },
+    onDragLeave: (e: React.DragEvent) => { if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setFileOver(false); },
+    onDrop: (e: React.DragEvent) => { if (!hasFiles(e)) return; e.preventDefault(); setFileOver(false); void addFiles(e.dataTransfer.files); },
+  };
+
   const removeFile = (i: number) => {
     setDraft((d) => ({ ...d, attachments: (d.attachments ?? []).filter((_, j) => j !== i) }));
     setAttachNote("");
   };
 
   return (
-    <section className="composer" role="dialog" aria-labelledby="composer-title" data-leaving={leaving || undefined}>
+    <section className="composer" role="dialog" aria-labelledby="composer-title" data-leaving={leaving || undefined} data-fileover={fileOver || undefined} {...fileDrop}>
       <header className="composer-head">
         <h2 id="composer-title">{draft.title}</h2>
         <button type="button" className="icon-btn" aria-label="Fechar" onClick={requestClose}>

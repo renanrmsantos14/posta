@@ -161,6 +161,19 @@ export interface UserFolder {
   delimiter: string;
 }
 
+/** Não lidas de uma pasta do usuário. */
+export interface FolderUnread {
+  account: string;
+  name: string;
+  unread: number;
+}
+
+/** Arquivos temporários prontos para o arrasto nativo para fora do app, e a miniatura do cursor. */
+export interface DragFiles {
+  files: string[];
+  icon: string;
+}
+
 /** Categoria colorida; `color` é uma chave da paleta (ver Categories.tsx). */
 export interface Category {
   id: string;
@@ -278,6 +291,11 @@ export const api = isTauri
       deleteFolder: (account: string, folder: string) => invoke<UserFolder[]>("delete_folder", { account, folder }),
       countFolder: (account: string, folder: string) => invoke<number>("count_folder", { account, folder }),
       moveToFolder: (ids: number[], account: string, folder: string) => invoke<number>("move_to_folder", { ids, account, folder }),
+      copyMany: (ids: number[], role: Role) => invoke<number>("copy_messages", { ids, role }),
+      copyToFolder: (ids: number[], account: string, folder: string) => invoke<number>("copy_to_folder", { ids, account, folder }),
+      userFolderUnread: () => invoke<FolderUnread[]>("user_folder_unread"),
+      prepareDragEml: (ids: number[]) => invoke<DragFiles>("prepare_drag_eml", { ids }),
+      prepareDragAttachment: (id: number, index: number) => invoke<DragFiles>("prepare_drag_attachment", { id, index }),
       setCategory: (ids: number[], category: string | null) => invoke<void>("set_category", { ids, category }),
       updateAccount: (account: Account, password: string | null) => invoke<Account>("update_account", { account, password }),
       move: (id: number, role: Role) => invoke<void>("move_message", { id, role }),
