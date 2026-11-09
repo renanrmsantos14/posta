@@ -37,6 +37,10 @@ export interface MessageSummary {
   date: number;
   snippet: string;
   seen: boolean;
+  /** Estrela (`\Flagged`). */
+  flagged: boolean;
+  /** Papel da pasta onde a mensagem está. */
+  role: Role | null;
 }
 
 export interface MessageDetail extends MessageSummary {
@@ -45,6 +49,9 @@ export interface MessageDetail extends MessageSummary {
   body_html: string;
   /** Reply-To, ou o remetente. */
   reply_addr: string;
+  /** Endereços de To e Cc, separados por vírgula (para responder a todos). */
+  to_addrs: string;
+  cc_addrs: string;
 }
 
 export interface Draft {
@@ -62,6 +69,10 @@ export interface SendReport {
 }
 
 export type Role = "inbox" | "sent" | "archive" | "trash" | "junk";
+/** O que a barra lateral mostra: pastas reais e a pasta virtual "Com estrela". */
+export type View = Role | "starred";
+/** Não lidas por pasta. */
+export type UnreadCounts = Partial<Record<Role, number>>;
 
 export interface SyncResult {
   fetched: number;
@@ -83,11 +94,21 @@ export const api = isTauri
       folders: () => invoke<Role[]>("list_folders"),
       sync: () => invoke<SyncResult>("sync_inbox"),
       syncFolder: (role: Role, keep: number) => invoke<SyncResult>("sync_folder", { role, keep }),
-      list: (role: Role, limit: number, offset: number) =>
-        invoke<MessageSummary[]>("list_messages", { role, limit, offset }),
-      search: (query: string, role: Role) => invoke<MessageSummary[]>("search_messages", { query, role }),
+      list: (view: View, limit: number, offset: number) =>
+        view === "starred"
+          ? invoke<MessageSummary[]>("list_starred", { limit, offset })
+          : invoke<MessageSummary[]>("list_messages", { role: view, limit, offset }),
+      search: (query: string, view: View) =>
+        view === "starred"
+          ? invoke<MessageSummary[]>("search_starred", { query })
+          : invoke<MessageSummary[]>("search_messages", { query, role: view }),
       move: (id: number, role: Role) => invoke<void>("move_message", { id, role }),
+      moveMany: (ids: number[], role: Role) => invoke<void>("move_messages", { ids, role }),
       deleteForever: (id: number) => invoke<void>("delete_forever", { id }),
+      deleteForeverMany: (ids: number[]) => invoke<void>("delete_forever_many", { ids }),
+      setSeen: (ids: number[], seen: boolean) => invoke<void>("set_seen_many", { ids, seen }),
+      setFlagged: (ids: number[], flagged: boolean) => invoke<void>("set_flagged_many", { ids, flagged }),
+      unreadCounts: () => invoke<UnreadCounts>("unread_counts"),
       open: (id: number) => invoke<MessageDetail | null>("open_message", { id }),
       send: (draft: Draft) => invoke<SendReport>("send_message", { draft }),
     }

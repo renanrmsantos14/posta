@@ -41,7 +41,7 @@ A chave de assinatura fica em `~/.tauri/posta.key` (senha em `~/.tauri/posta.key
 
 ## Atalhos
 
-`j`/`k` ou setas navegam, `/` busca, `r` responde, `c` escreve, `u` sincroniza, `Esc` limpa a busca ou volta à lista. No painel de escrita, `Ctrl`/`⌘` + `Enter` envia.
+`j`/`k` ou setas navegam, `/` busca, `r` responde, `a` responde a todos, `f` encaminha, `c` escreve, `e` arquiva, `#` exclui, `s` marca com estrela, `u` marca como não lida, `Esc` limpa a busca, a seleção ou volta à lista. Com mensagens marcadas (caixa de seleção; Shift marca um intervalo), `e`, `#`, `s` e `u` valem para todas. Atalhos por teclado não têm animação. "Com estrela" é uma visão local (exclui Lixeira e Spam); lida e estrela sincronizam com o servidor (`\Seen`, `\Flagged`). No painel de escrita, `Ctrl`/`⌘` + `Enter` envia.
 
 ## Envio
 

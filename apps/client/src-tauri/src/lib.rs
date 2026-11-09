@@ -1,7 +1,7 @@
 //! Ponte entre a UI e o mail-core. Leituras vêm do SQLite local; rede só em sync e flags.
 
 use mail_core::oauth::{self, Provider};
-use mail_core::{imap_sync, send, AuthMode, IdleEnd, ImapAccount, MessageDetail, MessageSummary, Outgoing, ReplyRef, Role, SendReport, Store};
+use mail_core::{imap_sync, send, AuthMode, IdleEnd, ImapAccount, MessageDetail, MsgFlag, MessageSummary, Outgoing, ReplyRef, Role, SendReport, Store};
 use serde::{Deserialize, Serialize};
 use std::{collections::{HashMap, HashSet}, fs, path::PathBuf, sync::Mutex, time::{Duration, Instant}};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -114,6 +114,20 @@ impl AppState {
             .reply_ref(id)
             .map_err(err)?
             .ok_or_else(|| "mensagem não encontrada".to_string())
+    }
+
+    /// Mensagens locais agrupadas por (conta, pasta), com os UIDs, para uma conexão IMAP por grupo.
+    fn locate_groups(&self, ids: &[i64]) -> CmdResult<Vec<((String, String), Vec<(i64, u32)>)>> {
+        let mut groups: Vec<((String, String), Vec<(i64, u32)>)> = Vec::new();
+        for &id in ids {
+            let loc = self.locate(id)?;
+            let key = (loc.account, loc.mailbox);
+            match groups.iter_mut().find(|(k, _)| *k == key) {
+                Some((_, v)) => v.push((id, loc.uid)),
+                None => groups.push((key, vec![(id, loc.uid)])),
+            }
+        }
+        Ok(groups)
     }
 }
 
@@ -366,6 +380,99 @@ fn list_messages(state: State<'_, AppState>, role: Role, limit: u32, offset: u32
     state.store.lock().unwrap().list_folder(role, limit, offset).map_err(err)
 }
 
+/// Pasta virtual "Com estrela": todas as contas, fora Lixeira e Spam.
+#[tauri::command]
+fn list_starred(state: State<'_, AppState>, limit: u32, offset: u32) -> CmdResult<Vec<MessageSummary>> {
+    state.store.lock().unwrap().list_starred(limit, offset).map_err(err)
+}
+
+#[tauri::command]
+fn search_starred(state: State<'_, AppState>, query: String) -> CmdResult<Vec<MessageSummary>> {
+    state.store.lock().unwrap().search_starred(&query, 200).map_err(err)
+}
+
+/// Não lidas por papel de pasta (chaves `inbox`, `sent`...), somando as contas.
+#[tauri::command]
+fn unread_counts(state: State<'_, AppState>) -> CmdResult<HashMap<String, u32>> {
+    let counts = state.store.lock().unwrap().unread_counts().map_err(err)?;
+    Ok(counts.into_iter().map(|(r, n)| (r.as_str().to_string(), n)).collect())
+}
+
+/// Liga/desliga `\Seen` ou `\Flagged` em várias mensagens: o servidor primeiro, o banco local só se ele aceitar.
+fn set_flag_many(st: &AppState, ids: &[i64], flag: MsgFlag, on: bool) -> CmdResult<()> {
+    for ((account, mailbox), items) in st.locate_groups(ids)? {
+        let acc = st.account_with_password(&account)?;
+        let uids: Vec<u32> = items.iter().map(|(_, u)| *u).collect();
+        imap_sync::set_flag(&acc, &mailbox, &uids, flag, on).map_err(err)?;
+        let store = st.store.lock().unwrap();
+        for (id, _) in items {
+            match flag {
+                MsgFlag::Seen => store.set_seen(id, on),
+                MsgFlag::Flagged => store.set_flagged(id, on),
+            }
+            .map_err(err)?;
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn set_seen_many(app: AppHandle, ids: Vec<i64>, seen: bool) -> CmdResult<()> {
+    blocking(app, move |st| set_flag_many(st, &ids, MsgFlag::Seen, seen)).await
+}
+
+#[tauri::command]
+async fn set_flagged_many(app: AppHandle, ids: Vec<i64>, flagged: bool) -> CmdResult<()> {
+    blocking(app, move |st| set_flag_many(st, &ids, MsgFlag::Flagged, flagged)).await
+}
+
+/// Move várias para a pasta do papel (cada uma na sua conta). As cópias locais saem depois do OK do servidor.
+#[tauri::command]
+async fn move_messages(app: AppHandle, ids: Vec<i64>, role: Role) -> CmdResult<()> {
+    blocking(app, move |st| {
+        for ((account, mailbox), items) in st.locate_groups(&ids)? {
+            let to = st
+                .store
+                .lock()
+                .unwrap()
+                .folder_name(&account, role)
+                .map_err(err)?
+                .ok_or_else(|| "esta conta não tem essa pasta".to_string())?;
+            let acc = st.account_with_password(&account)?;
+            let uids: Vec<u32> = items.iter().map(|(_, u)| *u).collect();
+            imap_sync::move_messages(&acc, &mailbox, &uids, &to).map_err(err)?;
+            let store = st.store.lock().unwrap();
+            for (id, _) in items {
+                store.remove(id).map_err(err)?;
+            }
+        }
+        Ok(())
+    })
+    .await
+}
+
+/// Exclui de vez várias que estão na Lixeira.
+#[tauri::command]
+async fn delete_forever_many(app: AppHandle, ids: Vec<i64>) -> CmdResult<()> {
+    blocking(app, move |st| {
+        for ((account, mailbox), items) in st.locate_groups(&ids)? {
+            let trash = st.store.lock().unwrap().folder_name(&account, Role::Trash).map_err(err)?;
+            if trash.as_deref() != Some(mailbox.as_str()) {
+                return Err("só dá para excluir de vez dentro da Lixeira".to_string());
+            }
+            let acc = st.account_with_password(&account)?;
+            let uids: Vec<u32> = items.iter().map(|(_, u)| *u).collect();
+            imap_sync::delete_forever_many(&acc, &mailbox, &uids).map_err(err)?;
+            let store = st.store.lock().unwrap();
+            for (id, _) in items {
+                store.remove(id).map_err(err)?;
+            }
+        }
+        Ok(())
+    })
+    .await
+}
+
 #[tauri::command]
 fn search_messages(state: State<'_, AppState>, query: String, role: Role) -> CmdResult<Vec<MessageSummary>> {
     state.store.lock().unwrap().search_folder(&query, role, 200).map_err(err)
@@ -509,6 +616,13 @@ pub fn run() {
             delete_forever,
             list_messages,
             search_messages,
+            list_starred,
+            search_starred,
+            unread_counts,
+            set_seen_many,
+            set_flagged_many,
+            move_messages,
+            delete_forever_many,
             open_message,
             send_message
         ])

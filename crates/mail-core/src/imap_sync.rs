@@ -142,7 +142,7 @@ pub fn idle_wait(acc: &ImapAccount, mailbox: &str, timeout: Duration) -> Result<
     })
 }
 
-fn parse(uid: u32, raw: &[u8], seen: bool, fallback_date: i64, own_addr: &str) -> NewMessage {
+fn parse(uid: u32, raw: &[u8], seen: bool, flagged: bool, fallback_date: i64, own_addr: &str) -> NewMessage {
     let msg = MessageParser::default().parse(raw);
     let from = msg.as_ref().and_then(|m| m.from()).and_then(|f| f.first());
     let from_addr = from.and_then(|f| f.address()).unwrap_or_default().to_string();
@@ -186,6 +186,7 @@ fn parse(uid: u32, raw: &[u8], seen: bool, fallback_date: i64, own_addr: &str) -
             })
             .unwrap_or_default(),
         seen,
+        flagged,
         message_id: msg.as_ref().and_then(|m| m.message_id()).unwrap_or_default().to_string(),
         refs: msg
             .as_ref()
@@ -193,7 +194,15 @@ fn parse(uid: u32, raw: &[u8], seen: bool, fallback_date: i64, own_addr: &str) -
             .map(|r| r.iter().collect::<Vec<_>>().join(" "))
             .unwrap_or_default(),
         reply_addr,
+        to_addrs: msg.as_ref().map(|m| addresses(m.to())).unwrap_or_default(),
+        cc_addrs: msg.as_ref().map(|m| addresses(m.cc())).unwrap_or_default(),
     }
+}
+
+/// Endereços de um cabeçalho To/Cc, separados por vírgula.
+fn addresses(list: Option<mail_parser::AddressList>) -> String {
+    list.map(|a| a.mailboxes().filter_map(|x| x.address()).collect::<Vec<_>>().join(", "))
+        .unwrap_or_default()
 }
 
 fn first_to(msg: &mail_parser::Message) -> Option<String> {
@@ -204,6 +213,10 @@ fn is_seen(fetch: &imap::types::Fetch) -> bool {
     fetch.flags().iter().any(|f| matches!(f, imap::types::Flag::Seen))
 }
 
+fn is_flagged(fetch: &imap::types::Fetch) -> bool {
+    fetch.flags().iter().any(|f| matches!(f, imap::types::Flag::Flagged))
+}
+
 /// Traz a pasta para o banco local: novas mensagens (as mais recentes primeiro),
 /// exclusões feitas no servidor e mudanças de lida/não lida.
 /// `Some(n)`: só baixa o corpo das n mais recentes do servidor; as locais mais antigas ficam.
@@ -212,18 +225,18 @@ pub fn sync_mailbox(acc: &ImapAccount, store: &mut Store, mailbox: &str, keep: O
     let selected = session.select(mailbox)?;
     store.set_uid_validity(&acc.id, mailbox, selected.uid_validity.unwrap_or(0))?;
 
-    let mut server: Vec<(u32, bool)> = Vec::new();
+    let mut server: Vec<(u32, bool, bool)> = Vec::new();
     if selected.exists > 0 {
         for f in session.uid_fetch("1:*", "(UID FLAGS)")?.iter() {
             if let Some(uid) = f.uid {
-                server.push((uid, is_seen(f)));
+                server.push((uid, is_seen(f), is_flagged(f)));
             }
         }
     }
     store.apply_server_state(&acc.id, mailbox, &server)?;
 
     let local: HashSet<u32> = store.local_uids(&acc.id, mailbox)?.into_iter().collect();
-    let mut newest: Vec<u32> = server.iter().map(|(u, _)| *u).collect();
+    let mut newest: Vec<u32> = server.iter().map(|(u, _, _)| *u).collect();
     newest.sort_unstable_by(|a, b| b.cmp(a));
     if let Some(n) = keep {
         newest.truncate(n);
@@ -238,7 +251,7 @@ pub fn sync_mailbox(acc: &ImapAccount, store: &mut Store, mailbox: &str, keep: O
             .iter()
             .filter_map(|f| {
                 let date = f.internal_date().map(|d| d.timestamp()).unwrap_or(0);
-                Some(parse(f.uid?, f.body()?, is_seen(f), date, &acc.username))
+                Some(parse(f.uid?, f.body()?, is_seen(f), is_flagged(f), date, &acc.username))
             })
             .collect();
         report.fetched += msgs.len();
@@ -295,18 +308,31 @@ pub fn discover_folders(acc: &ImapAccount) -> Result<Vec<Folder>> {
 
 /// Move pelo UID. Sem MOVE no servidor: copia, marca como apagada e remove.
 pub fn move_message(acc: &ImapAccount, from: &str, uid: u32, to: &str) -> Result<()> {
+    move_messages(acc, from, &[uid], to)
+}
+
+/// Lista de UIDs no formato do IMAP ("1,2,3").
+fn uid_set(uids: &[u32]) -> String {
+    uids.iter().map(u32::to_string).collect::<Vec<_>>().join(",")
+}
+
+/// Move vários UIDs da mesma pasta numa só conexão.
+pub fn move_messages(acc: &ImapAccount, from: &str, uids: &[u32], to: &str) -> Result<()> {
+    if uids.is_empty() {
+        return Ok(());
+    }
     let mut session = connect(acc)?;
     let caps = session.capabilities()?;
     let (has_move, uidplus) = (caps.has_str("MOVE"), caps.has_str("UIDPLUS"));
     drop(caps);
     session.select(from)?;
-    let id = uid.to_string();
+    let set = uid_set(uids);
     if has_move {
-        session.uid_mv(&id, to)?;
+        session.uid_mv(&set, to)?;
     } else {
-        session.uid_copy(&id, to)?;
-        session.uid_store(&id, "+FLAGS.SILENT (\\Deleted)")?;
-        if uidplus { session.uid_expunge(&id)?; } else { session.expunge()?; }
+        session.uid_copy(&set, to)?;
+        session.uid_store(&set, "+FLAGS.SILENT (\\Deleted)")?;
+        if uidplus { session.uid_expunge(&set)?; } else { session.expunge()?; }
     }
     session.logout().ok();
     Ok(())
@@ -314,24 +340,51 @@ pub fn move_message(acc: &ImapAccount, from: &str, uid: u32, to: &str) -> Result
 
 /// Apaga de vez (usado dentro da Lixeira).
 pub fn delete_forever(acc: &ImapAccount, mailbox: &str, uid: u32) -> Result<()> {
+    delete_forever_many(acc, mailbox, &[uid])
+}
+
+pub fn delete_forever_many(acc: &ImapAccount, mailbox: &str, uids: &[u32]) -> Result<()> {
+    if uids.is_empty() {
+        return Ok(());
+    }
     let mut session = connect(acc)?;
     let uidplus = session.capabilities()?.has_str("UIDPLUS");
     session.select(mailbox)?;
-    let id = uid.to_string();
-    session.uid_store(&id, "+FLAGS.SILENT (\\Deleted)")?;
-    if uidplus { session.uid_expunge(&id)?; } else { session.expunge()?; }
+    let set = uid_set(uids);
+    session.uid_store(&set, "+FLAGS.SILENT (\\Deleted)")?;
+    if uidplus { session.uid_expunge(&set)?; } else { session.expunge()?; }
     session.logout().ok();
     Ok(())
 }
 
-/// Marca como lida/não lida no servidor. A UI já atualizou o banco local antes.
-pub fn set_seen(acc: &ImapAccount, mailbox: &str, uid: u32, seen: bool) -> Result<()> {
+/// Flag que a UI altera no servidor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MsgFlag {
+    /// `\Seen`: lida.
+    Seen,
+    /// `\Flagged`: com estrela.
+    Flagged,
+}
+
+/// Liga/desliga a flag em vários UIDs da mesma pasta. A UI já atualizou o banco local antes ou depois.
+pub fn set_flag(acc: &ImapAccount, mailbox: &str, uids: &[u32], flag: MsgFlag, on: bool) -> Result<()> {
+    if uids.is_empty() {
+        return Ok(());
+    }
+    let name = match flag {
+        MsgFlag::Seen => "\\Seen",
+        MsgFlag::Flagged => "\\Flagged",
+    };
     let mut session = connect(acc)?;
     session.select(mailbox)?;
-    let op = if seen { "+FLAGS.SILENT (\\Seen)" } else { "-FLAGS.SILENT (\\Seen)" };
-    session.uid_store(uid.to_string(), op)?;
+    session.uid_store(uid_set(uids), format!("{}FLAGS.SILENT ({name})", if on { "+" } else { "-" }))?;
     session.logout().ok();
     Ok(())
+}
+
+/// Marca como lida/não lida no servidor.
+pub fn set_seen(acc: &ImapAccount, mailbox: &str, uid: u32, seen: bool) -> Result<()> {
+    set_flag(acc, mailbox, &[uid], MsgFlag::Seen, seen)
 }
 
 /// Primeiro endereço do cabeçalho To de uma mensagem, buscado só pelo cabeçalho.
@@ -363,7 +416,7 @@ mod tests {
 Content-Type: multipart/alternative; boundary=\"b\"\r\n\r\n\
 --b\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nol\xc3\xa1 texto\r\n\
 --b\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<p>ol\xc3\xa1 <b>html</b></p>\r\n--b--\r\n";
-        let m = parse(1, raw, false, 0, "");
+        let m = parse(1, raw, false, false, 0, "");
         assert_eq!(m.body_text.trim(), "olá texto");
         assert!(m.body_html.contains("<b>html</b>"), "{}", m.body_html);
     }
@@ -371,7 +424,7 @@ Content-Type: multipart/alternative; boundary=\"b\"\r\n\r\n\
     #[test]
     fn so_html_ainda_gera_texto_para_busca() {
         let raw = b"From: a@b.c\r\nSubject: x\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<p>so html</p>\r\n";
-        let m = parse(1, raw, false, 0, "");
+        let m = parse(1, raw, false, false, 0, "");
         assert!(m.body_html.contains("<p>so html</p>"));
         assert!(m.body_text.contains("so html"));
     }
@@ -379,7 +432,7 @@ Content-Type: multipart/alternative; boundary=\"b\"\r\n\r\n\
     #[test]
     fn so_texto_nao_vira_html() {
         let raw = b"From: a@b.c\r\nSubject: x\r\nContent-Type: text/plain\r\n\r\nsimples\r\n";
-        let m = parse(1, raw, false, 0, "");
+        let m = parse(1, raw, false, false, 0, "");
         assert_eq!(m.body_html, "");
         assert_eq!(m.body_text.trim(), "simples");
     }
@@ -390,13 +443,13 @@ Content-Type: multipart/alternative; boundary=\"b\"\r\n\r\n\
 
     #[test]
     fn enviada_por_mim_responde_ao_destinatario() {
-        let m = parse(1, &raw("Eu@Exemplo.com", "Ana <ana@exemplo.com>, b@exemplo.com"), true, 0, "eu@exemplo.com");
+        let m = parse(1, &raw("Eu@Exemplo.com", "Ana <ana@exemplo.com>, b@exemplo.com"), true, false, 0, "eu@exemplo.com");
         assert_eq!(m.reply_addr, "ana@exemplo.com");
     }
 
     #[test]
     fn recebida_responde_ao_remetente() {
-        let m = parse(1, &raw("ana@exemplo.com", "eu@exemplo.com"), true, 0, "eu@exemplo.com");
+        let m = parse(1, &raw("ana@exemplo.com", "eu@exemplo.com"), true, false, 0, "eu@exemplo.com");
         assert_eq!(m.reply_addr, "ana@exemplo.com");
     }
 }
