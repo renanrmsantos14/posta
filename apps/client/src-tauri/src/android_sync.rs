@@ -51,37 +51,47 @@ fn run(dir: PathBuf) -> Result<String, String> {
     Ok(format!("{total}\n{}", lines.join("\n")))
 }
 
-/// O Tauri registra o `ndk-context` ao abrir a Activity; num processo criado só para o Worker isso não aconteceu.
-/// Registra aqui (o cofre de senhas precisa) e devolve a referência a soltar no fim, junto com `release`.
-fn ensure_context(env: &mut JNIEnv, context: &JObject) -> Result<Option<jni::objects::GlobalRef>, String> {
+/// O Tauri registra o `ndk-context` (global, só uma vez por processo) ao abrir a Activity; num processo criado só para
+/// o Worker isso não aconteceu e o cofre de senhas precisa dele. Registrar por cima do Tauri (ou o Tauri por cima de
+/// nós) derruba o processo por `assert`, então: o Kotlin chama isto sob o mesmo lock do `onCreate` da Activity, o
+/// cofre é criado já (ele guarda a JavaVM e o contexto) e o registro é desfeito na hora, sem ficar preso durante a sync.
+fn warm_up(env: &mut JNIEnv, context: &JObject) -> Result<(), String> {
     if catch_unwind(ndk_context::android_context).is_ok() {
-        return Ok(None);
+        return crate::secret::init();
     }
     let vm = env.get_java_vm().map_err(|e| e.to_string())?;
     let global = env.new_global_ref(context).map_err(|e| e.to_string())?;
-    // SAFETY: a GlobalRef vive até `release_context`, depois de a sincronização terminar.
+    // SAFETY: a GlobalRef vive até depois do `release`; o cofre faz a própria referência global ao criar o Store.
     unsafe { ndk_context::initialize_android_context(vm.get_java_vm_pointer().cast(), global.as_obj().as_raw().cast()) };
-    Ok(Some(global))
+    let result = catch_unwind(crate::secret::init).unwrap_or_else(|_| Err("pânico ao criar o cofre".into()));
+    // SAFETY: registrado logo acima.
+    unsafe { ndk_context::release_android_context() };
+    result
+}
+
+#[no_mangle]
+pub extern "system" fn Java_br_com_renan_posta_SyncWorker_nativeInit<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    context: JObject<'local>,
+) -> jstring {
+    let text = match warm_up(&mut env, &context) {
+        Ok(()) => String::new(),
+        Err(e) => format!("ERRO: {e}"),
+    };
+    env.new_string(text).map(|s| s.into_raw()).unwrap_or(std::ptr::null_mut())
 }
 
 #[no_mangle]
 pub extern "system" fn Java_br_com_renan_posta_SyncWorker_nativeSync<'local>(
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
-    context: JObject<'local>,
     dir: JString<'local>,
 ) -> jstring {
     let out = (|| {
         let dir: String = env.get_string(&dir).map_err(|e| e.to_string())?.into();
-        let held = ensure_context(&mut env, &context)?;
         // Um panic não pode atravessar a fronteira JNI.
-        let result = catch_unwind(|| run(PathBuf::from(dir))).unwrap_or_else(|_| Err("pânico na sincronização".into()));
-        if held.is_some() {
-            // Se a Activity abrir depois neste processo, o Tauri registra o seu contexto: o nosso sai de cena.
-            // SAFETY: só chega aqui quem registrou acima.
-            unsafe { ndk_context::release_android_context() };
-        }
-        result
+        catch_unwind(|| run(PathBuf::from(dir))).unwrap_or_else(|_| Err("pânico na sincronização".into()))
     })();
     // Erro vira texto "ERRO: ..." para o Worker registrar e tentar de novo mais tarde.
     let text = out.unwrap_or_else(|e| format!("ERRO: {e}"));

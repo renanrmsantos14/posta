@@ -12,6 +12,7 @@ Sem Android SDK local: a prova do build é o CI.
 3. Passou quando: job `android` verde, artefato `posta-android-apk` com `Posta_<versão>_android.apk` e o passo "Alinha e assina" imprime o certificado (`apksigner verify`).
 4. `gen/android` regenerado por `tauri android init --ci` exige JDK, `ANDROID_HOME`, `NDK_HOME` e `rustup target add`; sem eles localmente, edite os arquivos à mão e deixe o CI validar.
 5. Segredo: `src-tauri/src/secret.rs` usa `keyring` fora do Android e `android-native-keyring-store` no Android. Nunca imprima senhas.
+6. `ndk-context` é global e só aceita uma inicialização por processo (`assert` fecha o app). Só a Activity (tao) e `nativeInit` do `SyncWorker` registram, sempre sob `SyncWorker.CONTEXT_LOCK`; não volte a segurar o contexto durante a sincronização.
 
 Limites: instalar o APK e testar o Keystore/TLS exige aparelho ou emulador (não disponível no CI); registre como não validado em dispositivo.
 

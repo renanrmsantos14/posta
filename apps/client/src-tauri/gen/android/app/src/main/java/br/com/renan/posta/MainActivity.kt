@@ -12,7 +12,8 @@ class MainActivity : TauriActivity() {
 
   override fun onCreate(savedInstanceState: Bundle?) {
     enableEdgeToEdge()
-    super.onCreate(savedInstanceState)
+    // O tao registra o ndk-context aqui dentro; o Worker não pode registrar o dele ao mesmo tempo (assert derruba o app).
+    synchronized(SyncWorker.CONTEXT_LOCK) { super.onCreate(savedInstanceState) }
     SyncWorker.schedule(applicationContext)
     // Girar a tela recria a Activity com o mesmo Intent: só o toque novo (sem estado salvo) abre o email.
     if (savedInstanceState == null) NotificationOpen.take(intent)
