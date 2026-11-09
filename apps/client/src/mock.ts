@@ -1,5 +1,5 @@
 // Dados de exemplo para rodar a UI no navegador (pnpm dev), sem Tauri e sem rede.
-import type { Account, Draft, Provider, MessageDetail, MessageSummary, NewAccount, OutAttachment, Role, SendReport, Settings, StoredDraft, SyncResult, UnreadCounts, View } from "./api";
+import type { Account, Contact, Draft, Provider, MessageDetail, MessageSummary, NewAccount, OutAttachment, Role, SendReport, Settings, StoredDraft, SyncResult, UnreadCounts, View } from "./api";
 
 const now = Math.floor(Date.now() / 1000);
 const H = 3600;
@@ -149,6 +149,23 @@ export const mockApi = {
   },
   async listDrafts(): Promise<StoredDraft[]> {
     return [...drafts].sort((a, b) => b.updated - a.updated);
+  },
+  /** Mesma regra do núcleo: remetentes, Para e Cc; mais frequentes primeiro, empate pelo mais recente. */
+  async suggestContacts(query: string, limit: number): Promise<Contact[]> {
+    const q = norm(query.trim());
+    const found = new Map<string, Contact>();
+    for (const m of [...messages].sort((a, b) => b.date - a.date)) {
+      const seen: [string, string][] = [[m.from_name, m.from_addr], ...[...m.to_addrs.split(","), ...m.cc_addrs.split(",")].map((a): [string, string] => ["", a.trim()])];
+      for (const [name, addr] of seen) {
+        if (!addr.includes("@")) continue;
+        const c = found.get(addr.toLowerCase()) ?? { name: "", addr, count: 0 };
+        c.count++;
+        c.name ||= name;
+        found.set(addr.toLowerCase(), c);
+      }
+    }
+    return [...found.values()].filter((c) => !q || norm(`${c.name} ${c.addr}`).includes(q))
+      .sort((a, b) => b.count - a.count).slice(0, limit);
   },
   async deleteDraft(id: string): Promise<void> {
     drafts = drafts.filter((d) => d.id !== id);

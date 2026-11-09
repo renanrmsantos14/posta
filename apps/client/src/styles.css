@@ -790,3 +790,32 @@ kbd {
   .settings-row { flex-wrap: wrap; }
 }
 @media (max-width: 1080px) { .settings-nav .nav-item span { display: inline; } .settings-nav .nav-item { justify-content: flex-start; } }
+
+/* ---------- Editor formatado e destinatários ---------- */
+.fmt-bar { display: flex; align-items: center; gap: 2px; padding: 4px 14px; border-bottom: 1px solid var(--line); }
+.fmt-bar .icon-btn { width: 28px; height: 28px; border-color: transparent; }
+.link-bar { display: flex; align-items: center; gap: 8px; padding: 6px 20px; border-bottom: 1px solid var(--line); }
+.link-bar input { flex: 1; min-width: 0; padding: 6px 0; border: 0; outline: 0; background: transparent; color: var(--strong); font-size: 14px; }
+.composer-body.rich { overflow-y: auto; overflow-wrap: anywhere; }
+.rich blockquote { margin: 4px 0; padding-left: 12px; border-left: 2px solid var(--line); color: var(--muted); }
+.rich ul, .rich ol { margin: 4px 0; padding-left: 24px; }
+.rich a { color: var(--blue); text-decoration: underline; }
+.rich pre { white-space: pre-wrap; font-family: var(--mono); font-size: 13px; }
+.recip { align-items: flex-start; padding-top: 0; cursor: text; }
+.recip > span:first-child { padding-top: 12px; }
+.recip-field { position: relative; display: flex; flex: 1; flex-wrap: wrap; align-items: center; gap: 4px; min-width: 0; padding: 5px 0; }
+.recip-field input { flex: 1 1 120px; padding: 4px 0; }
+.recip .cc-toggle { margin-top: 6px; }
+.rcpt { display: inline-flex; align-items: center; gap: 2px; max-width: 100%; padding: 2px 4px 2px 8px; border: 1px solid var(--line);
+  border-radius: 999px; background: var(--selected); color: var(--strong); font-size: 13px; }
+.rcpt[data-bad] { border-color: var(--red); background: var(--red-bg); color: var(--red); }
+.rcpt-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.suggest-list {
+  position: absolute; top: 100%; left: 0; z-index: 30; width: min(380px, 100%); margin: 2px 0 0; padding: 4px; list-style: none;
+  border: 1px solid var(--line); border-radius: 10px; background: var(--surface); box-shadow: 0 8px 28px rgba(0, 0, 0, 0.12);
+}
+.suggest { display: flex; flex-direction: column; padding: 6px 10px; border-radius: 6px; cursor: pointer; font-size: 13px; }
+.suggest[data-active] { background: var(--selected); }
+.suggest-name { color: var(--strong); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.suggest-addr { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 760px) { .link-bar { padding-left: 16px; padding-right: 16px; } }

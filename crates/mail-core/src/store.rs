@@ -60,6 +60,7 @@ CREATE TABLE IF NOT EXISTS drafts (
   bcc_addr TEXT NOT NULL DEFAULT '',
   subject TEXT NOT NULL DEFAULT '',
   body TEXT NOT NULL DEFAULT '',
+  html TEXT NOT NULL DEFAULT '',
   updated INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS settings (
@@ -147,6 +148,16 @@ pub struct MessageDetail {
     pub cc_addrs: String,
 }
 
+/// Pessoa já vista nas mensagens, para autocompletar destinatários.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct Contact {
+    /// Nome de exibição, quando o contato já enviou mensagem (vazio se só apareceu em Para/Cc).
+    pub name: String,
+    pub addr: String,
+    /// Quantas vezes apareceu.
+    pub count: u32,
+}
+
 /// Rascunho guardado só localmente (o Composer salva sozinho).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DraftRecord {
@@ -162,6 +173,9 @@ pub struct DraftRecord {
     pub bcc: String,
     pub subject: String,
     pub body: String,
+    /// Corpo formatado; vazio em rascunhos só de texto (versões antigas).
+    #[serde(default)]
+    pub html: String,
     /// Unix, em segundos; preenchido ao salvar.
     #[serde(default)]
     pub updated: i64,
@@ -235,8 +249,8 @@ impl Store {
             )?;
         }
         conn.execute_batch(SCHEMA)?;
-        // `drafts` não é recriada com o resto: rascunhos de versões antigas ganham as colunas de Cc/Bcc.
-        for col in ["cc_addr", "bcc_addr"] {
+        // `drafts` não é recriada com o resto: rascunhos de versões antigas ganham as colunas de Cc/Bcc/HTML.
+        for col in ["cc_addr", "bcc_addr", "html"] {
             let has: bool = conn.query_row(
                 "SELECT COUNT(*) > 0 FROM pragma_table_info('drafts') WHERE name = ?1",
                 params![col],
@@ -558,11 +572,11 @@ impl Store {
             return Err(crate::Error::Invalid("rascunho sem id".into()));
         }
         self.conn.execute(
-            "INSERT INTO drafts (id, account, reply_to, to_addr, cc_addr, bcc_addr, subject, body, updated)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, strftime('%s','now'))
+            "INSERT INTO drafts (id, account, reply_to, to_addr, cc_addr, bcc_addr, subject, body, html, updated)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, strftime('%s','now'))
              ON CONFLICT (id) DO UPDATE SET account = ?2, reply_to = ?3, to_addr = ?4, cc_addr = ?5, bcc_addr = ?6,
-               subject = ?7, body = ?8, updated = strftime('%s','now')",
-            params![d.id, d.account, d.reply_to, d.to, d.cc, d.bcc, d.subject, d.body],
+               subject = ?7, body = ?8, html = ?9, updated = strftime('%s','now')",
+            params![d.id, d.account, d.reply_to, d.to, d.cc, d.bcc, d.subject, d.body, d.html],
         )?;
         Ok(())
     }
@@ -570,7 +584,7 @@ impl Store {
     /// Rascunhos, o mais recente primeiro.
     pub fn list_drafts(&self) -> Result<Vec<DraftRecord>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT id, account, reply_to, to_addr, cc_addr, bcc_addr, subject, body, updated FROM drafts ORDER BY updated DESC, rowid DESC",
+            "SELECT id, account, reply_to, to_addr, cc_addr, bcc_addr, subject, body, html, updated FROM drafts ORDER BY updated DESC, rowid DESC",
         )?;
         let rows = stmt
             .query_map([], |r| {
@@ -583,11 +597,58 @@ impl Store {
                     bcc: r.get(5)?,
                     subject: r.get(6)?,
                     body: r.get(7)?,
-                    updated: r.get(8)?,
+                    html: r.get(8)?,
+                    updated: r.get(9)?,
                 })
             })?
             .collect::<rusqlite::Result<_>>()?;
         Ok(rows)
+    }
+
+    /// Contatos que já apareceram nas mensagens (remetentes, Para e Cc) cujo nome ou endereço contém `query`.
+    /// Mais frequentes primeiro; empate pelo mais recente. Vazio = os mais frequentes.
+    pub fn suggest_contacts(&self, query: &str, limit: usize) -> Result<Vec<Contact>> {
+        let q = query.trim().to_lowercase();
+        let like = format!("%{}%", q.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_"));
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT from_name, from_addr, to_addrs, cc_addrs FROM messages
+             WHERE ?1 = '%%' OR from_addr LIKE ?1 ESCAPE '\\' OR from_name LIKE ?1 ESCAPE '\\'
+                OR to_addrs LIKE ?1 ESCAPE '\\' OR cc_addrs LIKE ?1 ESCAPE '\\'
+             ORDER BY date DESC LIMIT 5000",
+        )?;
+        let rows = stmt.query_map(params![like], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?))
+        })?;
+        // Linhas vêm da mais nova para a mais antiga: a ordem de entrada serve de recência.
+        let mut found: std::collections::HashMap<String, (Contact, usize)> = std::collections::HashMap::new();
+        let mut order = 0usize;
+        let mut seen = |name: &str, addr: &str| {
+            let addr = addr.trim();
+            if !addr.contains('@') {
+                return;
+            }
+            let e = found.entry(addr.to_lowercase()).or_insert_with(|| {
+                order += 1;
+                (Contact { name: String::new(), addr: addr.to_string(), count: 0 }, order)
+            });
+            e.0.count += 1;
+            if e.0.name.is_empty() {
+                e.0.name = name.trim().to_string();
+            }
+        };
+        for row in rows {
+            let (name, from, to, cc) = row?;
+            seen(&name, &from);
+            for a in to.split(',').chain(cc.split(',')) {
+                seen("", a);
+            }
+        }
+        let mut list: Vec<_> = found
+            .into_values()
+            .filter(|(c, _)| q.is_empty() || c.addr.to_lowercase().contains(&q) || c.name.to_lowercase().contains(&q))
+            .collect();
+        list.sort_by(|a, b| b.0.count.cmp(&a.0.count).then(a.1.cmp(&b.1)));
+        Ok(list.into_iter().take(limit).map(|(c, _)| c).collect())
     }
 
     pub fn delete_draft(&self, id: &str) -> Result<()> {
@@ -851,7 +912,7 @@ mod tests {
     }
 
     fn draft(id: &str, account: &str, body: &str) -> DraftRecord {
-        DraftRecord { id: id.into(), account: account.into(), reply_to: None, to: "bia@exemplo.com".into(), cc: "carla@exemplo.com".into(), bcc: "dan@exemplo.com".into(), subject: "Oi".into(), body: body.into(), updated: 0 }
+        DraftRecord { id: id.into(), account: account.into(), reply_to: None, to: "bia@exemplo.com".into(), cc: "carla@exemplo.com".into(), bcc: "dan@exemplo.com".into(), subject: "Oi".into(), body: body.into(), html: String::new(), updated: 0 }
     }
 
     #[test]
@@ -888,6 +949,28 @@ mod tests {
         for ext in ["", "-wal", "-shm"] {
             std::fs::remove_file(format!("{}{ext}", dir.display())).ok();
         }
+    }
+
+    #[test]
+    fn contatos_sugeridos_por_frequencia_e_recencia() {
+        let mut s = Store::open_in_memory().unwrap();
+        let mut a = msg(1, "a", "", 10);
+        a.cc_addrs = "carla@exemplo.com".into();
+        let mut b = msg(2, "b", "", 20);
+        b.from_name = "Carla Dias".into();
+        b.from_addr = "carla@exemplo.com".into();
+        b.to_addrs = "eu@exemplo.com".into();
+        let c = msg(3, "c", "", 30);
+        s.insert_messages("a", "INBOX", &[a, b, c]).unwrap();
+        let all = s.suggest_contacts("", 10).unwrap();
+        let addrs: Vec<_> = all.iter().map(|c| c.addr.as_str()).collect();
+        assert_eq!(addrs[0], "eu@exemplo.com");
+        assert!(addrs.contains(&"bia@exemplo.com") && addrs.contains(&"carla@exemplo.com"));
+        let r = s.suggest_contacts("CARLA", 10).unwrap();
+        assert_eq!(r, vec![Contact { name: "Carla Dias".into(), addr: "carla@exemplo.com".into(), count: 2 }]);
+        assert_eq!(s.suggest_contacts("ana s", 10).unwrap().len(), 1);
+        assert!(s.suggest_contacts("50%_", 10).unwrap().is_empty());
+        assert_eq!(s.suggest_contacts("", 2).unwrap().len(), 2);
     }
 
     #[test]
