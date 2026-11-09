@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, ArrowBendUpLeft, ArrowBendDoubleUpLeft, ArrowBendUpRight, ArrowsClockwise, Archive, Check, MagnifyingGlass, NotePencil, Plus, Star, Trash, Tray, EnvelopeSimple, EnvelopeSimpleOpen, GearSix, Paperclip, FileText, X } from "@phosphor-icons/react";
+import { ArrowLeft, ArrowsIn, ArrowsOut, ArrowBendUpLeft, ArrowBendDoubleUpLeft, ArrowBendUpRight, ArrowsClockwise, Archive, Check, MagnifyingGlass, NotePencil, Plus, Star, Trash, Tray, EnvelopeSimple, EnvelopeSimpleOpen, GearSix, Paperclip, FileText, X } from "@phosphor-icons/react";
 import { HtmlBody, hasRemoteImages } from "./HtmlBody";
 import { api, isTauri, type Account, type Attachment, type MessageDetail, type MessageSummary, type OutAttachment, type Role, type Settings, type StoredDraft, type UnreadCounts, type View } from "./api";
 import { AccountDialog } from "./AccountDialog";
@@ -7,7 +7,8 @@ import { Composer, type ComposeInit } from "./Composer";
 import { Toaster, toast } from "./toast";
 import { FOLDERS, SHOWS_UNREAD, withStarred } from "./folders";
 import { fmtSize } from "./format";
-import { SettingsDialog } from "./SettingsDialog";
+import { Resizer } from "./Resizer";
+import { SettingsPage } from "./SettingsPage";
 import { UpdateDialog } from "./UpdateDialog";
 import { autoCheck, checkUpdate, CHECK_EVERY_MS, skip, skipped, type Update } from "./updater";
 import build from "./version.json";
@@ -20,6 +21,11 @@ const KEEP = 1000;
 const KEEP_STEP = 500;
 const UNDO_MS = 4000;
 const TZ = "America/Sao_Paulo";
+/** Larguras padrão e limites das colunas (px); o resto da janela fica com a leitura. */
+const RAIL = { def: 232, min: 180, max: 360 };
+const LIST = { def: 360, min: 280, max: 720 };
+const LIST_H = { def: 320, min: 140 };
+const MIN_READER = 360;
 
 const fmtTime = new Intl.DateTimeFormat("pt-BR", { timeZone: TZ, hour: "2-digit", minute: "2-digit" });
 const fmtDay = new Intl.DateTimeFormat("pt-BR", { timeZone: TZ, day: "numeric", month: "short" });
@@ -78,6 +84,10 @@ export default function App() {
   const [compose, setCompose] = useState<ComposeInit | null>(null);
   const [savingAtt, setSavingAtt] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  /** Só a mensagem, ocupando a janela (clique duplo, botão expandir ou painel desligado). */
+  const [full, setFull] = useState(false);
+  /** As preferências chegam do backend: até lá a janela fica invisível para não piscar o tema. */
+  const [prefsReady, setPrefsReady] = useState(false);
   const [update, setUpdate] = useState<Update | null>(null);
   /** Remonta o painel a cada abertura, mesmo com o mesmo rascunho. */
   const [composeKey, setComposeKey] = useState(0);
@@ -112,6 +122,7 @@ export default function App() {
   const loadingMore = useRef(false);
   /** Mensagens no intervalo do "Desfazer": ainda estão no banco local, mas não devem voltar à lista. */
   const pendingMove = useRef<Set<number>>(new Set());
+  const appRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLUListElement>(null);
 
@@ -123,6 +134,19 @@ export default function App() {
   const remote = folder !== "inbox" && folder !== "starred";
 
   const current = visible.find((m) => m.id === selectedId) ?? null;
+  const pane = settings.pane === "bottom" || settings.pane === "off" ? settings.pane : "right";
+  const size = (key: string, d: number) => (Number(settings[key]) > 0 ? Number(settings[key]) : d);
+  const railW = size("w:rail", RAIL.def);
+  const listW = size("w:list", LIST.def);
+  const listH = size("h:list", LIST_H.def);
+  const layoutVars = {
+    ...(settings["w:rail"] && { "--rail-pref": `${railW}px` }),
+    ...(settings["w:list"] && { "--list-pref": `${listW}px` }),
+    ...(settings["h:list"] && { "--list-h-pref": `${listH}px` }),
+  } as React.CSSProperties;
+  /** Largura máxima da lista: deixa espaço mínimo para a leitura. */
+  const listMax = () => Math.max(LIST.min, Math.min(LIST.max, (appRef.current?.clientWidth ?? 1200) - (appRef.current?.querySelector<HTMLElement>(".rail")?.offsetWidth ?? RAIL.def) - MIN_READER));
+  const listHMax = () => Math.max(LIST_H.min, (appRef.current?.clientHeight ?? 800) - 220);
   const canArchive = (m: MessageSummary) => m.role !== "archive" && folderList.includes(archiveTo(m));
   const canTrash = (m: MessageSummary) => m.role === "trash" || folderList.includes("trash");
 
@@ -197,7 +221,7 @@ export default function App() {
       setSettings(s);
       // Android 13+ só mostra notificações depois do aceite; no desktop a chamada é inofensiva.
       if (s.notify !== "0") api.listAccounts().then((a) => (a.length ? api.requestNotifyPermission() : false)).catch(() => {});
-    }).catch(() => {});
+    }).catch(() => {}).finally(() => setPrefsReady(true));
   }, [refreshDrafts]);
 
   // Fechar ou enviar o painel muda os rascunhos salvos.
@@ -313,6 +337,7 @@ export default function App() {
     setDetail(null);
     setChecked(new Set());
     setReaderOpen(false);
+    setFull(false);
     setIntro(false);
     setLoadingFolder(true);
     setFolder(role);
@@ -372,6 +397,21 @@ export default function App() {
     setReaderOpen(false);
     refreshDrafts();
   }
+
+  /** Tema e fonte vivem no <html>; "sistema" e "M" ficam sem atributo. */
+  useEffect(() => {
+    const root = document.documentElement;
+    if (settings.theme === "light" || settings.theme === "dark") root.dataset.theme = settings.theme;
+    else delete root.dataset.theme;
+    if (settings.size === "s" || settings.size === "l") root.dataset.size = settings.size;
+    else delete root.dataset.size;
+  }, [settings.theme, settings.size]);
+
+  // Tela cheia só existe com uma mensagem aberta e fora das Configurações.
+  useEffect(() => { if (full && !current) setFull(false); }, [full, current]);
+
+  /** Muda só na tela (arrasto das colunas); `changeSetting` grava ao soltar. */
+  const previewSetting = (key: string, value: string) => setSettings((s) => ({ ...s, [key]: value }));
 
   function changeSetting(key: string, value: string) {
     setSettings((s) => ({ ...s, [key]: value }));
@@ -439,6 +479,7 @@ export default function App() {
     setCompose(null);
     toast("Enviando…", "sending", {
       action: { label: "Desfazer", onClick: () => openComposer({ ...d, restored: true }) },
+      duration: (Number(settings.undoSend) || 4) * 1000,
       onClose: async (reason) => {
         if (reason === "action") return;
         const { title: _t, restored: _r, draftId, ...draft } = d;
@@ -632,6 +673,7 @@ export default function App() {
       toggleCheck(m, e.shiftKey);
     } else {
       select(m.id);
+      if (pane === "off") setFull(true);
     }
   }
 
@@ -678,7 +720,8 @@ export default function App() {
       const t = e.target;
       const typing = t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement || t instanceof HTMLSelectElement;
       if (e.key === "Escape") {
-        if (typing) { setQuery(""); searchRef.current?.blur(); }
+        if (full && !typing) setFull(false);
+        else if (typing) { setQuery(""); searchRef.current?.blur(); }
         else if (checked.size) setChecked(new Set());
         else setReaderOpen(false);
         return;
@@ -730,7 +773,10 @@ export default function App() {
   const empty = accounts !== null && accounts.length === 0;
 
   return (
-    <div className="app" data-reader={readerOpen || undefined}>
+    <div ref={appRef} className="app" data-reader={readerOpen || undefined} data-pane={pane === "right" ? undefined : pane}
+      data-full={full || undefined} data-page={settingsOpen ? "settings" : undefined} data-ready={prefsReady || undefined}
+      data-density={settings.density === "compact" ? "compact" : undefined} data-preview={settings.preview === "0" ? "0" : undefined}
+      style={layoutVars}>
       <aside className="rail">
         <div className="brand">Posta</div>
         <button className="btn primary compose-btn" onClick={writeNew} aria-label="Escrever">
@@ -895,7 +941,7 @@ export default function App() {
                 className="row" data-unread={!m.seen || undefined} data-fresh={freshIds.has(m.id) || undefined}
                 data-checked={checked.has(m.id) || undefined}
                 style={{ "--i": Math.min(i, 12) } as React.CSSProperties}
-                onClick={(e) => onRowClick(e, m)}>
+                onClick={(e) => onRowClick(e, m)} onDoubleClick={(e) => { if (!(e.target as Element).closest("button")) setFull(true); }}>
                 <span className="dot" aria-hidden />
                 <button type="button" className="check" role="checkbox" aria-checked={checked.has(m.id)}
                   aria-label={`Selecionar mensagem de ${m.from_name || m.from_addr}`}
@@ -917,11 +963,29 @@ export default function App() {
         )}
       </section>
 
+      {!full && !settingsOpen && (
+        <>
+          <Resizer axis="x" edge="rail" label="Largura das pastas" value={railW} min={RAIL.min} max={() => RAIL.max}
+            onChange={(v) => previewSetting("w:rail", String(v))} onCommit={(v) => changeSetting("w:rail", String(v))}
+            onReset={() => changeSetting("w:rail", "")} />
+          {pane === "right" && (
+            <Resizer axis="x" edge="list" label="Largura da lista" value={listW} min={LIST.min} max={listMax}
+              onChange={(v) => previewSetting("w:list", String(v))} onCommit={(v) => changeSetting("w:list", String(v))}
+              onReset={() => changeSetting("w:list", "")} />
+          )}
+          {pane === "bottom" && (
+            <Resizer axis="y" edge="list" label="Altura da lista" value={listH} min={LIST_H.min} max={listHMax}
+              onChange={(v) => previewSetting("h:list", String(v))} onCommit={(v) => changeSetting("h:list", String(v))}
+              onReset={() => changeSetting("h:list", "")} />
+          )}
+        </>
+      )}
+
       <main className="reader">
         {detail && detail.id === selectedId ? (
           <article key={detail.id} className="message" data-instant={viaKeyboard || undefined}>
-            <button className="btn ghost small back" onClick={() => setReaderOpen(false)}>
-              <ArrowLeft size={14} weight="bold" /> {FOLDERS[folder].label}
+            <button className="btn ghost small back" onClick={() => (full ? setFull(false) : setReaderOpen(false))}>
+              <ArrowLeft size={14} weight="bold" /> {full ? "Voltar" : FOLDERS[folder].label}
             </button>
             <h1>{detail.subject || "(sem assunto)"}</h1>
             <div className="meta">
@@ -931,6 +995,10 @@ export default function App() {
                 <div className="meta-addr">{detail.from_addr}</div>
               </div>
               <time className="meta-date">{fmtLong.format(new Date(detail.date * 1000))}</time>
+              <button type="button" className="icon-btn expand-btn" onClick={() => setFull(!full)}
+                aria-label={full ? "Sair da tela cheia" : "Expandir mensagem"} title={full ? "Voltar (Esc)" : "Expandir (clique duplo na lista)"}>
+                {full ? <ArrowsIn size={15} weight="bold" /> : <ArrowsOut size={15} weight="bold" />}
+              </button>
             </div>
             <div className="actions">
               <button className="btn" onClick={reply}>
@@ -1030,8 +1098,8 @@ export default function App() {
         <Composer key={composeKey} init={compose} accounts={accounts} onSend={send} onDiscard={() => setCompose(null)} />
       )}
       {settingsOpen && (
-        <SettingsDialog accounts={accounts ?? []} settings={settings} onSetting={changeSetting} onRemoveAccount={removeAccount}
-          onClose={() => setSettingsOpen(false)} onUpdate={showUpdate} />
+        <SettingsPage accounts={accounts ?? []} settings={settings} onSetting={changeSetting} onRemoveAccount={removeAccount}
+          onAddAccount={() => setDialog(true)} onClose={() => setSettingsOpen(false)} onUpdate={showUpdate} />
       )}
       {update && (
         <UpdateDialog update={update} onLater={() => { skip(update.version); setUpdate(null); }} />
