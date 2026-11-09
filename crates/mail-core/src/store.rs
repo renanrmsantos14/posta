@@ -1316,6 +1316,42 @@ mod tests {
     }
 
     #[test]
+    fn banco_do_master_abre_e_migra_com_tudo_o_que_veio_das_branches() {
+        // Esquema da v5 do master: sem thread_id em messages, sem html em drafts, sem user_folders/message_categories.
+        let conn = Connection::open_in_memory().unwrap();
+        let master = SCHEMA
+            .replace("  thread_id INTEGER NOT NULL DEFAULT 0,\n", "")
+            .replace("  html TEXT NOT NULL DEFAULT '',\n", "");
+        let master = master.split("-- Pastas criadas pelo usuário").next().unwrap().to_string()
+            + &master[master.find("CREATE VIRTUAL TABLE").unwrap()..];
+        conn.execute_batch(&master).unwrap();
+        assert!(conn.prepare("SELECT thread_id FROM messages").is_err());
+        assert!(conn.prepare("SELECT html FROM drafts").is_err());
+        assert!(conn.prepare("SELECT * FROM user_folders").is_err());
+        conn.execute_batch(
+            "INSERT INTO messages (account, mailbox, uid, subject, date, message_id, refs) VALUES
+               ('a', 'INBOX', 1, 'Pauta', 1, 'p1', ''),
+               ('a', 'INBOX', 2, 'Re: Pauta', 2, 'p2', 'p1');
+             INSERT INTO drafts (id, account, subject, updated) VALUES ('d1', 'a', 'rascunho', 1);",
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", SCHEMA_VERSION).unwrap();
+        let mut s = Store::init(conn).unwrap();
+        let list = s.list("INBOX", 5, 0).unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].thread_count, 2);
+        assert!(list[0].category.is_none());
+        s.set_category(&[list[0].id], Some("azul")).unwrap();
+        s.set_user_folders("a", &["X".into()], "/").unwrap();
+        assert_eq!(s.user_folders().unwrap().len(), 1);
+        assert_eq!(s.list("INBOX", 5, 0).unwrap()[0].category.as_deref(), Some("azul"));
+        // Abrir de novo (já migrado) não falha nem refaz nada.
+        let conn = s.conn;
+        let again = Store::init(conn).unwrap();
+        assert_eq!(again.list("INBOX", 5, 0).unwrap().len(), 2);
+    }
+
+    #[test]
     fn pastas_do_usuario_listam_renomeiam_e_somem_com_as_mensagens() {
         let mut s = Store::open_in_memory().unwrap();
         s.set_uid_validity("a", "INBOX.Obra", 7).unwrap();
