@@ -4,7 +4,8 @@
 // O corpo é um editor formatado (contentEditable); `draft.html` é a fonte e `draft.body` o texto simples derivado.
 import { useEffect, useRef, useState } from "react";
 import { Eraser, File as FileIcon, LinkSimple, ListBullets, ListNumbers, Paperclip, PaperPlaneTilt, Quotes, TextB, TextItalic, TextUnderline, Trash, X } from "@phosphor-icons/react";
-import { api, type Account, type Draft, type OutAttachment } from "./api";
+import { aliasLines } from "./aliases";
+import { api, type Account, type Draft, type OutAttachment, type Settings } from "./api";
 import { fmtSize } from "./format";
 import { Recipients } from "./Recipients";
 import { escapeHtml, htmlToText, outgoingHtml, sanitizeHtml, textToHtml } from "./richtext";
@@ -21,6 +22,8 @@ export interface ComposeInit extends Draft {
 interface Props {
   init: ComposeInit;
   accounts: Account[];
+  /** Para os remetentes alternativos (`aliases:<conta>`). */
+  settings: Settings;
   onSend: (draft: ComposeInit) => void;
   onDiscard: () => void;
 }
@@ -58,7 +61,7 @@ function readBase64(file: File): Promise<string> {
   });
 }
 
-export function Composer({ init, accounts, onSend, onDiscard }: Props) {
+export function Composer({ init, accounts, settings, onSend, onDiscard }: Props) {
   const [base] = useState(() => { const html = initialHtml(init); return { html, body: htmlToText(html) }; });
   const [draft, setDraft] = useState<ComposeInit>(() => ({ ...init, ...base }));
   const [link, setLink] = useState<string | null>(null);
@@ -80,6 +83,11 @@ export function Composer({ init, accounts, onSend, onDiscard }: Props) {
   const dirty = !!init.restored || draft.to !== init.to || draft.subject !== init.subject || draft.html !== base.html
     || (draft.cc ?? "") !== (init.cc ?? "") || (draft.bcc ?? "") !== (init.bcc ?? "")
     || (draft.attachments?.length ?? 0) !== (init.attachments?.length ?? 0);
+  /** Cada conta e, logo abaixo, os remetentes alternativos dela. */
+  const senders = accounts.flatMap((a) => [
+    { value: `${a.id}|`, label: a.username },
+    ...aliasLines(settings[`aliases:${a.id}`]).map((al) => ({ value: `${a.id}|${al}`, label: al })),
+  ]);
   const files = draft.attachments ?? [];
   const total = files.reduce((n, f) => n + b64Size(f.data), 0);
 
@@ -303,11 +311,16 @@ export function Composer({ init, accounts, onSend, onDiscard }: Props) {
       </header>
 
       <div className="composer-fields">
-        {accounts.length > 1 ? (
+        {senders.length > 1 ? (
           <label className="line">
             <span>De</span>
-            <select value={draft.account} onChange={(e) => set("account", e.target.value)}>
-              {accounts.map((a) => <option key={a.id} value={a.id}>{a.username}</option>)}
+            <select aria-label="De" value={`${draft.account}|${draft.from ?? ""}`}
+              onChange={(e) => {
+                const [account, ...from] = e.target.value.split("|");
+                set("account", account);
+                set("from", from.join("|") || undefined);
+              }}>
+              {senders.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
             </select>
           </label>
         ) : (

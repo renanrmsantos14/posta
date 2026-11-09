@@ -77,7 +77,7 @@ messages.unshift({
   snippet: "Seguem a planta revisada e o orçamento em anexo.", body_text: "Seguem a planta revisada e o orçamento em anexo.\n\nMarina",
   body_html: `<div style="font-family:Arial,sans-serif;max-width:560px"><img src="${LOGO}" width="160" height="48" alt="Lumen"><p>Oi, Renan! Seguem a <b>planta revisada</b> e o orçamento em anexo.</p><p>Marina</p></div>`,
   seen: false, flagged: true, reply_addr: "marina@lumenarquitetura.com.br", role: "inbox", thread_id: 1100,
-  to_addrs: "renan@exemplo.com", cc_addrs: "carla.mendes@outlook.com, pedro@antunes.dev",
+  to_addrs: "contato@exemplo.com", cc_addrs: "carla.mendes@outlook.com, pedro@antunes.dev",
   attachments: [
     { name: "planta-sala-reuniao-v3.pdf", mime: "application/pdf", size: 2_516_582, index: 0 },
     { name: "orçamento.xlsx", mime: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", size: 48_210, index: 1 },
@@ -131,8 +131,9 @@ let drafts: StoredDraft[] = [
   { id: "d-seed-2", account: accounts[0].id, reply_to: null, to: "", subject: "", body: "Lembrar de cobrar o orçamento do marceneiro.", updated: now - 30 * H },
 ];
 // As preferências sobrevivem ao reload (como no app, que grava no banco local).
+let autostart = false;
 const SETTINGS_KEY = "posta-mock-settings";
-let settings: Settings = { [`signature:${accounts[0].id}`]: "Renan\nBetinhos Executive Service" };
+let settings: Settings = { [`signature:${accounts[0].id}`]: "Renan\nBetinhos Executive Service", [`aliases:${accounts[0].id}`]: "Betinhos Executive <contato@exemplo.com>\nreservas@exemplo.com" };
 try { settings = { ...settings, ...JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? "{}") }; } catch { /* sem armazenamento */ }
 
 // Pastas do usuário de exemplo (separador "/"), com duas mensagens na subpasta.
@@ -227,6 +228,15 @@ export const mockApi = {
     try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch { /* sem armazenamento */ }
   },
   async setFocused(_focused: boolean): Promise<void> {},
+  async saveEml(_id: number): Promise<string> {
+    return "/home/renan/Downloads/mensagem.eml";
+  },
+  async getAutostart(): Promise<boolean> {
+    return autostart;
+  },
+  async setAutostart(enabled: boolean): Promise<void> {
+    autostart = enabled;
+  },
   async requestNotifyPermission(): Promise<boolean> {
     return true;
   },

@@ -139,6 +139,7 @@ fn responde_por_smtp_guarda_em_enviados_e_marca_respondida() {
         cc: String::new(),
         bcc: String::new(),
         attachments: vec![],
+        from: None,
     };
     let report = send::send(&eu, &out, Some(&reply)).unwrap();
     assert_eq!(report.warning, None);
@@ -287,6 +288,7 @@ fn envia_com_anexo_e_cc_e_le_de_volta() {
             mime: "application/octet-stream".into(),
             data: base64::engine::general_purpose::STANDARD.encode(&conteudo),
         }],
+        from: None,
     };
     send::send(&eu, &out, None).unwrap();
 

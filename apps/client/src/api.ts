@@ -94,6 +94,8 @@ export interface Draft {
   cc?: string;
   bcc?: string;
   attachments?: OutAttachment[];
+  /** Remetente alternativo (alias da conta); ausente = o endereço da conta. */
+  from?: string;
 }
 
 /** Rascunho salvo localmente pelo Composer. */
@@ -119,7 +121,8 @@ export interface Contact {
   count: number;
 }
 
-/** Configurações: `signature:<id da conta>`, `notify` ("0" desliga as notificações) e `group` ("0" desliga o agrupamento por conversa). */
+/** Configurações: `signature:<id da conta>`, `aliases:<id da conta>` (um remetente por linha), `notify` ("0" desliga as notificações), `group` ("0" desliga o agrupamento por conversa),
+ * `closeToTray` ("0" faz fechar a janela encerrar o app) e `swipeRight`/`swipeLeft` (archive, trash, read, none). */
 export type Settings = Record<string, string>;
 
 export interface SendReport {
@@ -209,6 +212,9 @@ export const api = isTauri
       open: (id: number) => invoke<MessageDetail | null>("open_message", { id }),
       saveAttachment: (id: number, index: number, open: boolean) =>
         invoke<string>("save_attachment", { id, index, open }),
+      saveEml: (id: number) => invoke<string>("save_eml", { id }),
+      getAutostart: () => invoke<boolean>("get_autostart"),
+      setAutostart: (enabled: boolean) => invoke<void>("set_autostart", { enabled }),
       forwardAttachments: (id: number) => invoke<OutAttachment[]>("forward_attachments", { id }),
       send: (draft: Draft) => invoke<SendReport>("send_message", { draft }),
       removeAccount: (id: string) => invoke<void>("remove_account", { id }),

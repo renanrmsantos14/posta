@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, ArrowsIn, ArrowsOut, ArrowBendUpLeft, ArrowBendDoubleUpLeft, ArrowBendUpRight, ArrowsClockwise, Archive, CaretUp, Check, MagnifyingGlass, NotePencil, Plus, Star, Trash, Tray, EnvelopeSimple, EnvelopeSimpleOpen, GearSix, Paperclip, FileText, X } from "@phosphor-icons/react";
+import { ArrowLeft, ArrowsIn, ArrowsOut, ArrowBendUpLeft, ArrowBendDoubleUpLeft, ArrowBendUpRight, ArrowsClockwise, Archive, CaretUp, Check, MagnifyingGlass, NotePencil, Plus, Star, Trash, Tray, EnvelopeSimple, EnvelopeSimpleOpen, GearSix, Paperclip, FileText, FloppyDisk, Printer, X } from "@phosphor-icons/react";
 import { HtmlBody, hasRemoteImages } from "./HtmlBody";
 import { api, isTauri, type Account, type Attachment, type MessageDetail, type MessageSummary, type OutAttachment, type Role, type Settings, type StoredDraft, type UnreadCounts, type UserFolder, type View } from "./api";
 import { AccountDialog } from "./AccountDialog";
@@ -8,6 +8,8 @@ import { FolderDialog, type FolderDialogState } from "./FolderDialog";
 import { FolderTree } from "./FolderTree";
 import { boxView, catView, parseBox, parseCat } from "./views";
 import { Composer, type ComposeInit } from "./Composer";
+import { aliasFor, aliasLines, addrOf } from "./aliases";
+import { justSwiped, swipeProps, type SwipeAction, type SwipeDir } from "./swipe";
 import { escapeHtml, textToHtml } from "./richtext";
 import { Toaster, toast } from "./toast";
 import { FOLDERS, LOCAL_VIEWS, SHOWS_UNREAD, folderTree, viewInfo, withStarred, type Dest, type FolderNode } from "./folders";
@@ -19,6 +21,8 @@ import { autoCheck, checkUpdate, CHECK_EVERY_MS, skip, skipped, type Update } fr
 import build from "./version.json";
 
 const PAGE = 100;
+/** O WebView do Android não tem impressão por `window.print`. */
+const ANDROID = /Android/i.test(navigator.userAgent);
 // Rede de segurança: a chegada normal vem do IDLE (evento `mail-changed`).
 const SYNC_EVERY_MS = 300_000;
 /** Janela inicial das pastas fora da Caixa de entrada, e quanto cresce ao rolar até o fim. */
@@ -378,6 +382,22 @@ export default function App() {
     return () => { alive = false; off?.(); };
   }, []);
 
+  // Menu da bandeja (desktop): "Escrever" e "Sincronizar" chegam como eventos.
+  const trayRef = useRef({ write: () => {}, sync: () => {} });
+  trayRef.current = { write: writeNew, sync: () => void sync(true) };
+  useEffect(() => {
+    if (!isTauri) return;
+    const offs: (() => void)[] = [];
+    let alive = true;
+    import("@tauri-apps/api/event").then(async ({ listen }) => {
+      for (const [name, run] of [["tray-compose", () => trayRef.current.write()], ["tray-sync", () => trayRef.current.sync()]] as const) {
+        const un = await listen(name, run);
+        if (alive) offs.push(un); else un();
+      }
+    });
+    return () => { alive = false; offs.forEach((f) => f()); };
+  }, []);
+
   // Busca local a cada tecla: sem debounce, o SQLite responde em < 1 ms.
   useEffect(() => {
     if (!query.trim()) return setResults(null);
@@ -450,6 +470,14 @@ export default function App() {
       }
     }
     setExpanded((s) => new Set(s).add(id));
+  }
+
+  async function saveEml(id: number) {
+    try {
+      toast(`Salvo em ${await api.saveEml(id)}`, "success");
+    } catch (e) {
+      toast(`Não foi possível salvar a mensagem: ${e}`, "error");
+    }
   }
 
   async function saveAttachment(id: number, a: Attachment) {
@@ -636,17 +664,20 @@ export default function App() {
     toast("Conta removida", "success");
   }
 
+  /** Responde pelo alias para o qual a mensagem foi enviada (se for de um da conta). */
+  const replyFrom = (d: MessageDetail, account: string) => aliasFor(aliasLines(settings[`aliases:${account}`]), d.to_addrs, d.cc_addrs);
+
   function reply() {
     if (!detail || !accounts?.length) return;
     const subject = /^re:/i.test(detail.subject) ? detail.subject : `Re: ${detail.subject}`;
     const account = accounts.some((a) => a.id === detail.account) ? detail.account : accounts[0].id;
-    openComposer({ title: "Responder", account, reply_to: detail.id, to: detail.reply_addr, subject, body: "", html: signatureFor(account) + replyHtml(detail) });
+    openComposer({ title: "Responder", account, reply_to: detail.id, to: detail.reply_addr, subject, body: "", html: signatureFor(account) + replyHtml(detail), from: replyFrom(detail, account) });
   }
 
   /** Remetente em Para; os demais destinatários da original em Cc, sem as minhas contas e sem repetir. */
   function replyAll() {
     if (!detail || !accounts?.length) return;
-    const own = new Set(accounts.map((a) => a.username.toLowerCase()));
+    const own = new Set([...accounts.map((a) => a.username.toLowerCase()), ...accounts.flatMap((a) => aliasLines(settings[`aliases:${a.id}`]).map(addrOf))]);
     const split = (v: string) => v.split(",").map((x) => x.trim()).filter(Boolean);
     const seen = new Set([detail.reply_addr.toLowerCase()]);
     const others = [...split(detail.to_addrs), ...split(detail.cc_addrs)].filter((a) => {
@@ -659,7 +690,7 @@ export default function App() {
     const account = accounts.some((a) => a.id === detail.account) ? detail.account : accounts[0].id;
     openComposer({
       title: "Responder a todos", account, reply_to: detail.id,
-      to: detail.reply_addr, cc: others.join(", "), subject, body: "", html: replyHtml(detail),
+      to: detail.reply_addr, cc: others.join(", "), subject, body: "", html: replyHtml(detail), from: replyFrom(detail, account),
     });
   }
 
@@ -782,6 +813,18 @@ export default function App() {
         }
       },
     });
+  }
+
+  /** Gestos de deslizar a linha (toque): configuráveis em Configurações. */
+  const swipeAction = (dir: SwipeDir): SwipeAction => {
+    const v = dir === "right" ? settings.swipeRight : settings.swipeLeft;
+    return v === "archive" || v === "trash" || v === "read" || v === "none" ? v : dir === "right" ? "archive" : "trash";
+  };
+  function swipeRow(row: Row, dir: SwipeDir) {
+    const what = swipeAction(dir);
+    if (what === "archive") archive(row.members);
+    else if (what === "trash") remove(row.members);
+    else if (what === "read") markSeen(row.members, row.members.some((x) => !x.seen));
   }
 
   /** Agrupa por destino: na pasta "Com estrela" cada mensagem pode ter um destino diferente. */
@@ -1009,6 +1052,16 @@ export default function App() {
         </button>
         {current && (
           <>
+            {!ANDROID && (
+              <button className="btn icon-only" onClick={() => window.print()}
+                aria-label="Imprimir ou salvar como PDF" title="Imprimir ou salvar como PDF">
+                <Printer size={15} weight="bold" />
+              </button>
+            )}
+            <button className="btn icon-only" onClick={() => void saveEml(current.id)}
+              aria-label="Salvar como .eml" title="Salvar como .eml">
+              <FloppyDisk size={15} weight="bold" />
+            </button>
             <button className="btn icon-only star-btn" data-on={current.flagged || undefined} data-pop={popId === current.id || undefined}
               onClick={() => toggleStar(withThread([current]))} aria-pressed={current.flagged}
               aria-label={current.flagged ? "Tirar a estrela" : "Marcar com estrela"} title="Estrela (s)">
@@ -1284,7 +1337,8 @@ export default function App() {
                   }}
                   onDragEnd={endDrag}
                   style={{ "--i": Math.min(i, 12) } as React.CSSProperties}
-                  onClick={(e) => onRowClick(e, m)} onDoubleClick={(e) => { if (!(e.target as Element).closest("button")) setFull(true); }}>
+                  {...swipeProps(swipeAction, (dir) => swipeRow(row, dir))}
+                  onClick={(e) => { if (!justSwiped()) onRowClick(e, m); }} onDoubleClick={(e) => { if (!(e.target as Element).closest("button")) setFull(true); }}>
                   <span className="dot" aria-hidden />
                   <button type="button" className="check" role="checkbox" aria-checked={checked.has(m.id)}
                     aria-label={`Selecionar ${n > 1 ? "conversa" : "mensagem"} de ${m.from_name || m.from_addr}`}
@@ -1390,7 +1444,7 @@ export default function App() {
         />
       )}
       {compose && accounts && (
-        <Composer key={composeKey} init={compose} accounts={accounts} onSend={send} onDiscard={() => setCompose(null)} />
+        <Composer key={composeKey} init={compose} accounts={accounts} settings={settings} onSend={send} onDiscard={() => setCompose(null)} />
       )}
       {settingsOpen && (
         <SettingsPage accounts={accounts ?? []} settings={settings} onSetting={changeSetting} onRemoveAccount={removeAccount}

@@ -1,10 +1,11 @@
 // Configurações em página inteira: menu de seções à esquerda; voltar (botão ou Esc) devolve a caixa de entrada.
 import { useEffect, useState } from "react";
-import { ArrowLeft, ArrowsClockwise, Bell, Gauge, Keyboard, PencilSimple, Plus, Tag, Trash, UserCircle, Layout, X } from "@phosphor-icons/react";
+import { ArrowLeft, ArrowsClockwise, Bell, Gauge, Keyboard, PencilSimple, Plus, Tag, Trash, UserCircle, Layout, Desktop, X } from "@phosphor-icons/react";
 import { api, type Account, type Settings } from "./api";
 import { AccountEditDialog } from "./AccountEditDialog";
 import { MAX_CATEGORIES, PALETTE, parseCategories } from "./Categories";
 import { autoCheck, checkUpdate, setAutoCheck, type Update } from "./updater";
+import { aliasLines } from "./aliases";
 import { toast } from "./toast";
 import build from "./version.json";
 
@@ -27,6 +28,7 @@ const SECTIONS = [
   { id: "layout", label: "Leitura e layout", icon: Layout },
   { id: "write", label: "Escrita", icon: PencilSimple },
   { id: "notify", label: "Notificações", icon: Bell },
+  { id: "system", label: "Sistema", icon: Desktop },
   { id: "keys", label: "Atalhos", icon: Keyboard },
   { id: "about", label: "Atualizações", icon: Gauge },
 ] as const;
@@ -41,6 +43,9 @@ const SHORTCUTS: [string, string][] = [
 ];
 
 const UNDO_OPTIONS = ["4", "10", "20", "30"];
+const SWIPE_OPTIONS: [string, string][] = [["archive", "Arquivar"], ["trash", "Excluir"], ["read", "Lida/não lida"], ["none", "Nada"]];
+/** Bandeja e iniciar com o sistema só existem no desktop. */
+const DESKTOP = !/Android/i.test(navigator.userAgent);
 
 /** Grupo de opções exclusivas; valor ausente ou desconhecido cai no `fallback`. */
 function Segmented({ label, value, fallback, options, onChange }: {
@@ -77,6 +82,18 @@ export function SettingsPage({ accounts, settings, onSetting, onRemoveAccount, o
   const [removing, setRemoving] = useState<Account | null>(null);
   const [removeBusy, setRemoveBusy] = useState(false);
   const notify = settings.notify !== "0";
+  const [autostart, setAutostartOn] = useState<boolean | null>(null);
+  useEffect(() => {
+    if (DESKTOP) api.getAutostart().then(setAutostartOn).catch(() => setAutostartOn(false));
+  }, []);
+  async function toggleAutostart(on: boolean) {
+    try {
+      await api.setAutostart(on);
+      setAutostartOn(on);
+    } catch (e) {
+      toast(`Não consegui mudar o início com o sistema: ${e}`, "error");
+    }
+  }
   const sigId = accounts.some((a) => a.id === sigAccount) ? sigAccount : accounts[0]?.id ?? "";
 
   const categories = parseCategories(settings.categories);
@@ -161,6 +178,11 @@ export function SettingsPage({ accounts, settings, onSetting, onRemoveAccount, o
                   <div className="settings-account">
                     <div className="settings-strong">{a.name ? `${a.name} · ${a.username}` : a.username}</div>
                     <div className="settings-sub">{a.host}</div>
+                    <label className="settings-sub alias-field">Remetentes alternativos (um por linha: <code>Nome &lt;endereço&gt;</code> ou só o endereço)
+                      <textarea className="signature-input" rows={Math.max(2, aliasLines(settings[`aliases:${a.id}`]).length + 1)} aria-label={`Remetentes alternativos de ${a.username}`}
+                        placeholder="reservas@exemplo.com" value={settings[`aliases:${a.id}`] ?? ""}
+                        onChange={(e) => onSetting(`aliases:${a.id}`, e.target.value)} />
+                    </label>
                   </div>
                   <button type="button" className="btn" onClick={() => setEditing(a)}>
                     <PencilSimple size={15} weight="bold" /> Editar
@@ -228,6 +250,12 @@ export function SettingsPage({ accounts, settings, onSetting, onRemoveAccount, o
                 <Segmented label="Painel de leitura" value={settings.pane} fallback="right" onChange={(v) => onSetting("pane", v)}
                   options={[["right", "Direita"], ["bottom", "Embaixo"], ["off", "Desligado"]]} />
               </Row>
+              <Row title="Deslizar para a direita" sub="No toque: arrasta a linha da lista. Excluir e arquivar têm Desfazer">
+                <Segmented label="Deslizar para a direita" value={settings.swipeRight} fallback="archive" onChange={(v) => onSetting("swipeRight", v)} options={SWIPE_OPTIONS} />
+              </Row>
+              <Row title="Deslizar para a esquerda">
+                <Segmented label="Deslizar para a esquerda" value={settings.swipeLeft} fallback="trash" onChange={(v) => onSetting("swipeLeft", v)} options={SWIPE_OPTIONS} />
+              </Row>
               <Row title="Larguras das colunas" sub="Arraste a borda entre os painéis; clique duplo na borda restaura o padrão">
                 <button type="button" className="btn" onClick={() => ["w:rail", "w:list", "h:list"].forEach((k) => onSetting(k, ""))}>Restaurar padrão</button>
               </Row>
@@ -264,6 +292,33 @@ export function SettingsPage({ accounts, settings, onSetting, onRemoveAccount, o
                 </div>
                 <input type="checkbox" role="switch" className="switch" checked={notify} onChange={(e) => toggleNotify(e.target.checked)} />
               </label>
+            </section>
+          )}
+
+          {section === "system" && (
+            <section className="settings-group" aria-label="Sistema">
+              {DESKTOP ? (
+                <>
+                  <label className="settings-row switch-row">
+                    <div>
+                      <div className="settings-strong">Fechar a janela mantém o Posta na bandeja</div>
+                      <div className="settings-sub">Continua recebendo e avisando de email novo. Sair de vez: menu da bandeja</div>
+                    </div>
+                    <input type="checkbox" role="switch" className="switch" checked={settings.closeToTray !== "0"}
+                      onChange={(e) => onSetting("closeToTray", e.target.checked ? "1" : "0")} />
+                  </label>
+                  <label className="settings-row switch-row">
+                    <div>
+                      <div className="settings-strong">Iniciar com o sistema</div>
+                      <div className="settings-sub">Abre escondido na bandeja ao entrar no computador</div>
+                    </div>
+                    <input type="checkbox" role="switch" className="switch" checked={!!autostart} disabled={autostart === null}
+                      onChange={(e) => toggleAutostart(e.target.checked)} />
+                  </label>
+                </>
+              ) : (
+                <p className="settings-sub">Bandeja e início com o sistema valem só para o computador.</p>
+              )}
             </section>
           )}
 

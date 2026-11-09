@@ -21,6 +21,9 @@ tauri-plugin-notification = "2"
 
 [target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
 tauri-plugin-updater = "2.14.1"
+tauri-plugin-autostart = "2"
+# Bandeja do sistema (ícone, menu e contagem de não lidas).
+tauri = { version = "2.12", features = ["tray-icon"] }
 
 # Segredos: cofre do sistema no desktop; Android Keystore (via SharedPreferences cifrado) no Android.
 [target.'cfg(not(target_os = "android"))'.dependencies]
