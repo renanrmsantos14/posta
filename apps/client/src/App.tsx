@@ -22,7 +22,8 @@ import { autoCheck, checkUpdate, CHECK_EVERY_MS, skip, skipped, type Update } fr
 import { addFilter, hasFilters, parseTemplates, whenLabel, whenPresets, type ScheduledItem } from "./productivity";
 import { AppShell, RouteLayout, PageLayout } from "./layout/primitives";
 import { TopBar, type SearchScope } from "./TopBar";
-import { CommandBar, type Cmd } from "./CommandBar";
+import { CommandBar } from "./CommandBar";
+import { buildCommands } from "./commands";
 import { Rail } from "./Rail";
 import { MessageList, type Density, type ListHandle, type ListRow } from "./MessageList";
 import { PAGE, useMessageList } from "./useMessageList";
@@ -1385,26 +1386,10 @@ export default function App() {
   const threaded = grouped && !!detail && thread.length > 1 && thread.some((t) => t.id === detail.id);
 
   const targets = checkedList.length ? checkedList : current ? withThread([current]) : [];
-  const none = targets.length === 0;
-  const cmds: Cmd[] = [
-    { id: "new", label: "Novo email", icon: NotePencil, pri: 1, group: 0, kbd: "Ctrl+N", primary: true, run: () => writeNew() },
-    { id: "delete", label: targets.length && targets.every((m) => m.role === "trash") ? "Excluir de vez" : "Excluir", icon: Trash, pri: 2, group: 1, kbd: "Delete", disabled: !targets.some(canTrash), run: () => remove(targets) },
-    { id: "archive", label: targets.length && targets.some(canArchive) && archiveTo(targets.find(canArchive)!) === "inbox" ? "Mover para a entrada" : "Arquivar", icon: Archive, pri: 3, group: 1, kbd: "E", disabled: !targets.some(canArchive), run: () => archive(targets) },
-    { id: "reply", label: "Responder", icon: ArrowBendUpLeft, pri: 4, group: 2, kbd: "Ctrl+R", disabled: !current, run: () => void act("reply") },
-    { id: "replyAll", label: "Responder a todos", icon: ArrowBendDoubleUpLeft, pri: 5, group: 2, kbd: "Ctrl+Shift+R", disabled: !current, run: () => void act("replyAll") },
-    { id: "forward", label: "Encaminhar", icon: ArrowBendUpRight, pri: 6, group: 2, kbd: "Ctrl+F", disabled: !current, run: () => void act("forward") },
-    { id: "move", label: "Mover", icon: FolderOpen, pri: 7, group: 3, disabled: none, menu: () => moveItems(targets) },
-    targets.length && targets.every((m) => m.seen)
-      ? { id: "read", label: "Marcar não lida", icon: EnvelopeSimple, pri: 8, group: 4, kbd: "Ctrl+U", run: () => void markSeen(targets, false) }
-      : { id: "read", label: "Marcar lida", icon: EnvelopeSimpleOpen, pri: 8, group: 4, kbd: "Ctrl+Q", disabled: none, run: () => void markSeen(targets, true) },
-    { id: "flag", label: "Sinalizar", icon: Star, pri: 9, group: 4, kbd: "Insert", disabled: none, pressed: !none && targets.every((m) => m.flagged), run: () => void toggleStar(targets, true) },
-    { id: "pin", label: "Fixar", icon: PushPin, pri: 10, group: 4, kbd: "P", disabled: none, pressed: !none && targets.every((m) => m.pinned), run: () => void togglePin(targets) },
-    { id: "snooze", label: "Adiar", icon: Clock, pri: 11, group: 5, disabled: none, menu: () => snoozeItems(targets) },
-    ...(categories.length ? [{ id: "cats", label: "Categorias", icon: Tag, pri: 12, group: 5, disabled: none, menu: () => categoryItems(targets) }] : []),
-    ...(!ANDROID ? [{ id: "print", label: "Imprimir", icon: Printer, pri: 13, group: 6, disabled: !current, run: () => window.print() }] : []),
-    { id: "eml", label: "Salvar .eml", icon: FloppyDisk, pri: 14, group: 6, disabled: !current, run: () => current && void saveEml(current.id) },
-  ];
-
+  const cmds = buildCommands({
+    targets, current, hasCategories: categories.length > 0, canArchive, canTrash, archiveTo, writeNew, act, remove, archive, markSeen,
+    toggleStar, togglePin, moveItems, snoozeItems, categoryItems, saveEml,
+  });
   /** Barra de ações do leitor: só no celular (no desktop quem cuida disso é a faixa de comandos). */
   const actionsBar = (
     <div className="actions mobile-actions">
