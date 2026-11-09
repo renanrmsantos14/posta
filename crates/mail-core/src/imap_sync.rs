@@ -10,7 +10,7 @@ use imap_proto::NameAttribute;
 
 use crate::attachments;
 use crate::oauth::{Provider, XOauth2};
-use crate::folders::{archive_name, pick, Folder, Listed, Role};
+use crate::folders::{archive_name, is_system, new_name, pick, renamed, user_folders, with_children, Folder, Listed, Role};
 use crate::store::{NewMessage, Store};
 use crate::Result;
 
@@ -61,6 +61,9 @@ pub struct ImapAccount {
     pub port: u16,
     pub security: Security,
     pub username: String,
+    /// Nome de exibição no De: dos e-mails enviados.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// Servidor de envio. Contas antigas sem ele usam o padrão do provedor.
     #[serde(default)]
     pub smtp: Option<SmtpServer>,
@@ -273,6 +276,8 @@ fn special(attrs: &[NameAttribute]) -> Option<&'static str> {
         NameAttribute::All => Some("all"),
         NameAttribute::Trash => Some("trash"),
         NameAttribute::Junk => Some("junk"),
+        NameAttribute::Drafts => Some("drafts"),
+        NameAttribute::Flagged => Some("flagged"),
         _ => None,
     })
 }
@@ -309,6 +314,72 @@ pub fn discover_folders(acc: &ImapAccount) -> Result<Vec<Folder>> {
     }
     session.logout().ok();
     Ok(folders)
+}
+
+/// Pastas criadas pelo usuário (sem as de sistema) e o separador da hierarquia.
+pub fn list_user_folders(acc: &ImapAccount) -> Result<(Vec<String>, Option<String>)> {
+    let mut session = connect(acc)?;
+    let (listed, delimiter) = list_folders(&mut session)?;
+    session.logout().ok();
+    Ok((user_folders(&listed, &pick(&listed)), delimiter))
+}
+
+/// Cria a pasta (ou subpasta, com `parent`) e a assina. Devolve o nome completo.
+pub fn create_folder(acc: &ImapAccount, parent: Option<&str>, leaf: &str) -> Result<String> {
+    let mut session = connect(acc)?;
+    let (listed, delimiter) = list_folders(&mut session)?;
+    let name = new_name(&listed, delimiter.as_deref(), parent, leaf)?;
+    session.create(&name)?;
+    session.subscribe(&name).ok();
+    session.logout().ok();
+    Ok(name)
+}
+
+/// Renomeia (a subárvore vai junto, no servidor). Devolve o novo nome completo.
+pub fn rename_folder(acc: &ImapAccount, old: &str, leaf: &str) -> Result<String> {
+    let mut session = connect(acc)?;
+    let (listed, delimiter) = list_folders(&mut session)?;
+    if is_system(old, &pick(&listed)) {
+        return Err(crate::Error::Invalid("pastas do sistema não podem ser renomeadas".into()));
+    }
+    let name = renamed(&listed, delimiter.as_deref(), old, leaf)?;
+    session.rename(old, &name)?;
+    session.unsubscribe(old).ok();
+    session.subscribe(&name).ok();
+    session.logout().ok();
+    Ok(name)
+}
+
+/// Exclui a pasta e as subpastas, da mais funda para a mais rasa. Devolve os nomes excluídos.
+pub fn delete_folder(acc: &ImapAccount, name: &str) -> Result<Vec<String>> {
+    let mut session = connect(acc)?;
+    let (listed, delimiter) = list_folders(&mut session)?;
+    let system = pick(&listed);
+    if is_system(name, &system) {
+        return Err(crate::Error::Invalid("pastas do sistema não podem ser excluídas".into()));
+    }
+    let doomed = with_children(&listed, delimiter.as_deref(), name);
+    if doomed.is_empty() {
+        return Err(crate::Error::Invalid(format!("a pasta {name} não existe")));
+    }
+    for n in &doomed {
+        session.unsubscribe(n).ok();
+        session.delete(n)?;
+    }
+    session.logout().ok();
+    Ok(doomed)
+}
+
+/// Quantas mensagens há na pasta e nas subpastas (para confirmar a exclusão), direto do servidor.
+pub fn count_messages(acc: &ImapAccount, name: &str) -> Result<u32> {
+    let mut session = connect(acc)?;
+    let (listed, delimiter) = list_folders(&mut session)?;
+    let mut total = 0;
+    for n in with_children(&listed, delimiter.as_deref(), name) {
+        total += session.status(&n, "(MESSAGES)")?.exists;
+    }
+    session.logout().ok();
+    Ok(total)
 }
 
 /// Move pelo UID. Sem MOVE no servidor: copia, marca como apagada e remove.
