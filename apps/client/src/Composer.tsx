@@ -18,6 +18,8 @@ export interface ComposeInit extends Draft {
 interface Props {
   init: ComposeInit;
   accounts: Account[];
+  /** Assinatura (texto puro) da conta; vazia se não houver. */
+  signatureOf: (account: string) => string;
   onSend: (draft: ComposeInit) => void;
   onDiscard: () => void;
 }
@@ -52,7 +54,21 @@ function readBase64(file: File): Promise<string> {
   });
 }
 
-export function Composer({ init, accounts, onSend, onDiscard }: Props) {
+/** Troca a assinatura da conta antiga pela da nova, onde quer que esteja no corpo (respostas têm a citação depois). */
+function swapSignature(body: string, from: string, to: string, reply: boolean): string {
+  const old = from ? `-- \n${from}` : "";
+  const i = old ? body.indexOf(old) : -1;
+  if (from === to) return body;
+  // A conta anterior não tinha assinatura aqui: respostas ganham a nova acima da citação, mensagens novas no fim.
+  if (i < 0) return !to || body.includes(`-- \n${to}`) ? body : reply ? `\n\n-- \n${to}${body}` : `${body.trimEnd()}\n\n-- \n${to}\n`;
+  if (to) return body.slice(0, i) + `-- \n${to}` + body.slice(i + old.length);
+  // Nova conta sem assinatura: tira o bloco com as quebras que o cercam.
+  const before = body.slice(0, i).replace(/\n{1,2}$/, "");
+  const after = body.slice(i + old.length).replace(/^\n/, "");
+  return before + (after && !before.endsWith("\n") ? "\n" : "") + after;
+}
+
+export function Composer({ init, accounts, signatureOf, onSend, onDiscard }: Props) {
   const [draft, setDraft] = useState(init);
   const [error, setError] = useState("");
   const [errorKey, setErrorKey] = useState(0);
@@ -70,6 +86,7 @@ export function Composer({ init, accounts, onSend, onDiscard }: Props) {
 
   const dirty = !!init.restored || draft.to !== init.to || draft.subject !== init.subject || draft.body !== init.body
     || (draft.cc ?? "") !== (init.cc ?? "") || (draft.bcc ?? "") !== (init.bcc ?? "")
+    || draft.account !== init.account
     || (draft.attachments?.length ?? 0) !== (init.attachments?.length ?? 0);
   const files = draft.attachments ?? [];
   const total = files.reduce((n, f) => n + b64Size(f.data), 0);
@@ -85,20 +102,21 @@ export function Composer({ init, accounts, onSend, onDiscard }: Props) {
     }
   }, [init]);
 
-  const isBlank = !draft.to.trim() && !draft.subject.trim() && !draft.body.trim();
+  const isBlank = !draft.to.trim() && !draft.subject.trim() && !draft.body.trim() && !files.length;
   const latest = useRef(draft);
   latest.current = draft;
 
   /** Grava o rascunho atual; texto todo em branco apaga o rascunho. Devolve false se não gravou. */
   async function persist(): Promise<boolean> {
     const d = latest.current;
-    const key = JSON.stringify([d.account, d.to, d.cc, d.bcc, d.subject, d.body]);
+    const key = JSON.stringify([d.account, d.to, d.cc, d.bcc, d.subject, d.body, (d.attachments ?? []).map((f) => [f.name, f.data.length])]);
+    const blank = !d.to.trim() && !d.subject.trim() && !d.body.trim() && !d.attachments?.length;
     if (key === savedKey.current) return true;
     try {
-      if (!d.to.trim() && !d.subject.trim() && !d.body.trim()) await api.deleteDraft(draftId);
-      else await api.saveDraft({ id: draftId, account: d.account, reply_to: d.reply_to, to: d.to, cc: d.cc ?? "", bcc: d.bcc ?? "", subject: d.subject, body: d.body });
+      if (blank) await api.deleteDraft(draftId);
+      else await api.saveDraft({ id: draftId, account: d.account, reply_to: d.reply_to, to: d.to, cc: d.cc ?? "", bcc: d.bcc ?? "", subject: d.subject, body: d.body, attachments: d.attachments ?? [] });
       savedKey.current = key;
-      setSaved(!!(d.to.trim() || d.subject.trim() || d.body.trim()));
+      setSaved(!blank);
       return true;
     } catch (e) {
       toast(`Não consegui salvar o rascunho: ${e}`, "error");
@@ -110,7 +128,7 @@ export function Composer({ init, accounts, onSend, onDiscard }: Props) {
     if (!dirty) return;
     const t = setTimeout(() => { persist(); }, AUTOSAVE_MS);
     return () => clearTimeout(t);
-  }, [draft.account, draft.to, draft.cc, draft.bcc, draft.subject, draft.body, dirty]);
+  }, [draft.account, draft.to, draft.cc, draft.bcc, draft.subject, draft.body, draft.attachments, dirty]);
 
   // Janela escondida ou fechando: não espera o debounce.
   useEffect(() => {
@@ -154,6 +172,11 @@ export function Composer({ init, accounts, onSend, onDiscard }: Props) {
   }
 
   function send() {
+    if (total > MAX_BYTES) {
+      setError(`Os anexos passam de 25 MB (${fmtSize(total)}). Remova algum para enviar.`);
+      setErrorKey((k) => k + 1);
+      return;
+    }
     const problem = invalidRecipient(draft.to);
     if (problem) {
       setError(problem);
@@ -186,6 +209,24 @@ export function Composer({ init, accounts, onSend, onDiscard }: Props) {
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
   });
+
+  /** Troca o "De" levando a assinatura junto. */
+  function changeAccount(account: string) {
+    setDraft((d) => ({ ...d, account, body: swapSignature(d.body, signatureOf(d.account), signatureOf(account), d.reply_to !== null) }));
+    setSaved(false);
+  }
+
+  // A conta do rascunho foi removida com o painel aberto: passa para outra conta (o texto fica) ou fecha sem gravar.
+  useEffect(() => {
+    if (accounts.some((a) => a.id === draft.account)) return;
+    if (!accounts.length) {
+      skipFlush.current = true;
+      onDiscard();
+      return;
+    }
+    changeAccount(accounts[0].id);
+    toast(`A conta foi removida: o rascunho passou para ${accounts[0].username}`, "info");
+  }, [accounts, draft.account]);
 
   const set = <K extends keyof ComposeInit>(k: K, v: ComposeInit[K]) => {
     setDraft((d) => ({ ...d, [k]: v }));
@@ -230,7 +271,7 @@ export function Composer({ init, accounts, onSend, onDiscard }: Props) {
         {accounts.length > 1 ? (
           <label className="line">
             <span>De</span>
-            <select value={draft.account} onChange={(e) => set("account", e.target.value)}>
+            <select value={draft.account} onChange={(e) => changeAccount(e.target.value)}>
               {accounts.map((a) => <option key={a.id} value={a.id}>{a.username}</option>)}
             </select>
           </label>
@@ -288,7 +329,8 @@ export function Composer({ init, accounts, onSend, onDiscard }: Props) {
               ))}
             </ul>
           )}
-          {files.length > 0 && <span className="attach-total">{fmtSize(total)} de 25 MB</span>}
+          {files.length > 0 && <span className="attach-total" data-over={total > MAX_BYTES || undefined}>{fmtSize(total)} de 25 MB</span>}
+          {total > MAX_BYTES && <p className="form-error" role="alert">Os anexos passam do limite de 25 MB no total: remova algum para enviar.</p>}
           {attachNote && <p className="form-error" role="alert">{attachNote}</p>}
         </div>
       )}

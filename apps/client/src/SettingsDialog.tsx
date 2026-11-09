@@ -106,6 +106,21 @@ export function SettingsDialog({ accounts, settings, onSetting, onRemoveAccount,
           </label>
         </section>
 
+        <section className="settings-group" aria-labelledby="set-undo">
+          <h3 id="set-undo" className="rail-label">Envio</h3>
+          <label className="settings-row">
+            <div>
+              <div className="settings-strong">Desfazer envio</div>
+              <div className="settings-sub">Tempo para desfazer depois de tocar em Enviar</div>
+            </div>
+            <select aria-label="Tempo para desfazer o envio" value={settings.undo_send ?? "5"} onChange={(e) => onSetting("undo_send", e.target.value)}>
+              <option value="0">Desligado</option>
+              <option value="5">5 segundos</option>
+              <option value="10">10 segundos</option>
+            </select>
+          </label>
+        </section>
+
         {accounts.length > 0 && (
           <section className="settings-group" aria-labelledby="set-sig">
             <h3 id="set-sig" className="rail-label">Assinatura</h3>

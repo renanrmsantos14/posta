@@ -6,6 +6,7 @@ use std::path::Path;
 
 use crate::attachments::Attachment;
 use crate::folders::{Folder, Role};
+use crate::send::OutAttachment;
 use crate::Result;
 
 /// O banco é só uma cópia do servidor: mudou o esquema, apaga e sincroniza de novo.
@@ -60,7 +61,8 @@ CREATE TABLE IF NOT EXISTS drafts (
   bcc_addr TEXT NOT NULL DEFAULT '',
   subject TEXT NOT NULL DEFAULT '',
   body TEXT NOT NULL DEFAULT '',
-  updated INTEGER NOT NULL
+  updated INTEGER NOT NULL,
+  attachments TEXT NOT NULL DEFAULT '[]'
 );
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
@@ -165,6 +167,9 @@ pub struct DraftRecord {
     /// Unix, em segundos; preenchido ao salvar.
     #[serde(default)]
     pub updated: i64,
+    /// Arquivos anexados (guardados como JSON, conteúdo em base64).
+    #[serde(default)]
+    pub attachments: Vec<OutAttachment>,
 }
 
 pub struct Store {
@@ -236,14 +241,14 @@ impl Store {
         }
         conn.execute_batch(SCHEMA)?;
         // `drafts` não é recriada com o resto: rascunhos de versões antigas ganham as colunas de Cc/Bcc.
-        for col in ["cc_addr", "bcc_addr"] {
+        for (col, default) in [("cc_addr", "''"), ("bcc_addr", "''"), ("attachments", "'[]'")] {
             let has: bool = conn.query_row(
                 "SELECT COUNT(*) > 0 FROM pragma_table_info('drafts') WHERE name = ?1",
                 params![col],
                 |r| r.get(0),
             )?;
             if !has {
-                conn.execute_batch(&format!("ALTER TABLE drafts ADD COLUMN {col} TEXT NOT NULL DEFAULT ''"))?;
+                conn.execute_batch(&format!("ALTER TABLE drafts ADD COLUMN {col} TEXT NOT NULL DEFAULT {default}"))?;
             }
         }
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -361,14 +366,14 @@ impl Store {
         Ok(())
     }
 
-    /// Não lidas por papel de pasta, somando as contas (papéis sem pasta ficam em 0).
-    pub fn unread_counts(&self) -> Result<Vec<(Role, u32)>> {
-        let mut stmt = self
-            .conn
-            .prepare_cached(&format!("SELECT COUNT(*) FROM messages m WHERE m.seen = 0 AND {IN_ROLE}"))?;
+    /// Não lidas por papel de pasta (papéis sem pasta ficam em 0): de todas as contas ou só da `account`.
+    pub fn unread_counts(&self, account: Option<&str>) -> Result<Vec<(Role, u32)>> {
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT COUNT(*) FROM messages m WHERE m.seen = 0 AND (?2 IS NULL OR m.account = ?2) AND {IN_ROLE}"
+        ))?;
         Role::ALL
             .iter()
-            .map(|r| Ok((*r, stmt.query_row(params![r.as_str()], |row| row.get(0))?)))
+            .map(|r| Ok((*r, stmt.query_row(params![r.as_str(), account], |row| row.get(0))?)))
             .collect()
     }
 
@@ -558,11 +563,11 @@ impl Store {
             return Err(crate::Error::Invalid("rascunho sem id".into()));
         }
         self.conn.execute(
-            "INSERT INTO drafts (id, account, reply_to, to_addr, cc_addr, bcc_addr, subject, body, updated)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, strftime('%s','now'))
+            "INSERT INTO drafts (id, account, reply_to, to_addr, cc_addr, bcc_addr, subject, body, updated, attachments)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, strftime('%s','now'), ?9)
              ON CONFLICT (id) DO UPDATE SET account = ?2, reply_to = ?3, to_addr = ?4, cc_addr = ?5, bcc_addr = ?6,
-               subject = ?7, body = ?8, updated = strftime('%s','now')",
-            params![d.id, d.account, d.reply_to, d.to, d.cc, d.bcc, d.subject, d.body],
+               subject = ?7, body = ?8, updated = strftime('%s','now'), attachments = ?9",
+            params![d.id, d.account, d.reply_to, d.to, d.cc, d.bcc, d.subject, d.body, serde_json::to_string(&d.attachments).map_err(|e| crate::Error::Invalid(e.to_string()))?],
         )?;
         Ok(())
     }
@@ -570,7 +575,7 @@ impl Store {
     /// Rascunhos, o mais recente primeiro.
     pub fn list_drafts(&self) -> Result<Vec<DraftRecord>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT id, account, reply_to, to_addr, cc_addr, bcc_addr, subject, body, updated FROM drafts ORDER BY updated DESC, rowid DESC",
+            "SELECT id, account, reply_to, to_addr, cc_addr, bcc_addr, subject, body, updated, attachments FROM drafts ORDER BY updated DESC, rowid DESC",
         )?;
         let rows = stmt
             .query_map([], |r| {
@@ -584,6 +589,8 @@ impl Store {
                     subject: r.get(6)?,
                     body: r.get(7)?,
                     updated: r.get(8)?,
+                    // JSON ilegível vira "sem anexos": o texto do rascunho não pode ficar inacessível.
+                    attachments: serde_json::from_str(&r.get::<_, String>(9)?).unwrap_or_default(),
                 })
             })?
             .collect::<rusqlite::Result<_>>()?;
@@ -820,11 +827,17 @@ mod tests {
         s.set_folders("a", &folders_a()).unwrap();
         s.insert_messages("a", "INBOX", &[msg(1, "a", "", 1), msg(2, "b cotacao", "", 2)]).unwrap();
         s.insert_messages("a", "Lixeira", &[msg(3, "lixo", "", 3)]).unwrap();
-        let get = |s: &Store, role| s.unread_counts().unwrap().into_iter().find(|(r, _)| *r == role).unwrap().1;
+        let get = |s: &Store, role| s.unread_counts(None).unwrap().into_iter().find(|(r, _)| *r == role).unwrap().1;
         assert_eq!((get(&s, Role::Inbox), get(&s, Role::Trash), get(&s, Role::Junk)), (2, 1, 0));
         let ids: Vec<_> = s.list("INBOX", 5, 0).unwrap().iter().map(|m| m.id).collect();
         s.set_seen(ids[0], true).unwrap();
         assert_eq!(get(&s, Role::Inbox), 1);
+
+        // Filtro por conta: só conta o que é dela.
+        s.set_folders("b", &folders_a()).unwrap();
+        s.insert_messages("b", "INBOX", &[msg(1, "da b", "", 9)]).unwrap();
+        let of = |a: &str| s.unread_counts(Some(a)).unwrap().into_iter().find(|(r, _)| *r == Role::Inbox).unwrap().1;
+        assert_eq!((of("a"), of("b"), get(&s, Role::Inbox)), (1, 1, 2));
 
         // Estrela em mensagem da Entrada e da Lixeira: a Lixeira fica fora da pasta virtual.
         let trash_id = s.list_folder(Role::Trash, 5, 0).unwrap()[0].id;
@@ -851,7 +864,7 @@ mod tests {
     }
 
     fn draft(id: &str, account: &str, body: &str) -> DraftRecord {
-        DraftRecord { id: id.into(), account: account.into(), reply_to: None, to: "bia@exemplo.com".into(), cc: "carla@exemplo.com".into(), bcc: "dan@exemplo.com".into(), subject: "Oi".into(), body: body.into(), updated: 0 }
+        DraftRecord { id: id.into(), account: account.into(), reply_to: None, to: "bia@exemplo.com".into(), cc: "carla@exemplo.com".into(), bcc: "dan@exemplo.com".into(), subject: "Oi".into(), body: body.into(), updated: 0, attachments: vec![] }
     }
 
     #[test]
@@ -888,6 +901,40 @@ mod tests {
         for ext in ["", "-wal", "-shm"] {
             std::fs::remove_file(format!("{}{ext}", dir.display())).ok();
         }
+    }
+
+    #[test]
+    fn rascunho_guarda_e_restaura_anexos() {
+        let s = Store::open_in_memory().unwrap();
+        let mut d = draft("d1", "a", "com anexo");
+        d.attachments = vec![OutAttachment { name: "a.pdf".into(), mime: "application/pdf".into(), data: "QUJD".into() }];
+        s.save_draft(&d).unwrap();
+        let got = &s.list_drafts().unwrap()[0];
+        assert_eq!((got.attachments.len(), got.attachments[0].name.as_str(), got.attachments[0].data.as_str()), (1, "a.pdf", "QUJD"));
+        // Remover o anexo e salvar de novo limpa a coluna.
+        d.attachments.clear();
+        s.save_draft(&d).unwrap();
+        assert!(s.list_drafts().unwrap()[0].attachments.is_empty());
+    }
+
+    #[test]
+    fn rascunho_antigo_ganha_coluna_de_anexos_vazia() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE drafts (id TEXT PRIMARY KEY, account TEXT NOT NULL, reply_to INTEGER, to_addr TEXT NOT NULL DEFAULT '',
+               cc_addr TEXT NOT NULL DEFAULT '', bcc_addr TEXT NOT NULL DEFAULT '',
+               subject TEXT NOT NULL DEFAULT '', body TEXT NOT NULL DEFAULT '', updated INTEGER NOT NULL);
+             INSERT INTO drafts (id, account, to_addr, updated) VALUES ('velho', 'a', 'x@y.z', 1);",
+        )
+        .unwrap();
+        let s = Store::init(conn).unwrap();
+        let d = &s.list_drafts().unwrap()[0];
+        assert!(d.attachments.is_empty());
+        // E o rascunho antigo aceita anexos depois da migração.
+        let mut novo = draft("velho", "a", "x");
+        novo.attachments = vec![OutAttachment { name: "b".into(), mime: "".into(), data: "QQ==".into() }];
+        s.save_draft(&novo).unwrap();
+        assert_eq!(s.list_drafts().unwrap()[0].attachments.len(), 1);
     }
 
     #[test]

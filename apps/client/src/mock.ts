@@ -237,9 +237,9 @@ export const mockApi = {
     await wait(150);
     messages.forEach((m) => { if (ids.includes(m.id)) m.flagged = flagged; });
   },
-  async unreadCounts(): Promise<UnreadCounts> {
+  async unreadCounts(account?: string | null): Promise<UnreadCounts> {
     const out: UnreadCounts = {};
-    for (const m of messages) if (!m.seen && m.role) out[m.role] = (out[m.role] ?? 0) + 1;
+    for (const m of messages) if (!m.seen && m.role && (!account || m.account === account)) out[m.role] = (out[m.role] ?? 0) + 1;
     return out;
   },
   async forwardAttachments(id: number): Promise<OutAttachment[]> {

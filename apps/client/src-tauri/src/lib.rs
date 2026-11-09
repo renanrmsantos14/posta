@@ -426,10 +426,10 @@ fn search_starred(state: State<'_, AppState>, query: String) -> CmdResult<Vec<Me
     state.store.lock().unwrap().search_starred(&query, 200).map_err(err)
 }
 
-/// Não lidas por papel de pasta (chaves `inbox`, `sent`...), somando as contas.
+/// Não lidas por papel de pasta (chaves `inbox`, `sent`...): todas as contas, ou só a `account`.
 #[tauri::command]
-fn unread_counts(state: State<'_, AppState>) -> CmdResult<HashMap<String, u32>> {
-    let counts = state.store.lock().unwrap().unread_counts().map_err(err)?;
+fn unread_counts(state: State<'_, AppState>, account: Option<String>) -> CmdResult<HashMap<String, u32>> {
+    let counts = state.store.lock().unwrap().unread_counts(account.as_deref()).map_err(err)?;
     Ok(counts.into_iter().map(|(r, n)| (r.as_str().to_string(), n)).collect())
 }
 
