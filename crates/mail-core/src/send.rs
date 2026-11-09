@@ -12,7 +12,7 @@ use crate::imap_sync::{connect, AuthMode, ImapAccount, ImapSession, Security};
 use crate::store::ReplyRef;
 use crate::{Error, Result};
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Outgoing {
     /// Um ou mais endereços separados por vírgula ou ponto e vírgula.
     pub to: String,
@@ -79,11 +79,34 @@ fn attachment_part(a: &OutAttachment, data: Vec<u8>) -> Result<SinglePart> {
 
 /// Monta a mensagem. Em resposta, In-Reply-To e References mantêm a conversa agrupada.
 pub fn build(acc: &ImapAccount, out: &Outgoing, reply: Option<&ReplyRef>) -> Result<Message> {
+    build_with(acc, out, reply, false)
+}
+
+/// Cabeçalho `Auto-Submitted: auto-replied` (RFC 3834): outros robôs não respondem de volta.
+#[derive(Debug, Clone)]
+struct AutoSubmitted;
+
+impl header::Header for AutoSubmitted {
+    fn name() -> header::HeaderName {
+        header::HeaderName::new_from_ascii_str("Auto-Submitted")
+    }
+    fn parse(_: &str) -> std::result::Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(Self)
+    }
+    fn display(&self) -> header::HeaderValue {
+        header::HeaderValue::new(Self::name(), "auto-replied".to_string())
+    }
+}
+
+fn build_with(acc: &ImapAccount, out: &Outgoing, reply: Option<&ReplyRef>, auto: bool) -> Result<Message> {
     let addr: lettre::Address =
         acc.username.parse().map_err(|_| Error::Invalid(format!("remetente inválido: {}", acc.username)))?;
     let from = Mailbox::new(acc.name.clone().filter(|n| !n.trim().is_empty()), addr);
     let mut b = Message::builder().from(from).subject(out.subject.trim()).message_id(None);
     b = b.mailbox(header::To::from(recipients(&out.to)?));
+    if auto {
+        b = b.header(AutoSubmitted);
+    }
     if let Some(r) = reply.filter(|r| !r.message_id.is_empty()) {
         let parent = format!("<{}>", r.message_id);
         let refs = r
@@ -184,7 +207,16 @@ fn after_send(acc: &ImapAccount, raw: &[u8], reply: Option<&ReplyRef>) -> Result
 
 /// Envia. Só falha se a mensagem não saiu; problemas depois do envio viram aviso.
 pub fn send(acc: &ImapAccount, out: &Outgoing, reply: Option<&ReplyRef>) -> Result<SendReport> {
-    let msg = build(acc, out, reply)?;
+    send_with(acc, out, reply, false)
+}
+
+/// Envia uma resposta automática (marcada como `Auto-Submitted`).
+pub fn send_auto(acc: &ImapAccount, out: &Outgoing, reply: Option<&ReplyRef>) -> Result<SendReport> {
+    send_with(acc, out, reply, true)
+}
+
+fn send_with(acc: &ImapAccount, out: &Outgoing, reply: Option<&ReplyRef>, auto: bool) -> Result<SendReport> {
+    let msg = build_with(acc, out, reply, auto)?;
     let raw = msg.formatted();
     transport(acc)?.send(&msg)?;
     Ok(match after_send(acc, &raw, reply) {

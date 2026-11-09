@@ -440,3 +440,39 @@ fn cria_renomeia_e_exclui_pastas_com_subpastas() {
     let (names, _) = imap_sync::list_user_folders(&acc).unwrap();
     assert!(!names.iter().any(|n| n.contains("Projeto")), "{names:?}");
 }
+
+#[test]
+fn busca_no_servidor_acha_e_baixa_o_que_nao_esta_no_banco() {
+    let Some(acc) = account("srv") else { return };
+    let mut s = session(&acc);
+    s.append("INBOX", &raw(1, "Contrato antigo")).finish().unwrap();
+    s.append("INBOX", &raw(2, "Cotação aeroporto")).flag(imap::types::Flag::Seen).finish().unwrap();
+    s.append("INBOX", &raw(3, "Outro assunto")).finish().unwrap();
+    let anexo = "From: x@y.com\r\nTo: eu@exemplo.com\r\nSubject: Planta\r\nMIME-Version: 1.0\r\n\
+                 Content-Type: multipart/mixed; boundary=b\r\n\r\n--b\r\nContent-Type: text/plain\r\n\r\nveja\r\n\
+                 --b\r\nContent-Type: application/pdf; name=a.pdf\r\nContent-Disposition: attachment; filename=a.pdf\r\n\
+                 Content-Transfer-Encoding: base64\r\n\r\nSGVsbG8=\r\n--b--\r\n";
+    s.append("INBOX", anexo.as_bytes()).finish().unwrap();
+    s.logout().ok();
+
+    // Só a mais recente fica no banco; a busca no servidor traz as outras.
+    let mut store = Store::open_in_memory().unwrap();
+    imap_sync::sync_mailbox(&acc, &mut store, "INBOX", Some(1)).unwrap();
+    assert_eq!(store.list("INBOX", 50, 0).unwrap().len(), 1);
+
+    let f = mail_core::search::parse("assunto:contrato");
+    let uids = imap_sync::search_server(&acc, &mut store, "INBOX", &f).unwrap();
+    assert_eq!(uids.len(), 1);
+    let found = store.by_uids(&acc.id, "INBOX", &uids).unwrap();
+    assert_eq!(found[0].subject, "Contrato antigo");
+
+    let f = mail_core::search::parse("é:não-lida de:ana@exemplo.com");
+    assert_eq!(imap_sync::search_server(&acc, &mut store, "INBOX", &f).unwrap().len(), 2);
+
+    let f = mail_core::search::parse("tem:anexo");
+    let uids = imap_sync::search_server(&acc, &mut store, "INBOX", &f).unwrap();
+    assert_eq!(store.by_uids(&acc.id, "INBOX", &uids).unwrap()[0].subject, "Planta");
+
+    // Sem critério não consulta nada.
+    assert!(imap_sync::search_server(&acc, &mut store, "INBOX", &mail_core::search::parse("")).unwrap().is_empty());
+}
