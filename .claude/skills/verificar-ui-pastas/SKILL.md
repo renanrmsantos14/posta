@@ -11,7 +11,8 @@ description: Verifica a UI de pastas (criar, renomear, excluir, arrastar), categ
    - Mensagem aberta: `e` mostra toast "Arquivada" com Desfazer; Desfazer devolve a linha ao mesmo lugar; sem desfazer, some após 4 s.
    - `#` na entrada manda para Lixeira; `#` na Lixeira abre "Excluir de vez?" (foco em Cancelar, Esc fecha, Excluir remove).
    - Mover mensagem com assunto "fatura" falha no mock: ela volta e aparece toast de erro.
-   - `.actions` em uma linha a 1280 px (altura ~40 px) e a 390 px; sem divisória curva solta entre linhas (a 390 px na Lixeira).
+   - Faixa `.cmdbar` em uma linha a 1280 px; a 390 px a faixa some e `.actions.mobile-actions` fica em uma linha, sem divisória curva solta (na Lixeira).
+   - Rail: o contador `.count` não cruza o ícone (compare `getBoundingClientRect` de `.count` e do `svg` em 1280 e em 1024, modo estreito) e fica dentro da `.rail`; Favoritos e contas aparecem.
    - Console sem erro nem aviso.
 4. Pastas, categorias e conta (1360x860), no mock:
    - Barra mostra Pastas (Clientes, subpasta Lumen) e Categorias (Trabalho, Pessoal, Importante).
