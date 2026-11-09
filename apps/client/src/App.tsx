@@ -11,6 +11,7 @@ import { aliasFor, aliasLines, addrOf } from "./aliases";
 import { justSwiped, swipeProps, type SwipeAction, type SwipeDir } from "./swipe";
 import { escapeHtml, textToHtml } from "./richtext";
 import { Toaster, toast } from "./toast";
+import { applyAppearance, themePref, watchSystem } from "./themes";
 import { FOLDERS, LOCAL_VIEWS, SHOWS_UNREAD, folderTree, viewInfo, withStarred, type Dest, type FolderNode } from "./folders";
 import { Resizer } from "./Resizer";
 import { SettingsPage } from "./SettingsPage";
@@ -660,14 +661,19 @@ export default function App() {
     refreshDrafts();
   }
 
-  /** Tema e fonte vivem no <html>; "sistema" e "M" ficam sem atributo. */
+  /** Tema, destaque e fonte vivem no <html>. Antes de as configurações chegarem vale o que o public/theme-init.js aplicou. */
+  const [accentAdjusted, setAccentAdjusted] = useState(false);
+  useEffect(() => {
+    if (!prefsReady) return;
+    const apply = () => setAccentAdjusted(applyAppearance(themePref(settings.theme), settings.accent)?.adjusted ?? false);
+    apply();
+    return themePref(settings.theme) === "system" ? watchSystem(apply) : undefined;
+  }, [prefsReady, settings.theme, settings.accent]);
   useEffect(() => {
     const root = document.documentElement;
-    if (settings.theme === "light" || settings.theme === "dark") root.dataset.theme = settings.theme;
-    else delete root.dataset.theme;
     if (settings.size === "s" || settings.size === "l") root.dataset.size = settings.size;
     else delete root.dataset.size;
-  }, [settings.theme, settings.size]);
+  }, [settings.size]);
 
   // Tela cheia só existe com uma mensagem aberta e fora das Configurações.
   useEffect(() => { if (full && !current) setFull(false); }, [full, current]);
@@ -1622,7 +1628,7 @@ export default function App() {
       )}
       {settingsOpen && (
         <SettingsPage accounts={accounts ?? []} settings={settings} onSetting={changeSetting} onRemoveAccount={removeAccount}
-          onAddAccount={() => setDialog(true)} onAccountSaved={accountSaved} onClose={() => setSettingsOpen(false)} onUpdate={showUpdate} onApplyRules={applyRules} />
+          onAddAccount={() => setDialog(true)} onAccountSaved={accountSaved} onClose={() => setSettingsOpen(false)} onUpdate={showUpdate} onApplyRules={applyRules} accentAdjusted={accentAdjusted} onPreview={previewSetting} />
       )}
       {folderDialog && (
         <FolderDialog state={folderDialog} accounts={accounts ?? []} folders={userFolders} onSubmit={submitFolder} onClose={() => setFolderDialog(null)} />
