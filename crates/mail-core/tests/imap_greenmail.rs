@@ -3,7 +3,7 @@
 //! Sem a variável, os testes passam sem fazer nada.
 
 use imap::{ClientBuilder, ConnectionMode};
-use mail_core::{imap_sync, send, ImapAccount, Outgoing, Role, Security, SmtpServer, Store};
+use mail_core::{imap_sync, send, ImapAccount, OutAttachment, Outgoing, Role, Security, SmtpServer, Store};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 fn account(tag: &str) -> Option<ImapAccount> {
@@ -134,6 +134,9 @@ fn responde_por_smtp_guarda_em_enviados_e_marca_respondida() {
         to: ana.username.clone(),
         subject: "Re: Translado sexta".into(),
         body: "Confirmado: 7h40 no saguão.".into(),
+        cc: String::new(),
+        bcc: String::new(),
+        attachments: vec![],
     };
     let report = send::send(&eu, &out, Some(&reply)).unwrap();
     assert_eq!(report.warning, None);
@@ -260,4 +263,51 @@ fn idle_acorda_quando_chega_mensagem() {
     // Sem novidade: expira no prazo.
     let end = imap_sync::idle_wait(&acc, "INBOX", Duration::from_secs(2)).unwrap();
     assert_eq!(end, IdleEnd::TimedOut);
+}
+
+#[test]
+fn envia_com_anexo_e_cc_e_le_de_volta() {
+    use base64::Engine;
+    let (Some(eu), Some(ana), Some(bia)) = (account("eu"), account("ana"), account("bia")) else { return };
+    if eu.smtp.is_none() {
+        return;
+    }
+    let conteudo: Vec<u8> = (0..=255u8).cycle().take(5000).collect();
+    let out = Outgoing {
+        to: ana.username.clone(),
+        subject: "Contrato com anexo".into(),
+        body: "Segue o arquivo.".into(),
+        cc: bia.username.clone(),
+        bcc: String::new(),
+        attachments: vec![OutAttachment {
+            name: "contrato.bin".into(),
+            mime: "application/octet-stream".into(),
+            data: base64::engine::general_purpose::STANDARD.encode(&conteudo),
+        }],
+    };
+    send::send(&eu, &out, None).unwrap();
+
+    // Destinatário e copiado recebem a mensagem com o anexo listado.
+    for quem in [&ana, &bia] {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut got = None;
+        for _ in 0..20 {
+            imap_sync::sync_mailbox(quem, &mut store, "INBOX", None).unwrap();
+            got = store.search("arquivo", 5).unwrap().into_iter().next();
+            if got.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let got = got.expect("mensagem chegou");
+        let d = store.get(got.id).unwrap().unwrap();
+        assert_eq!(d.attachments.len(), 1, "{:?}", d.attachments);
+        let a = &d.attachments[0];
+        assert_eq!((a.name.as_str(), a.size), ("contrato.bin", 5000));
+
+        // O conteúdo vem do servidor sob demanda e bate byte a byte.
+        let raw = imap_sync::fetch_raw(quem, "INBOX", got.uid).unwrap().unwrap();
+        let (_, data) = mail_core::attachments::extract(&raw, a.index).unwrap();
+        assert_eq!(data, conteudo);
+    }
 }

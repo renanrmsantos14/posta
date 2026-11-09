@@ -45,7 +45,7 @@ A chave de assinatura fica em `~/.tauri/posta.key` (senha em `~/.tauri/posta.key
 
 ## Envio
 
-SMTP com servidor e porta sugeridos pelo domínio (465 = TLS, outras = STARTTLS). Depois de clicar em Enviar há 4 s para desfazer; se o envio falhar, o rascunho volta intacto. Respostas levam `In-Reply-To`/`References`, a original ganha `\Answered` e uma cópia vai para Enviados (exceto Gmail, que já guarda sozinho; Outlook pode duplicar).
+SMTP com servidor e porta sugeridos pelo domínio (465 = TLS, outras = STARTTLS). Depois de clicar em Enviar há 4 s para desfazer; se o envio falhar, o rascunho volta intacto. Cc e Bcc (botão "Cc/Bcc") aceitam vários endereços separados por vírgula ou `;`. O clipe do painel anexa arquivos (até 25 MB no total; vai como `multipart/mixed`). Ao ler, os anexos aparecem como chips: clicar baixa do servidor, salva em Downloads e abre com o programa padrão; imagens inline (`cid:`) aparecem no corpo. Respostas levam `In-Reply-To`/`References`, a original ganha `\Answered` e uma cópia vai para Enviados (exceto Gmail, que já guarda sozinho; Outlook pode duplicar).
 
 ## Entrar com Google e Microsoft
 

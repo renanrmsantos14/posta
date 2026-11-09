@@ -615,3 +615,23 @@ kbd {
   .icon-btn[data-busy] .sync-icon, .spinner { animation: pulse 1s ease infinite !important; animation-duration: 1s !important; animation-iteration-count: infinite !important; }
   @keyframes pulse { 50% { opacity: 0.4; } }
 }
+
+/* ---------- Anexos ---------- */
+.cc-toggle { flex: none; margin-left: 8px; }
+.attach-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 20px; border-top: 1px solid var(--line); }
+.chips, .attachments { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.chip { display: inline-flex; align-items: center; gap: 6px; max-width: 260px; padding: 4px 8px; border: 1px solid var(--line);
+  border-radius: 6px; background: var(--rail); color: var(--text); font: 12px/1.4 var(--sans); }
+.chip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.chip-size { flex: none; color: var(--muted); font-size: 11px; }
+.chip-x { display: inline-grid; place-items: center; width: 18px; height: 18px; padding: 0; border: 0; border-radius: 4px;
+  background: transparent; color: var(--muted); cursor: pointer; transition: background 120ms var(--ease-out), color 120ms var(--ease-out); }
+.chip-x:hover { background: var(--hover); color: var(--strong); }
+.attach-total { margin-left: auto; color: var(--faint); font-size: 11px; }
+.attach-bar .form-error { flex-basis: 100%; margin: 0; }
+.attachments { margin: 0 0 14px; }
+.chip.attachment { cursor: pointer; transition: background 120ms var(--ease-out), transform 120ms var(--ease-out); }
+.chip.attachment:hover { background: var(--selected); }
+.chip.attachment:active { transform: scale(0.97); }
+.chip.attachment:disabled { opacity: 0.6; cursor: progress; }
+@media (max-width: 760px) { .attach-bar { padding-left: 16px; padding-right: 16px; } }

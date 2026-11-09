@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use imap_proto::NameAttribute;
 
+use crate::attachments;
 use crate::oauth::{Provider, XOauth2};
 use crate::folders::{archive_name, pick, Folder, Listed, Role};
 use crate::store::{NewMessage, Store};
@@ -159,6 +160,19 @@ fn parse(uid: u32, raw: &[u8], seen: bool, fallback_date: i64, own_addr: &str) -
     } else {
         reply_addr
     };
+    let html = msg
+        .as_ref()
+        .map(|m| {
+            // `html_body` também traz texto puro convertido; só interessa HTML de verdade.
+            let html = m
+                .html_body()
+                .filter(|p| matches!(p.kind(), PartKind::Html))
+                .filter_map(|p| p.text())
+                .collect::<Vec<_>>()
+                .join("\n");
+            attachments::inline_cids(m, html)
+        })
+        .unwrap_or_default();
     NewMessage {
         uid,
         from_name: from.and_then(|f| f.name()).unwrap_or_default().to_string(),
@@ -174,17 +188,8 @@ fn parse(uid: u32, raw: &[u8], seen: bool, fallback_date: i64, own_addr: &str) -
             .and_then(|m| m.body_text(0))
             .map(|b| b.into_owned())
             .unwrap_or_default(),
-        body_html: msg
-            .as_ref()
-            .map(|m| {
-                // `html_body` também traz texto puro convertido; só interessa HTML de verdade.
-                m.html_body()
-                    .filter(|p| matches!(p.kind(), PartKind::Html))
-                    .filter_map(|p| p.text())
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            })
-            .unwrap_or_default(),
+        body_html: html.clone(),
+        attachments: msg.as_ref().map(|m| attachments::list(m, &html)).unwrap_or_default(),
         seen,
         message_id: msg.as_ref().and_then(|m| m.message_id()).unwrap_or_default().to_string(),
         refs: msg
@@ -348,6 +353,16 @@ pub fn fetch_to(acc: &ImapAccount, mailbox: &str, uid: u32) -> Result<Option<Str
 }
 
 /// Testa as credenciais sem sincronizar nada.
+/// Mensagem completa (para extrair um anexo sob demanda).
+pub fn fetch_raw(acc: &ImapAccount, mailbox: &str, uid: u32) -> Result<Option<Vec<u8>>> {
+    let mut session = connect(acc)?;
+    session.select(mailbox)?;
+    let fetches = session.uid_fetch(uid.to_string(), "BODY.PEEK[]")?;
+    let raw = fetches.iter().find_map(|f| f.body().map(<[u8]>::to_vec));
+    session.logout().ok();
+    Ok(raw)
+}
+
 pub fn check_login(acc: &ImapAccount) -> Result<()> {
     connect(acc)?.logout().ok();
     Ok(())

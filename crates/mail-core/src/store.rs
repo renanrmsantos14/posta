@@ -4,11 +4,12 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use std::path::Path;
 
+use crate::attachments::Attachment;
 use crate::folders::{Folder, Role};
 use crate::Result;
 
 /// O banco é só uma cópia do servidor: mudou o esquema, apaga e sincroniza de novo.
-const SCHEMA_VERSION: i32 = 3;
+const SCHEMA_VERSION: i32 = 4;
 
 const SCHEMA: &str = "
 PRAGMA journal_mode = WAL;
@@ -35,6 +36,7 @@ CREATE TABLE IF NOT EXISTS messages (
   message_id TEXT NOT NULL DEFAULT '',
   refs TEXT NOT NULL DEFAULT '',
   reply_addr TEXT NOT NULL DEFAULT '',
+  attachments TEXT NOT NULL DEFAULT '[]',
   UNIQUE (account, mailbox, uid)
 );
 CREATE INDEX IF NOT EXISTS messages_by_date ON messages (date DESC);
@@ -78,6 +80,7 @@ pub struct NewMessage {
     pub refs: String,
     /// Para quem a resposta vai: Reply-To, ou o remetente.
     pub reply_addr: String,
+    pub attachments: Vec<Attachment>,
 }
 
 /// O que é preciso para responder mantendo a conversa agrupada.
@@ -112,6 +115,7 @@ pub struct MessageDetail {
     /// Vazio quando a mensagem só tem texto.
     pub body_html: String,
     pub reply_addr: String,
+    pub attachments: Vec<Attachment>,
 }
 
 pub struct Store {
@@ -224,8 +228,8 @@ impl Store {
             let mut stmt = tx.prepare_cached(
                 "INSERT OR IGNORE INTO messages
                  (account, mailbox, uid, from_name, from_addr, subject, date, snippet, body_text, body_html, seen,
-                  message_id, refs, reply_addr)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                  message_id, refs, reply_addr, attachments)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             )?;
             for m in msgs {
                 stmt.execute(params![
@@ -242,7 +246,8 @@ impl Store {
                     m.seen,
                     m.message_id,
                     m.refs,
-                    m.reply_addr
+                    m.reply_addr,
+                    serde_json::to_string(&m.attachments).unwrap_or_else(|_| "[]".into())
                 ])?;
             }
         }
@@ -309,7 +314,7 @@ impl Store {
         Ok(self
             .conn
             .query_row(
-                &format!("SELECT {SUMMARY_COLS}, m.body_text, m.body_html, m.reply_addr FROM messages m WHERE m.id = ?1"),
+                &format!("SELECT {SUMMARY_COLS}, m.body_text, m.body_html, m.reply_addr, m.attachments FROM messages m WHERE m.id = ?1"),
                 params![id],
                 |r| {
                     Ok(MessageDetail {
@@ -317,6 +322,7 @@ impl Store {
                         body_text: r.get(9)?,
                         body_html: r.get(10)?,
                         reply_addr: r.get(11)?,
+                        attachments: serde_json::from_str(&r.get::<_, String>(12)?).unwrap_or_default(),
                     })
                 },
             )
@@ -438,6 +444,7 @@ mod tests {
             date,
             body_text: body.into(),
             body_html: String::new(),
+            attachments: vec![],
             seen: false,
             message_id: format!("{uid}@exemplo.com"),
             refs: String::new(),
