@@ -1,5 +1,5 @@
 // Dados de exemplo para rodar a UI no navegador (pnpm dev), sem Tauri e sem rede.
-import type { Account, Contact, Draft, Provider, MessageDetail, MessageSummary, NewAccount, OutAttachment, Role, SendReport, Settings, StoredDraft, SyncResult, UnreadCounts, UserFolder, View } from "./api";
+import type { Account, Contact, Draft, FlushReport, OutboxItem, QueueStatus, Provider, MessageDetail, MessageSummary, NewAccount, OutAttachment, Role, SendReport, Settings, StoredDraft, SyncResult, UnreadCounts, UserFolder, View } from "./api";
 import { parseBox, parseCat } from "./views";
 
 const now = Math.floor(Date.now() / 1000);
@@ -163,6 +163,16 @@ const inView = (m: MockMessage, view: View) => {
   return view === "starred" ? m.flagged && m.role !== "trash" && m.role !== "junk" : m.role === (view === "all" ? "inbox" : view);
 };
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// Rede simulada: no console do navegador, `__mockOffline(true)` liga o modo offline (ações entram na fila).
+let offline = false;
+let pendingOps = 0;
+let outbox: OutboxItem[] = [];
+(window as unknown as { __mockOffline: (v: boolean) => void }).__mockOffline = (v) => {
+  offline = v;
+  window.dispatchEvent(new Event(v ? "offline" : "online"));
+};
+const queue = (n: number) => { if (offline) pendingOps += n; };
 let syncCount = 0;
 
 export const mockApi = {
@@ -235,7 +245,8 @@ export const mockApi = {
   },
   async syncFolder(view: View, _keep: number): Promise<SyncResult> {
     await wait(500);
-    return { fetched: 0, total: messages.filter((m) => inView(m, view)).length, errors: [], skipped: false };
+    if (offline) return { fetched: 0, total: 0, errors: [], skipped: false, offline: true };
+    return { fetched: 0, total: messages.filter((m) => inView(m, view)).length, errors: [], skipped: false, offline: false };
   },
   async userFolders(): Promise<UserFolder[]> {
     return userFolders.filter((f) => accounts.some((a) => a.id === f.account));
@@ -297,8 +308,9 @@ export const mockApi = {
   },
   async sync(): Promise<SyncResult> {
     await wait(700);
+    if (offline) return { fetched: 0, total: 0, errors: [], skipped: false, offline: true };
     syncCount += 1;
-    if (syncCount % 3 !== 2) return { fetched: 0, total: messages.length, errors: [], skipped: false };
+    if (syncCount % 3 !== 2) return { fetched: 0, total: messages.length, errors: [], skipped: false, offline: false };
     const id = messages.length + 1;
     messages = [
       {
@@ -309,7 +321,7 @@ export const mockApi = {
       },
       ...messages,
     ];
-    return { fetched: 1, total: messages.length, errors: [], skipped: false };
+    return { fetched: 1, total: messages.length, errors: [], skipped: false, offline: false };
   },
   async list(view: View, limit: number, offset: number): Promise<MessageSummary[]> {
     return messages.filter((m) => inView(m, view)).sort((a, b) => b.date - a.date).slice(offset, offset + limit).map(summary);
@@ -341,36 +353,43 @@ export const mockApi = {
     if (m.subject.toLowerCase().includes("fatura")) throw "IMAP: servidor recusou o MOVE";
     m.role = role;
     m.box = undefined;
+    queue(1);
   },
   async moveMany(ids: number[], role: Role): Promise<void> {
     await wait(400);
     const found = messages.filter((x) => ids.includes(x.id));
     if (found.some((m) => m.subject.toLowerCase().includes("fatura"))) throw "IMAP: servidor recusou o MOVE";
     found.forEach((m) => { m.role = role; m.box = undefined; });
+    queue(found.length);
   },
   async deleteForever(id: number): Promise<void> {
     await wait(400);
     messages = messages.filter((x) => x.id !== id);
+    queue(1);
   },
   /** Para testar a falha: anexo com "falha" no nome. */
   async saveAttachment(id: number, index: number, _open: boolean): Promise<string> {
     await wait(500);
     const a = messages.find((x) => x.id === id)?.attachments.find((x) => x.index === index);
     if (!a) throw "anexo não encontrado na mensagem";
+    if (offline) throw "Sem conexão: o anexo ainda não foi baixado.";
     if (a.name.includes("falha")) throw "IMAP: conexão recusada";
     return `/home/renan/Downloads/${a.name}`;
   },
   async deleteForeverMany(ids: number[]): Promise<void> {
     await wait(400);
     messages = messages.filter((x) => !ids.includes(x.id));
+    queue(ids.length);
   },
   async setSeen(ids: number[], seen: boolean): Promise<void> {
     await wait(150);
     messages.forEach((m) => { if (ids.includes(m.id)) m.seen = seen; });
+    queue(ids.length);
   },
   async setFlagged(ids: number[], flagged: boolean): Promise<void> {
     await wait(150);
     messages.forEach((m) => { if (ids.includes(m.id)) m.flagged = flagged; });
+    queue(ids.length);
   },
   async unreadCounts(): Promise<UnreadCounts> {
     const out: UnreadCounts = {};
@@ -385,7 +404,31 @@ export const mockApi = {
   /** Para testar a falha: qualquer destinatário com "erro". */
   async send(d: Draft): Promise<SendReport> {
     await wait(800);
+    if (offline) {
+      outbox = [...outbox, { id: Date.now(), account: d.account, to: d.to, subject: d.subject, created: Math.floor(Date.now() / 1000), error: "" }];
+      return { saved_to_sent: false, warning: null, queued: true };
+    }
     if (d.to.includes("erro")) throw "SMTP: connection refused";
-    return { saved_to_sent: true, warning: null };
+    return { saved_to_sent: true, warning: null, queued: false };
+  },
+  async queueStatus(): Promise<QueueStatus> {
+    return { online: !offline, pending: pendingOps, outbox: outbox.length };
+  },
+  async flushQueue(): Promise<FlushReport> {
+    if (offline) return { applied: 0, discarded: 0, sent: 0, failed: 0, offline: true };
+    await wait(400);
+    const report = { applied: pendingOps, discarded: 0, sent: outbox.length, failed: 0, offline: false };
+    pendingOps = 0;
+    outbox = [];
+    return report;
+  },
+  async listOutbox(): Promise<OutboxItem[]> {
+    return [...outbox];
+  },
+  async discardOutbox(id: number): Promise<void> {
+    outbox = outbox.filter((m) => m.id !== id);
+  },
+  async retryOutbox(_id: number): Promise<FlushReport> {
+    return this.flushQueue();
   },
 };

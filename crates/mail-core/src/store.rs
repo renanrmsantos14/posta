@@ -82,6 +82,25 @@ CREATE TABLE IF NOT EXISTS message_categories (
   category TEXT NOT NULL,
   PRIMARY KEY (account, msg_key)
 );
+-- Fila offline (dados do usuário): ações aguardando o servidor e envios aguardando rede.
+CREATE TABLE IF NOT EXISTS pending_ops (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  account TEXT NOT NULL,
+  mailbox TEXT NOT NULL,
+  uid INTEGER NOT NULL,
+  kind TEXT NOT NULL,
+  arg TEXT NOT NULL DEFAULT '',
+  created INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+);
+CREATE TABLE IF NOT EXISTS outbox (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  account TEXT NOT NULL,
+  to_addr TEXT NOT NULL DEFAULT '',
+  subject TEXT NOT NULL DEFAULT '',
+  payload TEXT NOT NULL,
+  created INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+  error TEXT NOT NULL DEFAULT ''
+);
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5 (
   subject, from_name, from_addr, body_text,
   content = 'messages', content_rowid = 'id',
@@ -124,7 +143,7 @@ pub struct NewMessage {
 }
 
 /// O que é preciso para responder mantendo a conversa agrupada.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ReplyRef {
     pub account: String,
     pub mailbox: String,
@@ -212,7 +231,7 @@ pub struct DraftRecord {
 }
 
 pub struct Store {
-    conn: Connection,
+    pub(crate) conn: Connection,
 }
 
 /// Nome da pasta do papel ?1 na conta da linha; Caixa de entrada sem linha em `folders` é "INBOX".
@@ -923,6 +942,8 @@ impl Store {
             "DELETE FROM mailbox_state WHERE account = ?1",
             "DELETE FROM folders WHERE account = ?1",
             "DELETE FROM drafts WHERE account = ?1",
+            "DELETE FROM pending_ops WHERE account = ?1",
+            "DELETE FROM outbox WHERE account = ?1",
             "DELETE FROM user_folders WHERE account = ?1",
             "DELETE FROM message_categories WHERE account = ?1",
             "DELETE FROM settings WHERE key = 'signature:' || ?1",

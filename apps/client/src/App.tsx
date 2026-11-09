@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, ArrowsIn, ArrowsOut, ArrowBendUpLeft, ArrowBendDoubleUpLeft, ArrowBendUpRight, ArrowsClockwise, Archive, CaretUp, Check, MagnifyingGlass, NotePencil, Plus, Star, Trash, Tray, EnvelopeSimple, EnvelopeSimpleOpen, GearSix, Paperclip, FileText, X } from "@phosphor-icons/react";
+import { ArrowLeft, ArrowsIn, ArrowsOut, ArrowBendUpLeft, ArrowBendDoubleUpLeft, ArrowBendUpRight, ArrowsClockwise, Archive, CaretUp, Check, MagnifyingGlass, NotePencil, Plus, Star, Trash, Tray, EnvelopeSimple, EnvelopeSimpleOpen, GearSix, Paperclip, FileText, PaperPlaneTilt, X } from "@phosphor-icons/react";
 import { HtmlBody, hasRemoteImages } from "./HtmlBody";
-import { api, isTauri, type Account, type Attachment, type MessageDetail, type MessageSummary, type OutAttachment, type Role, type Settings, type StoredDraft, type UnreadCounts, type UserFolder, type View } from "./api";
+import { api, isTauri, type Account, type Attachment, type MessageDetail, type MessageSummary, type OutAttachment, type OutboxItem, type Role, type Settings, type StoredDraft, type UnreadCounts, type UserFolder, type View } from "./api";
 import { AccountDialog } from "./AccountDialog";
 import { CategoryChip, CategoryPicker, parseCategories } from "./Categories";
 import { FolderDialog, type FolderDialogState } from "./FolderDialog";
 import { FolderTree } from "./FolderTree";
+import { OfflineBadge, OutboxPane, useQueue } from "./Offline";
 import { boxView, catView, parseBox, parseCat } from "./views";
 import { Composer, type ComposeInit } from "./Composer";
 import { escapeHtml, textToHtml } from "./richtext";
@@ -123,6 +124,9 @@ export default function App() {
   const [drafts, setDrafts] = useState<StoredDraft[]>([]);
   const [settings, setSettings] = useState<Settings>({});
   const [showDrafts, setShowDrafts] = useState(false);
+  /** Caixa de saída: usa o mesmo painel dos rascunhos (`showDrafts` junto) para mostrar outra lista. */
+  const [showOutbox, setShowOutbox] = useState(false);
+  const [outbox, setOutbox] = useState<OutboxItem[]>([]);
   /** Conta escolhida na barra lateral; null = todas as caixas juntas. */
   const [accountFilter, setAccountFilter] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
@@ -253,6 +257,11 @@ export default function App() {
       }
       const r = await api.sync();
       if (r.skipped) return;
+      if (r.offline) {
+        refreshNet();
+        if (manual) toast("Sem conexão. Você vê o que já está salvo.", "info");
+        return;
+      }
       r.errors.forEach((e) => toast(e, "error"));
       api.folders().then((r) => setFolderList(withStarred(r))).catch(() => {});
       api.userFolders().then(setUserFolders).catch(() => {});
@@ -268,6 +277,11 @@ export default function App() {
       setSyncing(false);
     }
   }, [reload, syncFolder, folder, remote, keep, messages.length]);
+
+  // Rede e fila offline: ao voltar a conexão, a fila é reaplicada e as listas recarregam.
+  const { status: net, refresh: refreshNet } = useQueue(() => { refreshCounts(); reload(messages.length).catch(() => {}); });
+  const refreshOutbox = useCallback(() => { api.listOutbox().then(setOutbox).catch(() => {}); refreshNet(); }, [refreshNet]);
+  useEffect(() => { if (showOutbox || net.outbox) refreshOutbox(); }, [showOutbox, net.outbox, refreshOutbox]);
 
   const refreshDrafts = useCallback(() => api.listDrafts().then(setDrafts).catch(() => {}), []);
 
@@ -401,6 +415,7 @@ export default function App() {
 
   function openFolder(role: View) {
     setShowDrafts(false);
+    setShowOutbox(false);
     if (role === folder) return;
     setQuery("");
     setResults(null);
@@ -487,8 +502,16 @@ export default function App() {
     openComposer({ title: d.reply_to !== null ? "Responder" : "Nova mensagem", draftId: d.id, account, reply_to: d.reply_to, to: d.to, cc: d.cc, bcc: d.bcc, subject: d.subject, body: d.body, html: d.html || undefined });
   }
 
+  function openOutbox() {
+    setShowDrafts(true);
+    setShowOutbox(true);
+    setReaderOpen(false);
+    refreshOutbox();
+  }
+
   function openDrafts() {
     setShowDrafts(true);
+    setShowOutbox(false);
     setReaderOpen(false);
     refreshDrafts();
   }
@@ -691,7 +714,12 @@ export default function App() {
           const r = await api.send(draft);
           // Enviada: o rascunho cumpriu o papel. Se o envio falhar ou for desfeito, ele continua salvo.
           if (draftId) api.deleteDraft(draftId).then(refreshDrafts).catch(() => {});
-          toast("Mensagem enviada", "success");
+          if (r.queued) {
+            toast("Sem conexão. A mensagem está na Caixa de saída e sai quando a rede voltar.", "info");
+            refreshOutbox();
+          } else {
+            toast("Mensagem enviada", "success");
+          }
           if (r.warning) toast(r.warning, "info");
         } catch (e) {
           toast(`Não foi enviada: ${e}`, "error");
@@ -1104,11 +1132,18 @@ export default function App() {
               </button>
             );
           })}
-          <button className="nav-item" title="Rascunhos" onClick={openDrafts} aria-current={showDrafts ? "page" : undefined}>
+          <button className="nav-item" title="Rascunhos" onClick={openDrafts} aria-current={showDrafts && !showOutbox ? "page" : undefined}>
             <FileText size={16} weight="bold" />
             <span>Rascunhos</span>
             {drafts.length > 0 && <span className="count plain">{drafts.length}</span>}
           </button>
+          {(net.outbox > 0 || showOutbox) && (
+            <button className="nav-item" title="Caixa de saída" onClick={openOutbox} aria-current={showOutbox ? "page" : undefined}>
+              <PaperPlaneTilt size={16} weight="bold" />
+              <span>Caixa de saída</span>
+              {net.outbox > 0 && <span className="count plain">{net.outbox}</span>}
+            </button>
+          )}
         </nav>
         <FolderTree nodes={tree} accounts={accounts ?? []} byAccount={(accounts?.length ?? 0) > 1 && !accountFilter}
           categories={categories} folder={folder} inList={!showDrafts} open={openFolder}
@@ -1168,6 +1203,7 @@ export default function App() {
               onChange={(e) => setQuery(e.target.value)} aria-label="Buscar mensagens" />
             {!query && <kbd>/</kbd>}
           </label>
+          <OfflineBadge status={net} />
           <button className="icon-btn" onClick={() => sync(true)} aria-label="Sincronizar" data-busy={syncing || undefined}
             disabled={!accounts?.length}>
             <ArrowsClockwise size={16} weight="bold" className="sync-icon" />
@@ -1197,9 +1233,14 @@ export default function App() {
               </button>
             );
           })}
-          <button className="btn ghost small" onClick={openDrafts} aria-current={showDrafts ? "page" : undefined}>
+          <button className="btn ghost small" onClick={openDrafts} aria-current={showDrafts && !showOutbox ? "page" : undefined}>
             <FileText size={14} weight="bold" /> Rascunhos
           </button>
+          {(net.outbox > 0 || showOutbox) && (
+            <button className="btn ghost small" onClick={openOutbox} aria-current={showOutbox ? "page" : undefined}>
+              <PaperPlaneTilt size={14} weight="bold" /> Caixa de saída
+            </button>
+          )}
         </div>
         {checkedList.length > 0 && (
           <div className="bulk" role="toolbar" aria-label="Ações em lote">
@@ -1230,7 +1271,9 @@ export default function App() {
           <div className="result-meta">{plural(results.length, "resultado", "resultados")} para “{query.trim()}”</div>
         )}
 
-        {showDrafts ? (
+        {showOutbox ? (
+          <OutboxPane items={outbox} accounts={(accounts ?? []).map((a) => a.id)} online={net.online} onChange={refreshOutbox} />
+        ) : showDrafts ? (
           draftsShown.length === 0 ? (
             <div className="empty quiet"><p>Nenhum rascunho</p></div>
           ) : (
