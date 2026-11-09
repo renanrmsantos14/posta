@@ -49,7 +49,7 @@ O painel de escrita salva sozinho (1,5 s após parar de digitar; Cc e Bcc entram
 
 Em **Configurações**: assinatura por conta (entra em mensagens novas e respostas), notificações de email novo e **Remover conta** ("Remover conta?" apaga senha/refresh do cofre e mensagens, pastas e rascunhos locais; o servidor não é tocado). Com várias contas, a Caixa de entrada junta todas e a barra lateral filtra por conta ("Todas as contas" volta).
 
-Notificações: quando a IDLE ou o sync traz mensagens novas e a janela não está em foco, o sistema mostra remetente e assunto (até 3; acima disso, um resumo). O título da janela leva a contagem de não lidas. No Android 13+ o app pede a permissão ao abrir. O clique na notificação só abre o app no Android; no desktop o plugin não expõe o clique.
+Notificações: quando a IDLE ou o sync traz mensagens novas e a janela não está em foco, o sistema mostra remetente e assunto (até 3; acima disso, um resumo). O título da janela leva a contagem de não lidas. No Android 13+ o app pede a permissão ao abrir. Clicar na notificação traz o app para a frente (mesmo escondido na bandeja ou minimizado), vai à conta e à pasta e abre aquele email no leitor; se a notificação resumia vários, abre a Caixa de entrada da conta, e se o email já saiu da pasta, abre a pasta com um aviso. No Windows o clique só é entregue com o aviso ainda na tela (não depois de ir para a Central de ações).
 
 ## Envio
 

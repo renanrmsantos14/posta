@@ -5,7 +5,7 @@
 1. `MainActivity` agenda, uma vez, um `PeriodicWorkRequest` do WorkManager (`SyncWorker`, id único `posta-sync`, política `KEEP`) a cada 15 minutos e com rede (`NetworkType.CONNECTED`).
 2. `SyncWorker.doWork` carrega `libposta_lib.so` e chama `nativeSync(context, dir)` (JNI), com `dir` = `dataDir/br.com.renan.posta`, a mesma pasta que o Tauri usa.
 3. `src-tauri/src/android_sync.rs` abre o SQLite, monta um `AppState` próprio, reaplica a fila offline e sincroniza a Caixa de entrada de cada conta (mesmo caminho do app aberto).
-4. Se chegou mensagem nova (e a opção de notificações não está desligada), devolve o total e até 3 remetentes/assuntos; o Worker mostra a notificação do canal "Novas mensagens". Tocar abre o app.
+4. Se chegou mensagem nova (e a opção de notificações não está desligada), devolve o total e até 3 remetentes/assuntos; o Worker mostra a notificação do canal "Novas mensagens". Tocar abre o app já no email (um só) ou na Caixa de entrada da conta (vários): o Intent leva `conta`, `pasta` e `id` local; `MainActivity` guarda o destino e a UI o busca por `window.PostaNative.takePending()` ao carregar (app fechado) ou ao receber o evento `posta-open` (`onNewIntent`, app em segundo plano).
 5. Com o app visível (`appVisible`), o Worker não faz nada: o IDLE já mantém tudo em dia.
 
 A permissão `POST_NOTIFICATIONS` (Android 13+) é pedida pelo app ao ativar avisos; sem ela, ou com as notificações bloqueadas, o Worker sincroniza mas não mostra nada.
