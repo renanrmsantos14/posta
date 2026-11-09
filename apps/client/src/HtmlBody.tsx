@@ -28,6 +28,23 @@ function buildDoc(html: string, remote: boolean) {
   return `<!doctype html><html><head>${head}${doc.head.innerHTML}</head>${doc.body.outerHTML}</html>`;
 }
 
+/** Documentos já montados (sanitização + CSP): reabrir uma mensagem recente não refaz o parse. */
+const DOC_CACHE_MAX = 40;
+const docCache = new Map<string, string>();
+function cachedDoc(html: string, remote: boolean) {
+  const key = (remote ? "1" : "0") + html;
+  const hit = docCache.get(key);
+  if (hit !== undefined) {
+    docCache.delete(key);
+    docCache.set(key, hit);
+    return hit;
+  }
+  const doc = buildDoc(html, remote);
+  docCache.set(key, doc);
+  if (docCache.size > DOC_CACHE_MAX) docCache.delete(docCache.keys().next().value as string);
+  return doc;
+}
+
 async function openExternal(url: string) {
   if (isTauri) {
     const { openUrl } = await import("@tauri-apps/plugin-opener");
@@ -41,10 +58,12 @@ async function openExternal(url: string) {
  * Email HTML num iframe isolado. `sandbox="allow-same-origin"` (sem allow-scripts) mantém scripts
  * desligados e deixa só o app ler o documento para medir a altura e capturar cliques nos links.
  */
-export function HtmlBody({ html, remote }: { html: string; remote: boolean }) {
+export function HtmlBody({ html, remote, onContext }: { html: string; remote: boolean; onContext?: (x: number, y: number, selection: string) => void }) {
   const ref = useRef<HTMLIFrameElement>(null);
   const [height, setHeight] = useState(120);
-  const srcDoc = useMemo(() => buildDoc(html, remote), [html, remote]);
+  const srcDoc = useMemo(() => cachedDoc(html, remote), [html, remote]);
+  const ctx = useRef(onContext);
+  ctx.current = onContext;
 
   useEffect(() => {
     const frame = ref.current;
@@ -62,6 +81,12 @@ export function HtmlBody({ html, remote }: { html: string; remote: boolean }) {
       fit();
       if (wired.has(doc)) return;
       wired.add(doc);
+      doc.addEventListener("contextmenu", (e) => {
+        if (!ctx.current) return;
+        e.preventDefault();
+        const r = frame.getBoundingClientRect();
+        ctx.current(r.left + e.clientX, r.top + e.clientY, doc.getSelection()?.toString() ?? "");
+      });
       doc.addEventListener("click", (e) => {
         const a = (e.target as Element | null)?.closest?.("a[href], area[href]") as HTMLAnchorElement | null;
         if (!a) return;
