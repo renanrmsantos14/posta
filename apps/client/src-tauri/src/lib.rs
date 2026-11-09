@@ -905,11 +905,17 @@ struct DragFiles {
     icon: String,
 }
 
-/// Pasta temporária própria do arrasto; recriada a cada preparo (os arquivos antigos já foram soltos ou descartados).
+/// Pasta temporária própria do arrasto (uma por processo, só do usuário); recriada a cada preparo
+/// (os arquivos antigos já foram soltos ou descartados).
 fn drag_dir() -> CmdResult<PathBuf> {
-    let dir = std::env::temp_dir().join("posta-drag");
+    let dir = std::env::temp_dir().join(format!("posta-drag-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).map_err(err)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).map_err(err)?;
+    }
     Ok(dir)
 }
 
@@ -928,7 +934,14 @@ async fn prepare_drag_eml(app: AppHandle, ids: Vec<i64>) -> CmdResult<DragFiles>
         for id in ids {
             let subject = st.store.lock().unwrap().get(id).map_err(err)?.map(|d| d.summary.subject).unwrap_or_default();
             let raw = fetch_raw_online(st, id)?;
-            let title: String = subject.trim().chars().take(80).collect();
+            // Nome de arquivo tem limite em bytes (255): 80 caracteres de 4 bytes estouram.
+            let mut title = String::new();
+            for c in subject.trim().chars().take(80) {
+                if title.len() + c.len_utf8() > 150 {
+                    break;
+                }
+                title.push(c);
+            }
             let name = format!("{}.eml", if title.is_empty() { "mensagem" } else { title.as_str() });
             let path = free_path(&dir, &mail_core::attachments::safe_name(&name));
             fs::write(&path, raw).map_err(err)?;

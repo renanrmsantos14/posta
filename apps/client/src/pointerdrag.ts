@@ -39,6 +39,10 @@ export function trackPointerDrag(down: { clientX: number; clientY: number; butto
     window.addEventListener("click", eat, { capture: true, once: true });
     setTimeout(() => window.removeEventListener("click", eat, true), 0);
   };
+  /** Cancelou com o botão ainda pressionado (Esc, perda de foco): o clique vem só ao soltar, então espera o soltar. */
+  const swallowClickAfterUp = () => {
+    window.addEventListener("pointerup", swallowClick, { capture: true, once: true });
+  };
   const leave = () => {
     if (left || !started || !h.leave) return;
     left = true;
@@ -72,12 +76,12 @@ export function trackPointerDrag(down: { clientX: number; clientY: number; butto
     e.preventDefault();
     e.stopPropagation();
     finish();
-    swallowClick();
+    swallowClickAfterUp();
     h.cancel?.();
   }
   function onBlur() {
     finish();
-    if (started) h.cancel?.();
+    if (started) { swallowClickAfterUp(); h.cancel?.(); }
   }
   function onLeave() { leave(); }
 

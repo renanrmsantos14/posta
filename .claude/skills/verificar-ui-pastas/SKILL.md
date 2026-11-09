@@ -17,6 +17,10 @@ description: Verifica a UI de pastas (criar, renomear, excluir, arrastar), categ
 4. Pastas, categorias e conta (1360x860), no mock:
    - Barra mostra Pastas (Clientes, subpasta Lumen) e Categorias (Trabalho, Pessoal, Importante).
    - "Nova pasta": cria; nome repetido mostra erro; clique fora com texto abre "Descartar alterações?" (Continuar editando / Descartar). Renomear e "Nova subpasta" (pasta mãe pré-selecionada) funcionam.
+   - Árvore recolhível (mock tem Clientes/Lumen/Obras e Projetos): padrão = primeiro nível aberto, resto fechado; `.folder-caret` (aria-expanded), ← fecha e → abre com foco no item, duplo clique alterna; pasta fechada mostra a soma de não lidas das filhas; estado persiste após recarregar (configuração `folders:open`, chave conta+nome).
+   - Arrasto por ponteiro (mouse, limite de 5 px; `p.mouse.down/move/up`, não HTML5): fantasma `.drag-ghost` com a contagem, alvo `[data-drop]` realçado (transição 140 ms), soltar na pasta move ("Movida para <pasta>"), Ctrl copia (fantasma com "+", a linha fica), Lixeira exclui e Arquivo arquiva com Desfazer/Ctrl+Z, Esc cancela, várias selecionadas arrastam juntas; 600 ms sobre pasta fechada abre.
+   - Cabeçalho compacto a 1280 px: `.topbar` 34 + `.cmdbar-host` 26 = 60 px (antes 88); a 390 px / ponteiro grosso os alvos continuam com 44 px (topbar 52).
+   - Fora do mock (só no app instalado): arrastar para fora gera .eml/anexo pelo sistema (`prepare_drag_*` + `startDrag`) e soltar arquivos externos no Composer anexa.
    - Arrastar a primeira linha para uma pasta mostra "Movida para <pasta>" e a mensagem aparece na pasta. Excluir pasta com mensagens pede confirmação (clique fora cancela); pasta vazia some direto. Pasta "Falha" falha ao criar.
    - Categoria: menu "Categoria" na mensagem e na barra em lote aplica o chip; clicar na categoria filtra; "Nenhuma" na visão da categoria remove a linha.
    - Configurações > Categorias: "Adicionar categoria". Contas > Editar: senha com menos de 3 caracteres e servidor com "erro" mostram erro inline sem salvar; salvar válido mostra "nome · usuário".

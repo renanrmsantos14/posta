@@ -340,7 +340,11 @@ export function Composer({ init, accounts, settings, onSend, onSchedule, templat
   const hasFiles = (e: React.DragEvent) => Array.from(e.dataTransfer.types).includes("Files");
   const fileDrop = {
     onDragOver: (e: React.DragEvent) => { if (!hasFiles(e)) return; e.preventDefault(); e.dataTransfer.dropEffect = "copy"; setFileOver(true); },
-    onDragLeave: (e: React.DragEvent) => { if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setFileOver(false); },
+    // WebKit não informa `relatedTarget` no dragleave: vale a posição do ponteiro contra a caixa do compositor.
+    onDragLeave: (e: React.DragEvent) => {
+      const r = e.currentTarget.getBoundingClientRect();
+      if (e.clientX <= r.left || e.clientX >= r.right || e.clientY <= r.top || e.clientY >= r.bottom) setFileOver(false);
+    },
     onDrop: (e: React.DragEvent) => { if (!hasFiles(e)) return; e.preventDefault(); setFileOver(false); void addFiles(e.dataTransfer.files); },
   };
 

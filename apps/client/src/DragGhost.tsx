@@ -21,7 +21,7 @@ export function DragGhost({ elRef, pos, count, copy, label }: Props) {
     <div ref={elRef} className="drag-ghost" aria-hidden data-copy={copy || undefined} data-many={count > 1 || undefined}>
       <span className="drag-ghost-n">{count}</span>
       {copy && <Plus size={12} weight="bold" />}
-      <span className="drag-ghost-label">{count > 1 ? `${count} mensagens` : label}</span>
+      <span className="drag-ghost-label">{count > 1 ? "mensagens" : label}</span>
     </div>
   );
 }

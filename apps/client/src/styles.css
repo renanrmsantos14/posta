@@ -1041,7 +1041,7 @@ button.scope-chip { cursor: pointer; }
 
 /* ---------- Faixa de comandos: uma linha só; rótulos e depois itens somem pela largura da própria faixa ---------- */
 .cmdbar-host { container: cmd / inline-size; background: var(--surface); border-bottom: 1px solid var(--line); }
-.cmdbar { display: flex; flex-wrap: nowrap; align-items: center; gap: 2px; height: 26px; padding: 0 8px; overflow: hidden; }
+.cmdbar { display: flex; flex-wrap: nowrap; align-items: center; gap: 2px; height: 25px; padding: 0 8px; overflow: hidden; }
 .cmd-slot { display: inline-flex; flex: none; align-items: center; }
 .cmd-sep { width: 1px; height: 14px; margin: 0 5px; background: var(--line); }
 .cmd {
