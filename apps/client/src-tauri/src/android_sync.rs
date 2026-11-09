@@ -20,6 +20,7 @@ fn flat(t: &str) -> String {
 /// (conta e id local levam o toque na notificação à mensagem).
 /// Vazia quando não há nada a notificar (nada novo, notificações desligadas nas opções ou erro).
 fn run(dir: PathBuf) -> Result<String, String> {
+    crate::android_cert_dir();
     let store = Store::open(dir.join("mail.sqlite")).map_err(|e| e.to_string())?;
     let st = AppState::new(dir, store);
     flush_pending(&st);
