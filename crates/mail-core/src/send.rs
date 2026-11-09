@@ -30,6 +30,25 @@ pub struct Outgoing {
     pub bcc: String,
     #[serde(default)]
     pub attachments: Vec<OutAttachment>,
+    /// Remetente alternativo (alias da conta): `end@x.com` ou `Nome <end@x.com>`. Ausente = o endereço da conta.
+    #[serde(default)]
+    pub from: Option<String>,
+}
+
+/// Endereço de uma linha `end@x.com` ou `Nome <end@x.com>`, em minúsculas.
+fn addr_of(s: &str) -> String {
+    let s = s.trim();
+    let inner = match (s.rfind('<'), s.rfind('>')) {
+        (Some(a), Some(b)) if a < b => &s[a + 1..b],
+        _ => s,
+    };
+    inner.trim().to_lowercase()
+}
+
+/// O `from` só vale se for o endereço da conta ou um dos aliases cadastrados (uma linha por alias).
+pub fn from_allowed(username: &str, aliases: &str, from: &str) -> bool {
+    let want = addr_of(from);
+    want == addr_of(username) || aliases.lines().any(|l| !l.trim().is_empty() && addr_of(l) == want)
 }
 
 /// Arquivo anexado ao rascunho; o conteúdo vem em base64.
@@ -99,9 +118,19 @@ impl header::Header for AutoSubmitted {
 }
 
 fn build_with(acc: &ImapAccount, out: &Outgoing, reply: Option<&ReplyRef>, auto: bool) -> Result<Message> {
-    let addr: lettre::Address =
-        acc.username.parse().map_err(|_| Error::Invalid(format!("remetente inválido: {}", acc.username)))?;
-    let from = Mailbox::new(acc.name.clone().filter(|n| !n.trim().is_empty()), addr);
+    let account_name = acc.name.clone().filter(|n| !n.trim().is_empty());
+    let from = match out.from.as_deref().map(str::trim).filter(|f| !f.is_empty()) {
+        Some(f) => {
+            let m: Mailbox = f.parse().map_err(|_| Error::Invalid(format!("remetente inválido: {f}")))?;
+            // Alias sem nome próprio usa o nome da conta.
+            Mailbox::new(m.name.clone().or(account_name), m.email)
+        }
+        None => {
+            let addr: lettre::Address =
+                acc.username.parse().map_err(|_| Error::Invalid(format!("remetente inválido: {}", acc.username)))?;
+            Mailbox::new(account_name, addr)
+        }
+    };
     let mut b = Message::builder().from(from).subject(out.subject.trim()).message_id(None);
     b = b.mailbox(header::To::from(recipients(&out.to)?));
     if auto {
@@ -247,7 +276,7 @@ mod tests {
     }
 
     fn out(to: &str) -> Outgoing {
-        Outgoing { to: to.into(), subject: "Re: Orçamento".into(), body: "Combinado, até amanhã.".into(), html: None, cc: String::new(), bcc: String::new(), attachments: vec![] }
+        Outgoing { to: to.into(), subject: "Re: Orçamento".into(), body: "Combinado, até amanhã.".into(), html: None, cc: String::new(), bcc: String::new(), attachments: vec![], from: None }
     }
 
     #[test]
@@ -345,5 +374,16 @@ mod tests {
     fn smtp_padrao_vem_do_imap() {
         let s = acc().smtp();
         assert_eq!((s.host.as_str(), s.port), ("smtp.exemplo.com", 465));
+    }
+
+    #[test]
+    fn alias_vira_o_remetente_e_so_vale_se_cadastrado() {
+        let mut o = out("ana@x.com");
+        o.from = Some("Vendas <vendas@exemplo.com>".into());
+        let raw = String::from_utf8(build(&acc(), &o, None).unwrap().formatted()).unwrap();
+        assert!(raw.contains("From: Vendas <vendas@exemplo.com>") || raw.contains("From: \"Vendas\" <vendas@exemplo.com>"), "{raw}");
+        assert!(from_allowed("eu@exemplo.com", "vendas@exemplo.com\nOutro <o@x.com>", "Vendas <VENDAS@exemplo.com>"));
+        assert!(from_allowed("eu@exemplo.com", "", "eu@exemplo.com"));
+        assert!(!from_allowed("eu@exemplo.com", "vendas@exemplo.com", "outro@exemplo.com"));
     }
 }

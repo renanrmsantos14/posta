@@ -139,6 +139,7 @@ fn responde_por_smtp_guarda_em_enviados_e_marca_respondida() {
         cc: String::new(),
         bcc: String::new(),
         attachments: vec![],
+        from: None,
     };
     let report = send::send(&eu, &out, Some(&reply)).unwrap();
     assert_eq!(report.warning, None);
@@ -287,6 +288,7 @@ fn envia_com_anexo_e_cc_e_le_de_volta() {
             mime: "application/octet-stream".into(),
             data: base64::engine::general_purpose::STANDARD.encode(&conteudo),
         }],
+        from: None,
     };
     send::send(&eu, &out, None).unwrap();
 
@@ -475,4 +477,37 @@ fn busca_no_servidor_acha_e_baixa_o_que_nao_esta_no_banco() {
 
     // Sem critério não consulta nada.
     assert!(imap_sync::search_server(&acc, &mut store, "INBOX", &mail_core::search::parse("")).unwrap().is_empty());
+}
+
+#[test]
+fn envia_com_alias_como_remetente() {
+    let (Some(eu), Some(ana)) = (account("eu"), account("ana")) else { return };
+    if eu.smtp.is_none() {
+        return;
+    }
+    let out = Outgoing {
+        to: ana.username.clone(),
+        subject: "Enviado pelo alias".into(),
+        body: "Mensagem vinda do alias.".into(),
+        html: None,
+        cc: String::new(),
+        bcc: String::new(),
+        attachments: vec![],
+        from: Some("Reservas Betinhos <reservas@betinhos.exemplo>".into()),
+    };
+    send::send(&eu, &out, None).unwrap();
+
+    let mut store = Store::open_in_memory().unwrap();
+    let mut got = None;
+    for _ in 0..20 {
+        imap_sync::sync_mailbox(&ana, &mut store, "INBOX", None).unwrap();
+        got = store.search("alias", 5).unwrap().into_iter().find(|m| m.subject == "Enviado pelo alias");
+        if got.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let got = got.expect("mensagem do alias chegou");
+    assert_eq!(got.from_addr, "reservas@betinhos.exemplo");
+    assert_eq!(got.from_name, "Reservas Betinhos");
 }

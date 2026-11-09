@@ -929,3 +929,35 @@ kbd {
 .sched-status[data-failed] { color: #b3261e; }
 .result-meta { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .actions .cat-menu { right: auto; left: 0; transform-origin: top left; }
+/* ---------- Remetentes alternativos ---------- */
+.alias-field { display: block; margin-top: 10px; white-space: normal; }
+.alias-field .signature-input { display: block; width: 100%; min-height: 0; margin-top: 4px; }
+
+/* ---------- Gesto de deslizar a linha (toque) ---------- */
+@media (pointer: coarse) {
+  .row { touch-action: pan-y; }
+  .row[data-swipe] { background: var(--swipe-bg); transition: none; }
+  .row[data-swipe] > * { transform: translateX(var(--swipe-x)); }
+  .row[data-swipe]::after {
+    position: absolute; top: 50%; translate: 0 -50%; padding: 0 18px; opacity: var(--swipe-p, 0);
+    font-weight: 600; font-size: 13px; color: var(--swipe-fg); pointer-events: none;
+  }
+  .row[data-swipe="right"]::after { left: 0; }
+  .row[data-swipe="left"]::after { right: 0; }
+  .row[data-swipe-action="archive"] { --swipe-bg: var(--green-bg); --swipe-fg: var(--green); }
+  .row[data-swipe-action="trash"] { --swipe-bg: var(--red-bg); --swipe-fg: var(--red); }
+  .row[data-swipe-action="read"] { --swipe-bg: var(--blue-bg); --swipe-fg: var(--blue); }
+  .row[data-swipe-action="archive"]::after { content: "Arquivar"; }
+  .row[data-swipe-action="trash"]::after { content: "Excluir"; }
+  .row[data-swipe-action="read"]::after { content: "Lida / não lida"; }
+}
+
+/* ---------- Impressão: só a mensagem aberta ---------- */
+@media print {
+  html, body, #root { height: auto !important; overflow: visible !important; background: #fff !important; }
+  .app { display: block !important; height: auto !important; visibility: visible !important; }
+  .rail, .list-pane, .resizer, .fab, .actions, .back, .expand-btn, .img-banner, .thread-fold, .toaster, .composer, .confirm, .settings-page { display: none !important; }
+  .reader { display: block !important; position: static !important; overflow: visible !important; height: auto !important; transform: none !important; background: #fff !important; }
+  .message { max-width: none !important; margin: 0 !important; padding: 0 !important; animation: none !important; color: #000 !important; }
+  .html-body { border: 0 !important; }
+}

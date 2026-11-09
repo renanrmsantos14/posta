@@ -10,6 +10,8 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_notification::NotificationExt;
 
 mod secret;
+#[cfg(desktop)]
+mod tray;
 
 struct AppState {
     dir: PathBuf,
@@ -22,6 +24,8 @@ struct AppState {
     watching: Mutex<HashSet<String>>,
     /// A UI avisa (`set_focused`) quando a janela ganha ou perde o foco; sem foco, email novo notifica.
     focused: AtomicBool,
+    /// O ícone da bandeja foi criado: só então fechar a janela pode apenas escondê-la.
+    tray: AtomicBool,
 }
 
 type CmdResult<T> = Result<T, String>;
@@ -190,6 +194,8 @@ fn idle_cycle(app: &AppHandle, id: &str) -> CmdResult<()> {
     };
     let fetched = sync_account_inbox(&st, id)?;
     notify_new(app, &st, id, fetched);
+    #[cfg(desktop)]
+    tray::refresh(app);
     if changed || fetched > 0 {
         app.emit("mail-changed", fetched).ok();
     }
@@ -439,8 +445,12 @@ fn search_starred(state: State<'_, AppState>, query: String) -> CmdResult<Vec<Me
 
 /// Não lidas por papel de pasta (chaves `inbox`, `sent`...), somando as contas.
 #[tauri::command]
-fn unread_counts(state: State<'_, AppState>) -> CmdResult<HashMap<String, u32>> {
+fn unread_counts(app: AppHandle, state: State<'_, AppState>) -> CmdResult<HashMap<String, u32>> {
     let counts = state.store.lock().unwrap().unread_counts().map_err(err)?;
+    #[cfg(desktop)]
+    tray::show_unread(&app, counts.iter().find(|(r, _)| *r == Role::Inbox).map_or(0, |(_, n)| *n));
+    #[cfg(not(desktop))]
+    let _ = &app;
     Ok(counts.into_iter().map(|(r, n)| (r.as_str().to_string(), n)).collect())
 }
 
@@ -620,15 +630,16 @@ fn free_path(dir: &std::path::Path, name: &str) -> PathBuf {
         .expect("sempre há um nome livre")
 }
 
+/// Downloads do sistema, ou uma pasta do app quando o sistema não tem Downloads.
+fn download_dir(app: &AppHandle) -> CmdResult<PathBuf> {
+    app.path().download_dir().or_else(|_| app.path().app_data_dir().map(|d| d.join("downloads"))).map_err(err)
+}
+
 /// Baixa o anexo do servidor, grava em Downloads (ou numa pasta do app, se o sistema não tiver
 /// Downloads) e, no desktop, abre com o programa padrão. Devolve o caminho gravado.
 #[tauri::command]
 async fn save_attachment(app: AppHandle, id: i64, index: u32, open: bool) -> CmdResult<String> {
-    let dir = app
-        .path()
-        .download_dir()
-        .or_else(|_| app.path().app_data_dir().map(|d| d.join("downloads")))
-        .map_err(err)?;
+    let dir = download_dir(&app)?;
     let path = blocking(app.clone(), move |st| {
         let loc = st.locate(id)?;
         let acc = st.account_with_password(&loc.account)?;
@@ -652,6 +663,28 @@ async fn save_attachment(app: AppHandle, id: i64, index: u32, open: bool) -> Cmd
     }
     #[cfg(not(desktop))]
     let _ = open;
+    Ok(path.display().to_string())
+}
+
+/// Grava a mensagem original (RFC 822, como o servidor a guarda) em Downloads como `.eml`. Devolve o caminho.
+#[tauri::command]
+async fn save_eml(app: AppHandle, id: i64) -> CmdResult<String> {
+    let dir = download_dir(&app)?;
+    let path = blocking(app, move |st| {
+        let subject = st.store.lock().unwrap().get(id).map_err(err)?.map(|d| d.summary.subject).unwrap_or_default();
+        let loc = st.locate(id)?;
+        let acc = st.account_with_password(&loc.account)?;
+        let raw = imap_sync::fetch_raw(&acc, &loc.mailbox, loc.uid)
+            .map_err(err)?
+            .ok_or_else(|| "mensagem não encontrada no servidor".to_string())?;
+        let title: String = subject.trim().chars().take(80).collect();
+        let name = format!("{}.eml", if title.is_empty() { "mensagem" } else { title.as_str() });
+        fs::create_dir_all(&dir).map_err(err)?;
+        let path = free_path(&dir, &mail_core::attachments::safe_name(&name));
+        fs::write(&path, raw).map_err(err)?;
+        Ok(path)
+    })
+    .await?;
     Ok(path.display().to_string())
 }
 
@@ -690,6 +723,12 @@ async fn send_message(app: AppHandle, draft: Draft) -> CmdResult<SendReport> {
             None => None,
         };
         let acc = st.account_with_password(&draft.account)?;
+        if let Some(from) = draft.message.from.as_deref().filter(|f| !f.trim().is_empty()) {
+            let aliases = st.store.lock().unwrap().setting(&format!("aliases:{}", draft.account)).map_err(err)?.unwrap_or_default();
+            if !send::from_allowed(&acc.username, &aliases, from) {
+                return Err(format!("{from} não é um remetente cadastrado nesta conta"));
+            }
+        }
         send::send(&acc, &draft.message, reply.as_ref()).map_err(err)
     })
     .await
@@ -928,6 +967,36 @@ fn set_setting(state: State<'_, AppState>, key: String, value: String) -> CmdRes
 #[tauri::command]
 fn set_focused(state: State<'_, AppState>, focused: bool) {
     state.focused.store(focused, Ordering::Relaxed);
+}
+
+/// Iniciar com o sistema (só desktop; no Android devolve false).
+#[tauri::command]
+fn get_autostart(app: AppHandle) -> CmdResult<bool> {
+    #[cfg(desktop)]
+    {
+        use tauri_plugin_autostart::ManagerExt;
+        app.autolaunch().is_enabled().map_err(err)
+    }
+    #[cfg(not(desktop))]
+    {
+        let _ = app;
+        Ok(false)
+    }
+}
+
+#[tauri::command]
+fn set_autostart(app: AppHandle, enabled: bool) -> CmdResult<()> {
+    #[cfg(desktop)]
+    {
+        use tauri_plugin_autostart::ManagerExt;
+        let l = app.autolaunch();
+        if enabled { l.enable() } else { l.disable() }.map_err(err)
+    }
+    #[cfg(not(desktop))]
+    {
+        let _ = (app, enabled);
+        Err("iniciar com o sistema só existe no desktop".to_string())
+    }
 }
 
 /// Pede a permissão de notificações (Android 13+ mostra o diálogo do sistema); true se concedida.
@@ -1218,17 +1287,32 @@ pub fn run() {
             #[cfg(desktop)]
             {
                 app.handle().plugin(tauri_plugin_updater::Builder::new().build())?;
+                app.handle().plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, Some(vec!["--minimized"])))?;
             }
             let dir = app.path().app_data_dir()?;
             fs::create_dir_all(&dir)?;
             let store = Store::open(dir.join("mail.sqlite"))?;
-            app.manage(AppState { dir, store: Mutex::new(store), syncing: Mutex::new(()), tokens: Mutex::new(HashMap::new()), watching: Mutex::new(HashSet::new()), focused: AtomicBool::new(true) });
+            app.manage(AppState { dir, store: Mutex::new(store), syncing: Mutex::new(()), tokens: Mutex::new(HashMap::new()), watching: Mutex::new(HashSet::new()), focused: AtomicBool::new(true), tray: AtomicBool::new(false) });
+            #[cfg(desktop)]
+            tray::init(app.handle());
             let st = app.state::<AppState>();
             for acc in st.accounts().unwrap_or_default() {
                 watch_inbox(app.handle(), acc.id);
             }
             start_scheduler(app.handle().clone());
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            // Fechar a janela só a esconde na bandeja (opção `closeToTray`, ligada por padrão).
+            #[cfg(desktop)]
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if tray::hide_on_close(window.app_handle()) {
+                    api.prevent_close();
+                    window.hide().ok();
+                }
+            }
+            #[cfg(not(desktop))]
+            let _ = (window, event);
         })
         .invoke_handler(tauri::generate_handler![
             add_imap_account,
@@ -1253,6 +1337,7 @@ pub fn run() {
             open_message,
             save_attachment,
             forward_attachments,
+            save_eml,
             send_message,
             remove_account,
             list_user_folders,
@@ -1275,6 +1360,8 @@ pub fn run() {
             get_settings,
             set_setting,
             set_focused,
+            get_autostart,
+            set_autostart,
             request_notify_permission,
             apply_rules_now,
             search_filtered,
