@@ -1,6 +1,7 @@
 // Toasts mínimos: chame toast() de qualquer lugar e monte <Toaster /> uma vez.
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { CheckCircle, WarningCircle, Info, PaperPlaneTilt } from "@phosphor-icons/react";
+import { api } from "./api";
 
 type Kind = "success" | "error" | "info" | "sending";
 /** Por que o toast fechou: o usuário clicou na ação, o tempo acabou ou clicou no toast. */
@@ -34,7 +35,22 @@ function dismiss(id: number, reason: CloseReason) {
   }, EXIT_MS);
 }
 
+/** Refaz o login de uma conta OAuth cujo acesso o provedor encerrou. */
+export function reauthenticate(account: string) {
+  toast("Abrindo o navegador para entrar de novo…", "info", { duration: 4000 });
+  api.oauthRelogin(account).then(() => toast("Conta reconectada", "success")).catch((e) => toast(`${e}`, "error", { duration: 10000 }));
+}
+
+/** O núcleo marca erros que só um novo login resolve com `[reauth:<conta>]`. */
+const REAUTH = /\[reauth:([^\]]+)\]\s*/;
+
 export function toast(text: string, kind: Kind = "info", options: Options = {}) {
+  const m = REAUTH.exec(text);
+  if (m) {
+    const account = m[1];
+    text = text.replace(REAUTH, "");
+    options = { duration: 15000, action: { label: "Entrar de novo", onClick: () => reauthenticate(account) }, ...options };
+  }
   // Mantém no máximo 3; quem sai por excesso conta como "tempo acabou".
   items.slice(0, Math.max(0, items.length - 2)).forEach((t) => !t.leaving && t.onClose?.("timeout"));
   items = [...items.slice(-2), { id: nextId++, text, kind, leaving: false, ...options }];

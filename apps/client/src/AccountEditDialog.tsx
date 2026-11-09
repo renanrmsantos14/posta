@@ -91,7 +91,7 @@ export function AccountEditDialog({ account, onClose, onSaved }: Props) {
         </label>
 
         {oauth ? (
-          <p className="hint">O login desta conta é feito pelo provedor; aqui só dá para mudar o nome.</p>
+          <p className="hint">O login desta conta é feito pelo provedor; aqui só dá para mudar o nome. Para reconectar, use "Entrar de novo" na lista de contas.</p>
         ) : (
           <>
             <label className="field">

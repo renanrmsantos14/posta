@@ -1,5 +1,5 @@
 // Dados de exemplo para rodar a UI no navegador (pnpm dev), sem Tauri e sem rede.
-import type { Account, Contact, Draft, FlushReport, MailDelta, MessagePage, OutboxItem, QueueStatus, Provider, MessageDetail, MessageSummary, NewAccount, OutAttachment, Role, ScheduledEdit, SendReport, Settings, StoredDraft, SyncResult, UnreadCounts, UserFolder, View } from "./api";
+import type { Account, Contact, Draft, FlushReport, MailDelta, MessagePage, OutboxItem, QueueStatus, Provider, OauthConfig, OauthConfigView, MessageDetail, MessageSummary, NewAccount, OutAttachment, Role, ScheduledEdit, SendReport, Settings, StoredDraft, SyncResult, UnreadCounts, UserFolder, View } from "./api";
 import { parseRules, type ScheduledItem } from "./productivity";
 import { parseBox, parseCat } from "./views";
 
@@ -293,6 +293,7 @@ const arrive = (n = 1): number[] => {
 (window as unknown as { __mockArrive: (n?: number) => number[] }).__mockArrive = arrive;
 const queue = (n: number) => { if (offline) pendingOps += n; };
 let syncCount = 0;
+let oauthConfig: OauthConfig = { google_id: "", google_secret: "", microsoft_id: "" };
 
 export const mockApi = {
   async listAccounts(): Promise<Account[]> {
@@ -307,6 +308,15 @@ export const mockApi = {
   },
   async oauthProviders(): Promise<Provider[]> {
     return ["google", "microsoft"];
+  },
+  async oauthRelogin(_id: string): Promise<void> {
+    await wait(1000);
+  },
+  async oauthConfigGet(): Promise<OauthConfigView> {
+    return { ...oauthConfig, built_in_google: false, built_in_microsoft: false };
+  },
+  async oauthConfigSet(config: OauthConfig): Promise<void> {
+    oauthConfig = config;
   },
   async oauthLogin(provider: Provider): Promise<Account> {
     await wait(1200);

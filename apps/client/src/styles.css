@@ -1164,3 +1164,7 @@ button.scope-chip { cursor: pointer; }
   :root[data-theme-swap], :root[data-theme-swap] * { transition: none !important; }
   .theme-card, .theme-check { transition: none; }
 }
+
+.oauth-advanced { margin-top: 16px; display: flex; flex-direction: column; gap: 10px; }
+.oauth-advanced > summary { cursor: pointer; font-size: 13px; color: var(--muted); }
+.oauth-advanced > .settings-sub { margin: 0; }

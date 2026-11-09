@@ -12,4 +12,4 @@ description: Verifica o diálogo Adicionar conta com Entrar com Google/Microsoft
    - Clicar em Google mostra "Aguardando o navegador…", bloqueia X/Esc e fecha o diálogo ao concluir.
    - Console sem erro (403 de fonte fora do `fs.allow` do vite não conta).
 4. Print: sobrescreva `/home/renan/.t3/userdata/attachments/posta-oauth.png`. Encerre o vite.
-5. Não validável sem credenciais: login real, XOAUTH2 contra Google/Microsoft e renovação de token. Diga isso no PR.
+5. Ajustes e Client IDs: `verificar-oauth`. Não validável sem credenciais: login real, XOAUTH2 contra Google/Microsoft e renovação de token. Diga isso no PR.

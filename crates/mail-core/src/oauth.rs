@@ -24,6 +24,8 @@ pub enum Provider {
 pub struct Client {
     pub id: String,
     pub secret: Option<String>,
+    /// Só para testes (servidor OAuth falso); em produção vale o endpoint oficial do provedor.
+    pub token_url: Option<String>,
 }
 
 impl Provider {
@@ -166,7 +168,13 @@ pub(crate) fn parse_redirect(request: &str, state: &str) -> Option<Result<String
         return None;
     }
     if let Some(e) = get("error") {
-        return Some(Err(Error::Invalid(format!("login recusado: {e}"))));
+        let aadsts = get("error_description").as_deref().and_then(aadsts_of);
+        let hint = match (e.as_str(), aadsts.as_deref()) {
+            (_, Some("65001" | "90094" | "65004")) => " O administrador do Microsoft 365 precisa aprovar o Posta para esta organização.",
+            ("access_denied", _) => " Se for conta Google, confirme que ela está na lista de usuários de teste do app; se for Microsoft 365, o administrador pode precisar aprovar o Posta.",
+            _ => "",
+        };
+        return Some(Err(Error::Invalid(format!("Login recusado ({e}).{hint}"))));
     }
     Some(get("code").ok_or_else(|| Error::Invalid("resposta de login sem código".into())))
 }
@@ -204,7 +212,40 @@ pub fn wait_for_code(listener: &TcpListener, state: &str, timeout: Duration) -> 
     }
 }
 
-fn token_request(p: Provider, client: &Client, mut form: Vec<(&str, String)>) -> Result<Tokens> {
+/// Falha de renovação do token.
+#[derive(Debug)]
+pub enum RefreshError {
+    /// O provedor não aceita mais o refresh token (expirou, foi revogado, exige consentimento...). Só um novo login resolve.
+    NeedsLogin(String),
+    /// Rede fora, servidor instável ou configuração errada: tentar de novo mais tarde.
+    Failed(Error),
+}
+
+impl std::fmt::Display for RefreshError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RefreshError::NeedsLogin(m) => f.write_str(m),
+            RefreshError::Failed(e) => e.fmt(f),
+        }
+    }
+}
+
+/// Erro do endpoint de token: só o código e o número AADSTS (Microsoft); o corpo pode ecoar dados da requisição.
+struct TokenFailure {
+    status: u16,
+    code: String,
+    aadsts: Option<String>,
+    cause: Option<Error>,
+}
+
+fn aadsts_of(text: &str) -> Option<String> {
+    let at = text.find("AADSTS")?;
+    let digits: String = text[at + 6..].chars().take_while(char::is_ascii_digit).collect();
+    (!digits.is_empty()).then_some(digits)
+}
+
+fn token_request(p: Provider, client: &Client, mut form: Vec<(&str, String)>) -> std::result::Result<Tokens, TokenFailure> {
+    let net = |e: String| TokenFailure { status: 0, code: "rede".into(), aadsts: None, cause: Some(Error::Invalid(format!("OAuth: {e}"))) };
     form.push(("client_id", client.id.clone()));
     if let Some(s) = client.secret.as_ref().filter(|s| !s.is_empty()) {
         form.push(("client_secret", s.clone()));
@@ -216,22 +257,17 @@ fn token_request(p: Provider, client: &Client, mut form: Vec<(&str, String)>) ->
         .timeout_global(Some(Duration::from_secs(30)))
         .build()
         .into();
-    let mut resp = agent
-        .post(p.token_endpoint())
-        .send_form(pairs)
-        .map_err(|e| Error::Invalid(format!("OAuth: {e}")))?;
+    let url = client.token_url.as_deref().unwrap_or_else(|| p.token_endpoint());
+    let mut resp = agent.post(url).send_form(pairs).map_err(|e| net(e.to_string()))?;
     let status = resp.status().as_u16();
-    let text = resp.body_mut().read_to_string().map_err(|e| Error::Invalid(format!("OAuth: {e}")))?;
+    let text = resp.body_mut().read_to_string().map_err(|e| net(e.to_string()))?;
     if status != 200 {
-        // Só o código do erro; o corpo pode ecoar dados da requisição.
-        let code = serde_json::from_str::<serde_json::Value>(&text)
-            .ok()
-            .and_then(|v| v["error"].as_str().map(str::to_string))
-            .unwrap_or_else(|| format!("HTTP {status}"));
-        return Err(Error::Invalid(format!("OAuth: {code}")));
+        let v = serde_json::from_str::<serde_json::Value>(&text).ok();
+        let code = v.as_ref().and_then(|v| v["error"].as_str()).map(str::to_string).unwrap_or_else(|| format!("HTTP {status}"));
+        let aadsts = v.as_ref().and_then(|v| v["error_description"].as_str()).and_then(aadsts_of);
+        return Err(TokenFailure { status, code, aadsts, cause: None });
     }
-    let t: TokenResponse =
-        serde_json::from_str(&text).map_err(|e| Error::Invalid(format!("OAuth: resposta inválida: {e}")))?;
+    let t: TokenResponse = serde_json::from_str(&text).map_err(|e| net(format!("resposta inválida: {e}")))?;
     Ok(Tokens {
         email: t.id_token.as_deref().and_then(email_from_id_token),
         access_token: t.access_token,
@@ -240,25 +276,111 @@ fn token_request(p: Provider, client: &Client, mut form: Vec<(&str, String)>) ->
     })
 }
 
-pub fn exchange_code(p: Provider, client: &Client, code: &str, redirect_uri: &str, verifier: &str) -> Result<Tokens> {
-    token_request(
-        p,
-        client,
-        vec![
-            ("grant_type", "authorization_code".into()),
-            ("code", code.into()),
-            ("redirect_uri", redirect_uri.into()),
-            ("code_verifier", verifier.into()),
-        ],
-    )
+/// Explica ao usuário por que o login ou a renovação foi recusado. `None` = erro que um novo login não resolve.
+fn explain(p: Provider, f: &TokenFailure) -> Option<String> {
+    let admin = matches!(f.aadsts.as_deref(), Some("65001" | "90094" | "65004" | "500011"));
+    if p == Provider::Microsoft && admin {
+        return Some(
+            "O Microsoft 365 desta conta exige aprovação do administrador para o Posta. Peça a ele para conceder o consentimento ao aplicativo (permissões IMAP.AccessAsUser.All e SMTP.Send) e entre de novo."
+                .into(),
+        );
+    }
+    match (p, f.code.as_str()) {
+        (Provider::Google, "invalid_grant") => Some(
+            "O Google encerrou o acesso do Posta a esta conta (token expirado ou revogado). Se o app do Google Cloud ainda está em modo de teste, o acesso vale só 7 dias. Entre de novo."
+                .into(),
+        ),
+        (Provider::Microsoft, "invalid_grant" | "interaction_required" | "consent_required" | "login_required") => Some(
+            "A Microsoft pediu um novo login nesta conta (sessão expirada, senha alterada, verificação em duas etapas ou acesso revogado). Entre de novo."
+                .into(),
+        ),
+        (_, "access_denied") => Some("O acesso foi recusado. Entre de novo e aceite as permissões pedidas.".into()),
+        _ => None,
+    }
 }
 
-pub fn refresh(p: Provider, client: &Client, refresh_token: &str) -> Result<Tokens> {
+fn plain(f: TokenFailure) -> Error {
+    f.cause.unwrap_or_else(|| Error::Invalid(format!("OAuth: {}", f.code)))
+}
+
+pub fn exchange_code(p: Provider, client: &Client, code: &str, redirect_uri: &str, verifier: &str) -> Result<Tokens> {
+    let form = vec![
+        ("grant_type", "authorization_code".to_string()),
+        ("code", code.to_string()),
+        ("redirect_uri", redirect_uri.to_string()),
+        ("code_verifier", verifier.to_string()),
+    ];
+    token_request(p, client, form).map_err(|f| match explain(p, &f) {
+        Some(m) => Error::Invalid(m),
+        None => plain(f),
+    })
+}
+
+pub fn refresh(p: Provider, client: &Client, refresh_token: &str) -> std::result::Result<Tokens, RefreshError> {
     let mut form = vec![("grant_type", "refresh_token".to_string()), ("refresh_token", refresh_token.to_string())];
     if p == Provider::Microsoft {
         form.push(("scope", p.scopes().to_string()));
     }
-    token_request(p, client, form)
+    token_request(p, client, form).map_err(|f| match f.status {
+        // 5xx e rede não significam "refresh token morto": só 4xx com código conhecido pedem novo login.
+        400..=499 => match explain(p, &f) {
+            Some(m) => RefreshError::NeedsLogin(m),
+            None => RefreshError::Failed(plain(f)),
+        },
+        _ => RefreshError::Failed(plain(f)),
+    })
+}
+
+/// Entrega um access token recém-renovado da conta; registrada por quem guarda o refresh token.
+type Refresher = Box<dyn Fn(&str) -> std::result::Result<String, String> + Send + Sync>;
+static REFRESHER: std::sync::OnceLock<Refresher> = std::sync::OnceLock::new();
+
+/// Registra (uma vez) como obter um access token novo da conta `id`.
+/// Usada quando o servidor recusa o token em cache (revogado ou vencido antes do previsto).
+pub fn set_refresher(f: impl Fn(&str) -> std::result::Result<String, String> + Send + Sync + 'static) {
+    let _ = REFRESHER.set(Box::new(f));
+}
+
+/// Roda `op`; se o servidor recusar a autenticação OAuth, renova o token e tenta de novo uma vez.
+pub(crate) fn with_fresh_token_retry<T>(
+    acc: &crate::ImapAccount,
+    is_auth_error: impl Fn(&Error) -> bool,
+    op: impl Fn(&crate::ImapAccount) -> Result<T>,
+) -> Result<T> {
+    let first = op(acc);
+    let Err(e) = &first else { return first };
+    if acc.auth == crate::AuthMode::Password || !is_auth_error(e) {
+        return first;
+    }
+    let Some(refresher) = REFRESHER.get() else { return first };
+    match refresher(&acc.id) {
+        Ok(token) => {
+            let mut retry = acc.clone();
+            retry.password = token;
+            match op(&retry) {
+                Err(e2) if is_auth_error(&e2) => Err(explain_server_refusal(acc, e2)),
+                other => other,
+            }
+        }
+        // Renovação recusada: a mensagem já diz o que fazer (entrar de novo).
+        Err(msg) => Err(Error::Invalid(msg)),
+    }
+}
+
+/// O servidor recusou mesmo com token novo: tenta dizer o motivo provável.
+fn explain_server_refusal(acc: &crate::ImapAccount, e: Error) -> Error {
+    let text = e.to_string();
+    if acc.auth == crate::AuthMode::Microsoft {
+        if text.contains("5.7.139") || text.contains("SmtpClientAuthentication") {
+            return Error::Invalid(
+                "O SMTP AUTH está desativado nesta caixa do Microsoft 365. O administrador precisa ativá-lo (Exchange admin > usuário > Gerenciar aplicativos de email) para o Posta enviar.".into(),
+            );
+        }
+        if text.contains("not connected") {
+            return Error::Invalid("A Microsoft recusou o acesso IMAP desta caixa. O administrador precisa ativar o IMAP para ela.".into());
+        }
+    }
+    e
 }
 
 /// Email do payload do id_token. Sem verificar a assinatura: veio direto do endpoint de token por TLS.
