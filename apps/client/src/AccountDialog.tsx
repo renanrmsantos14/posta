@@ -2,13 +2,14 @@
 import { useEffect, useRef, useState } from "react";
 import { X, Check, GoogleLogo, MicrosoftOutlookLogo } from "@phosphor-icons/react";
 import { api, type Account, type Provider, type Security } from "./api";
+import { openExternal } from "./HtmlBody";
 
 interface Props { onClose: () => void; onAdded: (a: Account) => void }
 
 /** Servidores conhecidos pelo domínio do email. */
 const OUTLOOK = { host: "outlook.office365.com", smtp: "smtp-mail.outlook.com", smtpPort: "587" };
-const PRESETS: Record<string, { host: string; smtp: string; smtpPort: string; hint?: string }> = {
-  "gmail.com": { host: "imap.gmail.com", smtp: "smtp.gmail.com", smtpPort: "465", hint: "No Gmail, use uma senha de app (Conta Google → Segurança)." },
+const PRESETS: Record<string, { host: string; smtp: string; smtpPort: string; hint?: string; link?: { url: string; label: string } }> = {
+  "gmail.com": { host: "imap.gmail.com", smtp: "smtp.gmail.com", smtpPort: "465", hint: "No Gmail, use uma senha de app (exige verificação em duas etapas).", link: { url: "https://myaccount.google.com/apppasswords", label: "Gerar senha de app" } },
   "outlook.com": OUTLOOK,
   "hotmail.com": OUTLOOK,
   "live.com": OUTLOOK,
@@ -118,7 +119,8 @@ export function AccountDialog({ onClose, onAdded }: Props) {
   }
 
   const busy = status !== "idle" || oauth !== null;
-  const missing = providers !== null && OAUTH_BUTTONS.some((b) => !providers.includes(b.provider));
+  // Só aparecem os logins com Client ID configurado (no build ou em Configurações › Contas › Avançado).
+  const buttons = OAUTH_BUTTONS.filter((b) => providers?.includes(b.provider));
 
   return (
     <div className="overlay" data-leaving={leaving || undefined} onPointerDown={(e) => e.target === e.currentTarget && requestClose()}>
@@ -130,20 +132,16 @@ export function AccountDialog({ onClose, onAdded }: Props) {
           </button>
         </header>
 
-        <div className="oauth-buttons">
-          {OAUTH_BUTTONS.map(({ provider, label, Icon }) => {
-            const available = providers?.includes(provider) ?? false;
-            return (
-              <button key={provider} type="button" className="btn wide" disabled={!available || busy}
-                title={available ? undefined : "Indisponível nesta versão: faltam os Client IDs: Configurações > Contas > Avançado (docs/oauth-setup.md)."}
-                onClick={() => signIn(provider)}>
+        {buttons.length > 0 && (
+          <div className="oauth-buttons">
+            {buttons.map(({ provider, label, Icon }) => (
+              <button key={provider} type="button" className="btn wide" disabled={busy} onClick={() => signIn(provider)}>
                 {oauth === provider ? <><span className="spinner" aria-hidden />Aguardando o navegador…</> : <><Icon size={18} weight="bold" />{label}</>}
               </button>
-            );
-          })}
-          {missing && <p className="hint">Entrar com Google ou Microsoft ainda não está habilitado: informe os Client IDs em Configurações › Contas › Avançado (veja docs/oauth-setup.md).</p>}
-          <p className="oauth-or"><span>ou use email e senha</span></p>
-        </div>
+            ))}
+            <p className="oauth-or"><span>ou use email e senha</span></p>
+          </div>
+        )}
 
         <label className="field">
           <span>Email</span>
@@ -155,7 +153,12 @@ export function AccountDialog({ onClose, onAdded }: Props) {
           <input type="password" required autoComplete="current-password" value={form.password}
             onChange={(e) => update("password", e.target.value)} />
         </label>
-        {preset?.hint && <p className="hint">{preset.hint}</p>}
+        {preset?.hint && (
+          <p className="hint">
+            {preset.hint}
+            {preset.link && <> <button type="button" className="link-btn" onClick={() => openExternal(preset.link!.url)}>{preset.link.label}</button></>}
+          </p>
+        )}
 
         <div className="field-row">
           <label className="field grow">

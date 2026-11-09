@@ -406,6 +406,8 @@ kbd {
 .grow { flex: 1; min-width: 0; }
 .port { width: 84px; }
 .hint { margin: -6px 0 0; font-size: 12px; color: var(--faint); }
+.link-btn { padding: 0; border: 0; background: none; color: var(--blue); font: inherit; text-decoration: underline; cursor: pointer; }
+.link-btn:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; border-radius: 2px; }
 /* Entrar com Google / Microsoft, acima do formulário manual. */
 .oauth-buttons { display: flex; flex-direction: column; gap: 8px; }
 .oauth-buttons .btn { justify-content: center; gap: 8px; }
