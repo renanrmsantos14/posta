@@ -124,13 +124,16 @@ export interface Contact {
   count: number;
 }
 
-/** Configurações: `signature:<id da conta>`, `aliases:<id da conta>` (um remetente por linha), `notify` ("0" desliga as notificações), `group` ("0" desliga o agrupamento por conversa),
- * `closeToTray` ("0" faz fechar a janela encerrar o app) e `swipeRight`/`swipeLeft` (archive, trash, read, none). */
+/** Configurações: `signature:<id da conta>`, `aliases:<id da conta>` (um remetente por linha), `offlineN` (corpos baixados para leitura offline, padrão 200),
+ * `notify` ("0" desliga as notificações), `group` ("0" desliga o agrupamento por conversa), `closeToTray` ("0" faz fechar a janela encerrar o app)
+ * e `swipeRight`/`swipeLeft` (archive, trash, read, none). */
 export type Settings = Record<string, string>;
 
 export interface SendReport {
   saved_to_sent: boolean;
   warning: string | null;
+  /** Sem rede: foi para a Caixa de saída e sai quando a conexão voltar. */
+  queued: boolean;
 }
 
 export type Role = "inbox" | "sent" | "archive" | "trash" | "junk";
@@ -159,6 +162,34 @@ export interface SyncResult {
   total: number;
   errors: string[];
   skipped: boolean;
+  /** Sem rede: nada foi sincronizado; o app segue com o que está salvo. */
+  offline: boolean;
+}
+
+/** Estado da fila offline: servidor alcançável, ações à espera dele e mensagens na Caixa de saída. */
+export interface QueueStatus {
+  online: boolean;
+  pending: number;
+  outbox: number;
+}
+
+/** Mensagem na Caixa de saída; `error` não vazio = o servidor recusou e ela ficou parada. */
+export interface OutboxItem {
+  id: number;
+  account: string;
+  to: string;
+  subject: string;
+  /** Unix, em segundos. */
+  created: number;
+  error: string;
+}
+
+export interface FlushReport {
+  applied: number;
+  discarded: number;
+  sent: number;
+  failed: number;
+  offline: boolean;
 }
 
 /** Agendamento tirado da fila para editar: o conteúdo volta ao Composer. */
@@ -257,6 +288,11 @@ export const api = isTauri
       setSetting: (key: string, value: string) => invoke<void>("set_setting", { key, value }),
       setFocused: (focused: boolean) => invoke<void>("set_focused", { focused }),
       requestNotifyPermission: () => invoke<boolean>("request_notify_permission"),
+      queueStatus: () => invoke<QueueStatus>("queue_status"),
+      flushQueue: () => invoke<FlushReport>("flush_queue"),
+      listOutbox: () => invoke<OutboxItem[]>("list_outbox"),
+      discardOutbox: (id: number) => invoke<void>("discard_outbox", { id }),
+      retryOutbox: (id: number) => invoke<FlushReport>("retry_outbox", { id }),
     }
   : mockApi;
 

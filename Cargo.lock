@@ -3274,9 +3274,11 @@ name = "posta"
 version = "0.0.0"
 dependencies = [
  "android-native-keyring-store",
+ "jni 0.21.1",
  "keyring",
  "keyring-core",
  "mail-core",
+ "ndk-context",
  "open",
  "serde",
  "serde_json",

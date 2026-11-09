@@ -1,6 +1,6 @@
 // Configurações em página inteira: menu de seções à esquerda; voltar (botão ou Esc) devolve a caixa de entrada.
 import { useEffect, useState } from "react";
-import { AirplaneTilt, ArrowLeft, ArrowsClockwise, Bell, ChatTeardropText, FunnelSimple, Gauge, Keyboard, PencilSimple, Plus, Tag, Trash, UserCircle, Layout, Desktop, X } from "@phosphor-icons/react";
+import { AirplaneTilt, ArrowLeft, ArrowsClockwise, Bell, ChatTeardropText, FunnelSimple, Gauge, Keyboard, PencilSimple, Plus, Tag, Trash, UserCircle, Layout, Desktop, WifiSlash, X } from "@phosphor-icons/react";
 import { api, type Account, type Settings } from "./api";
 import { AccountEditDialog } from "./AccountEditDialog";
 import { RulesSection, TemplatesSection, VacationSection } from "./ProductivitySettings";
@@ -35,6 +35,7 @@ const SECTIONS = [
   { id: "write", label: "Escrita", icon: PencilSimple },
   { id: "notify", label: "Notificações", icon: Bell },
   { id: "system", label: "Sistema", icon: Desktop },
+  { id: "offline", label: "Offline", icon: WifiSlash },
   { id: "keys", label: "Atalhos", icon: Keyboard },
   { id: "about", label: "Atualizações", icon: Gauge },
 ] as const;
@@ -54,6 +55,7 @@ const UNDO_OPTIONS = ["4", "10", "20", "30"];
 const SWIPE_OPTIONS: [string, string][] = [["archive", "Arquivar"], ["trash", "Excluir"], ["read", "Lida/não lida"], ["none", "Nada"]];
 /** Bandeja e iniciar com o sistema só existem no desktop. */
 const DESKTOP = !/Android/i.test(navigator.userAgent);
+const OFFLINE_OPTIONS = ["50", "200", "500", "1000"];
 
 /** Grupo de opções exclusivas; valor ausente ou desconhecido cai no `fallback`. */
 function Segmented({ label, value, fallback, options, onChange }: {
@@ -331,6 +333,16 @@ export function SettingsPage({ accounts, settings, onSetting, onRemoveAccount, o
               ) : (
                 <p className="settings-sub">Bandeja e início com o sistema valem só para o computador.</p>
               )}
+            </section>
+          )}
+
+          {section === "offline" && (
+            <section className="settings-group" aria-label="Offline">
+              <Row title="Leitura offline" sub="Quantas mensagens recentes da Entrada ficam baixadas, com o corpo, para ler sem conexão. Anexos só abrem com rede.">
+                <Segmented label="Mensagens para leitura offline" value={settings.offlineN} fallback="200" onChange={(v) => onSetting("offlineN", v)}
+                  options={OFFLINE_OPTIONS.map((n): [string, string] => [n, n])} />
+              </Row>
+              <div className="settings-sub">Sem rede, ler, marcar, mover e excluir continuam funcionando: as ações esperam numa fila e seguem para o servidor quando a conexão volta. O que você escrever vai para a Caixa de saída.</div>
             </section>
           )}
 

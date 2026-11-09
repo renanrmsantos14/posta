@@ -213,6 +213,7 @@ kbd {
   border-right: 1px solid var(--line);
 }
 .toolbar { display: flex; gap: 8px; padding: 14px 14px 10px; }
+.toolbar .search { min-width: 0; }
 .search {
   flex: 1; display: flex; align-items: center; gap: 8px;
   height: 32px; padding: 0 10px;
@@ -482,6 +483,14 @@ kbd {
 .account-btn:hover { background: var(--selected); }
 .account-btn[aria-pressed="true"] { background: var(--selected); color: var(--strong); }
 .draft-row { cursor: pointer; }
+.offline-badge {
+  display: inline-flex; flex: none; align-items: center; gap: 5px; align-self: center; white-space: nowrap;
+  padding: 4px 9px; border-radius: 9999px; background: var(--selected); color: var(--muted);
+  font: 500 11px/1 var(--mono); animation: fade-in 200ms ease;
+}
+.outbox-row { cursor: default; }
+.outbox-row[data-failed] .outbox-state { color: var(--red); }
+.outbox-actions { grid-area: star; display: flex; gap: 2px; margin: -6px -4px -6px 0; }
 .draft-row .from { font-weight: 500; }
 .update-versions { margin: -6px 0 0; font: 13px/1 var(--mono); color: var(--muted); }
 .update-versions strong { color: var(--green); font-weight: 500; }

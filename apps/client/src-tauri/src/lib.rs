@@ -3,7 +3,7 @@
 use mail_core::oauth::{self, Provider};
 use mail_core::rules::{self, Candidate};
 use mail_core::{search, vacation};
-use mail_core::{imap_sync, send, AuthMode, Contact, DraftRecord, IdleEnd, ImapAccount, MessageDetail, MessageSummary, MsgFlag, Outgoing, ReplyRef, Role, SendReport, Store, UserFolder};
+use mail_core::{imap_sync, outbox, send, AuthMode, Contact, DraftRecord, FlushReport, IdleEnd, ImapAccount, MessageDetail, MessageSummary, MsgFlag, OpKind, Outgoing, OutboxItem, ReplyRef, Role, SendReport, Store, UserFolder};
 use serde::{Deserialize, Serialize};
 use std::{collections::{HashMap, HashSet}, fs, path::PathBuf, sync::{atomic::{AtomicBool, Ordering}, Mutex}, time::{Duration, Instant}};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -12,6 +12,8 @@ use tauri_plugin_notification::NotificationExt;
 mod secret;
 #[cfg(desktop)]
 mod tray;
+#[cfg(target_os = "android")]
+mod android_sync;
 
 struct AppState {
     dir: PathBuf,
@@ -26,6 +28,23 @@ struct AppState {
     focused: AtomicBool,
     /// O ícone da bandeja foi criado: só então fechar a janela pode apenas escondê-la.
     tray: AtomicBool,
+    /// Só um `flush` da fila offline por vez.
+    flushing: Mutex<()>,
+}
+
+impl AppState {
+    fn new(dir: PathBuf, store: Store) -> Self {
+        AppState {
+            dir,
+            store: Mutex::new(store),
+            syncing: Mutex::new(()),
+            tokens: Mutex::new(HashMap::new()),
+            watching: Mutex::new(HashSet::new()),
+            focused: AtomicBool::new(true),
+            tray: AtomicBool::new(false),
+            flushing: Mutex::new(()),
+        }
+    }
 }
 
 type CmdResult<T> = Result<T, String>;
@@ -145,6 +164,60 @@ const IDLE_RENEW: Duration = Duration::from_secs(25 * 60);
 /// Servidor sem IDLE: volta ao polling neste intervalo.
 const POLL_EVERY: Duration = Duration::from_secs(60);
 const BACKOFF_MAX: Duration = Duration::from_secs(5 * 60);
+
+/// Quantas mensagens recentes da Entrada têm o corpo baixado para leitura offline (opção `offlineN`, padrão 200).
+fn offline_keep(st: &AppState) -> usize {
+    st.store.lock().unwrap().setting("offlineN").ok().flatten().and_then(|v| v.parse().ok()).unwrap_or(200)
+}
+
+/// O servidor da conta responde a uma conexão TCP? Distingue "sem rede" de "o servidor recusou".
+fn reachable(st: &AppState, account: &str) -> bool {
+    use std::net::{TcpStream, ToSocketAddrs};
+    let Some(acc) = st.accounts().ok().and_then(|l| l.into_iter().find(|a| a.id == account)) else { return false };
+    (acc.host.as_str(), acc.port)
+        .to_socket_addrs()
+        .map(|mut it| it.any(|a| TcpStream::connect_timeout(&a, Duration::from_secs(3)).is_ok()))
+        .unwrap_or(false)
+}
+
+/// Reaplica a fila offline (ações e Caixa de saída). Sem nada pendente é só uma leitura do banco.
+fn flush_pending(st: &AppState) -> FlushReport {
+    let Ok(_guard) = st.flushing.try_lock() else { return FlushReport::default() };
+    let Ok(store) = Store::open(st.db_path()) else { return FlushReport::default() };
+    let accounts = st.accounts().unwrap_or_default();
+    outbox::flush(&store, &mut |id| {
+        if accounts.iter().any(|a| a.id == id) {
+            st.account_with_password(id).map(Some).map_err(mail_core::Error::Invalid)
+        } else {
+            Ok(None)
+        }
+    })
+    .unwrap_or_default()
+}
+
+/// Aplica a ação no servidor. Sem rede (servidor inalcançável) ou com fila pendente, guarda na fila para manter a
+/// ordem e devolve `false`; recusa do servidor com rede é erro. A cópia local é sempre atualizada pelo chamador.
+fn run_op(st: &AppState, account: &str, mailbox: &str, uids: &[u32], kind: OpKind, arg: &str) -> CmdResult<bool> {
+    let pending = || st.store.lock().unwrap().pending_count().map_err(err);
+    if pending()? > 0 {
+        flush_pending(st);
+    }
+    if pending()? == 0 {
+        let done = st
+            .account_with_password(account)
+            .and_then(|a| outbox::apply_op(&a, mailbox, uids, kind, arg).map_err(err));
+        match done {
+            Ok(()) => return Ok(true),
+            Err(e) if reachable(st, account) => return Err(e),
+            Err(_) => {}
+        }
+    }
+    let store = st.store.lock().unwrap();
+    for &uid in uids {
+        store.enqueue_op(account, mailbox, uid, kind, arg).map_err(err)?;
+    }
+    Ok(false)
+}
 
 /// Sincroniza a INBOX de uma conta, respeitando `syncing`, e devolve quantas mensagens vieram.
 fn sync_account_inbox(st: &AppState, id: &str) -> CmdResult<usize> {
@@ -344,6 +417,8 @@ struct SyncResult {
     errors: Vec<String>,
     /// true quando outra sincronização já estava em andamento.
     skipped: bool,
+    /// Sem rede: nada foi sincronizado e o app segue com o que está salvo.
+    offline: bool,
 }
 
 #[tauri::command]
@@ -353,6 +428,7 @@ async fn sync_inbox(app: AppHandle) -> CmdResult<SyncResult> {
         let Ok(_guard) = st.syncing.try_lock() else {
             return Ok(SyncResult { skipped: true, ..Default::default() });
         };
+        flush_pending(st);
         let mut store = Store::open(st.db_path()).map_err(err)?;
         let mut result = SyncResult::default();
         for acc in st.accounts()? {
@@ -370,6 +446,7 @@ async fn sync_inbox(app: AppHandle) -> CmdResult<SyncResult> {
                     result.total += r.total;
                     notify_new(&handle, st, &acc.id, r.fetched);
                 }
+                Err(_) if !reachable(st, &acc.id) => result.offline = true,
                 Err(e) => result.errors.push(format!("{}: {e}", acc.id)),
             }
         }
@@ -413,6 +490,7 @@ async fn sync_folder(app: AppHandle, role: Role, keep: usize) -> CmdResult<SyncR
                     result.fetched += r.fetched;
                     result.total += r.total;
                 }
+                Err(_) if !reachable(st, &acc.id) => result.offline = true,
                 Err(e) => result.errors.push(format!("{}: {e}", acc.id)),
             }
         }
@@ -457,9 +535,14 @@ fn unread_counts(app: AppHandle, state: State<'_, AppState>) -> CmdResult<HashMa
 /// Liga/desliga `\Seen` ou `\Flagged` em várias mensagens: o servidor primeiro, o banco local só se ele aceitar.
 fn set_flag_many(st: &AppState, ids: &[i64], flag: MsgFlag, on: bool) -> CmdResult<()> {
     for ((account, mailbox), items) in st.locate_groups(ids)? {
-        let acc = st.account_with_password(&account)?;
         let uids: Vec<u32> = items.iter().map(|(_, u)| *u).collect();
-        imap_sync::set_flag(&acc, &mailbox, &uids, flag, on).map_err(err)?;
+        let kind = match (flag, on) {
+            (MsgFlag::Seen, true) => OpKind::Seen,
+            (MsgFlag::Seen, false) => OpKind::Unseen,
+            (MsgFlag::Flagged, true) => OpKind::Star,
+            (MsgFlag::Flagged, false) => OpKind::Unstar,
+        };
+        run_op(st, &account, &mailbox, &uids, kind, "")?;
         let store = st.store.lock().unwrap();
         for (id, _) in items {
             match flag {
@@ -497,9 +580,8 @@ fn move_to_role(st: &AppState, ids: &[i64], role: Role) -> CmdResult<()> {
             .folder_name(&account, role)
             .map_err(err)?
             .ok_or_else(|| "esta conta não tem essa pasta".to_string())?;
-        let acc = st.account_with_password(&account)?;
         let uids: Vec<u32> = items.iter().map(|(_, u)| *u).collect();
-        imap_sync::move_messages(&acc, &mailbox, &uids, &to).map_err(err)?;
+        run_op(st, &account, &mailbox, &uids, OpKind::Move, &to)?;
         let store = st.store.lock().unwrap();
         for (id, _) in items {
             store.remove(id).map_err(err)?;
@@ -517,9 +599,8 @@ async fn delete_forever_many(app: AppHandle, ids: Vec<i64>) -> CmdResult<()> {
             if trash.as_deref() != Some(mailbox.as_str()) {
                 return Err("só dá para excluir de vez dentro da Lixeira".to_string());
             }
-            let acc = st.account_with_password(&account)?;
             let uids: Vec<u32> = items.iter().map(|(_, u)| *u).collect();
-            imap_sync::delete_forever_many(&acc, &mailbox, &uids).map_err(err)?;
+            run_op(st, &account, &mailbox, &uids, OpKind::Delete, "")?;
             let store = st.store.lock().unwrap();
             for (id, _) in items {
                 store.remove(id).map_err(err)?;
@@ -547,8 +628,7 @@ async fn move_message(app: AppHandle, id: i64, role: Role) -> CmdResult<()> {
             .folder_name(&loc.account, role)
             .map_err(err)?
             .ok_or_else(|| "esta conta não tem essa pasta".to_string())?;
-        let acc = st.account_with_password(&loc.account)?;
-        imap_sync::move_message(&acc, &loc.mailbox, loc.uid, &to).map_err(err)?;
+        run_op(st, &loc.account, &loc.mailbox, &[loc.uid], OpKind::Move, &to)?;
         st.store.lock().unwrap().remove(id).map_err(err)
     })
     .await
@@ -563,8 +643,7 @@ async fn delete_forever(app: AppHandle, id: i64) -> CmdResult<()> {
         if trash.as_deref() != Some(loc.mailbox.as_str()) {
             return Err("só dá para excluir de vez dentro da Lixeira".to_string());
         }
-        let acc = st.account_with_password(&loc.account)?;
-        imap_sync::delete_forever(&acc, &loc.mailbox, loc.uid).map_err(err)?;
+        run_op(st, &loc.account, &loc.mailbox, &[loc.uid], OpKind::Delete, "")?;
         st.store.lock().unwrap().remove(id).map_err(err)
     })
     .await
@@ -588,6 +667,7 @@ async fn open_message(app: AppHandle, id: i64) -> CmdResult<Option<MessageDetail
     };
     let Some((loc, was_seen)) = loc else { return Ok(Some(detail)) };
     let (account, mailbox, uid) = (loc.account, loc.mailbox, loc.uid);
+    let handle = app.clone();
     let acc = st.account_with_password(&account);
     // Mensagem enviada por mim, baixada antes da correção: busca o destinatário real.
     let own = acc.as_ref().ok().filter(|a| detail.reply_addr.eq_ignore_ascii_case(&a.username)).cloned();
@@ -607,7 +687,7 @@ async fn open_message(app: AppHandle, id: i64) -> CmdResult<Option<MessageDetail
     }
     if !was_seen {
         tauri::async_runtime::spawn_blocking(move || {
-            if let Err(e) = acc.and_then(|a| imap_sync::set_seen(&a, &mailbox, uid, true).map_err(err)) {
+            if let Err(e) = run_op(&handle.state::<AppState>(), &account, &mailbox, &[uid], OpKind::Seen, "") {
                 eprintln!("marcar lida no servidor falhou ({account}/{uid}): {e}");
             }
         });
@@ -635,17 +715,26 @@ fn download_dir(app: &AppHandle) -> CmdResult<PathBuf> {
     app.path().download_dir().or_else(|_| app.path().app_data_dir().map(|d| d.join("downloads"))).map_err(err)
 }
 
+/// Baixa do servidor a mensagem inteira (anexos não ficam no cache). Sem rede, explica em vez de mostrar o erro IMAP.
+fn fetch_raw_online(st: &AppState, id: i64) -> CmdResult<Vec<u8>> {
+    let loc = st.locate(id)?;
+    let fetched = st
+        .account_with_password(&loc.account)
+        .and_then(|a| imap_sync::fetch_raw(&a, &loc.mailbox, loc.uid).map_err(err));
+    match fetched {
+        Ok(raw) => raw.ok_or_else(|| "mensagem não encontrada no servidor".to_string()),
+        Err(_) if !reachable(st, &loc.account) => Err("Sem conexão: o anexo ainda não foi baixado.".to_string()),
+        Err(e) => Err(e),
+    }
+}
+
 /// Baixa o anexo do servidor, grava em Downloads (ou numa pasta do app, se o sistema não tiver
 /// Downloads) e, no desktop, abre com o programa padrão. Devolve o caminho gravado.
 #[tauri::command]
 async fn save_attachment(app: AppHandle, id: i64, index: u32, open: bool) -> CmdResult<String> {
     let dir = download_dir(&app)?;
     let path = blocking(app.clone(), move |st| {
-        let loc = st.locate(id)?;
-        let acc = st.account_with_password(&loc.account)?;
-        let raw = imap_sync::fetch_raw(&acc, &loc.mailbox, loc.uid)
-            .map_err(err)?
-            .ok_or_else(|| "mensagem não encontrada no servidor".to_string())?;
+        let raw = fetch_raw_online(st, id)?;
         let (att, data) = mail_core::attachments::extract(&raw, index)
             .ok_or_else(|| "anexo não encontrado na mensagem".to_string())?;
         fs::create_dir_all(&dir).map_err(err)?;
@@ -696,11 +785,7 @@ async fn forward_attachments(app: AppHandle, id: i64) -> CmdResult<Vec<mail_core
             Some(d) if !d.attachments.is_empty() => d.attachments,
             _ => return Ok(vec![]),
         };
-        let loc = st.locate(id)?;
-        let acc = st.account_with_password(&loc.account)?;
-        let raw = imap_sync::fetch_raw(&acc, &loc.mailbox, loc.uid)
-            .map_err(err)?
-            .ok_or_else(|| "mensagem não encontrada no servidor".to_string())?;
+        let raw = fetch_raw_online(st, id)?;
         Ok(mail_core::attachments::to_outgoing(&raw, &listed))
     })
     .await
@@ -723,13 +808,14 @@ async fn send_message(app: AppHandle, draft: Draft) -> CmdResult<SendReport> {
             None => None,
         };
         let acc = st.account_with_password(&draft.account)?;
-        if let Some(from) = draft.message.from.as_deref().filter(|f| !f.trim().is_empty()) {
-            let aliases = st.store.lock().unwrap().setting(&format!("aliases:{}", draft.account)).map_err(err)?.unwrap_or_default();
-            if !send::from_allowed(&acc.username, &aliases, from) {
-                return Err(format!("{from} não é um remetente cadastrado nesta conta"));
+        check_from(st, &acc, &draft)?;
+        match send::send(&acc, &draft.message, reply.as_ref()).map_err(err) {
+            Err(_) if !reachable(st, &draft.account) => {
+                st.store.lock().unwrap().enqueue_send(&draft.account, &draft.message, reply.as_ref()).map_err(err)?;
+                Ok(SendReport { queued: true, ..Default::default() })
             }
+            other => other,
         }
-        send::send(&acc, &draft.message, reply.as_ref()).map_err(err)
     })
     .await
 }
@@ -835,9 +921,11 @@ async fn sync_user_folder(app: AppHandle, account: String, folder: String, keep:
             return Ok(SyncResult { skipped: true, ..Default::default() });
         };
         let mut store = Store::open(st.db_path()).map_err(err)?;
-        let acc = st.account_with_password(&account)?;
-        let r = imap_sync::sync_mailbox(&acc, &mut store, &folder, Some(keep)).map_err(err)?;
-        Ok(SyncResult { fetched: r.fetched, total: r.total, ..Default::default() })
+        match st.account_with_password(&account).and_then(|a| imap_sync::sync_mailbox(&a, &mut store, &folder, Some(keep)).map_err(err)) {
+            Ok(r) => Ok(SyncResult { fetched: r.fetched, total: r.total, ..Default::default() }),
+            Err(_) if !reachable(st, &account) => Ok(SyncResult { offline: true, ..Default::default() }),
+            Err(e) => Err(e),
+        }
     })
     .await
 }
@@ -864,9 +952,8 @@ fn move_to_user_folder(st: &AppState, ids: &[i64], account: &str, folder: &str) 
         if acc_id != account || mailbox == folder {
             continue;
         }
-        let acc = st.account_with_password(&acc_id)?;
         let uids: Vec<u32> = items.iter().map(|(_, u)| *u).collect();
-        imap_sync::move_messages(&acc, &mailbox, &uids, folder).map_err(err)?;
+        run_op(st, &acc_id, &mailbox, &uids, OpKind::Move, folder)?;
         let store = st.store.lock().unwrap();
         for (id, _) in &items {
             store.remove(*id).map_err(err)?;
@@ -964,6 +1051,55 @@ fn set_setting(state: State<'_, AppState>, key: String, value: String) -> CmdRes
     state.store.lock().unwrap().set_setting(&key, &value).map_err(err)
 }
 
+#[derive(Serialize)]
+struct QueueStatus {
+    /// O servidor da primeira conta responde (sem contas, conta como online).
+    online: bool,
+    /// Ações esperando o servidor.
+    pending: u32,
+    /// Mensagens na Caixa de saída (com ou sem erro).
+    outbox: u32,
+}
+
+#[tauri::command]
+async fn queue_status(app: AppHandle) -> CmdResult<QueueStatus> {
+    blocking(app, |st| {
+        let online = match st.accounts()?.first() {
+            Some(a) => reachable(st, &a.id),
+            None => true,
+        };
+        let store = st.store.lock().unwrap();
+        Ok(QueueStatus { online, pending: store.pending_count().map_err(err)?, outbox: store.outbox_count().map_err(err)? })
+    })
+    .await
+}
+
+/// Tenta reaplicar a fila agora (a UI chama quando a rede volta).
+#[tauri::command]
+async fn flush_queue(app: AppHandle) -> CmdResult<FlushReport> {
+    blocking(app, |st| Ok(flush_pending(st))).await
+}
+
+#[tauri::command]
+fn list_outbox(state: State<'_, AppState>) -> CmdResult<Vec<OutboxItem>> {
+    state.store.lock().unwrap().outbox().map_err(err)
+}
+
+#[tauri::command]
+fn discard_outbox(state: State<'_, AppState>, id: i64) -> CmdResult<()> {
+    state.store.lock().unwrap().drop_outbox(id).map_err(err)
+}
+
+/// Limpa o erro de um envio recusado e tenta de novo.
+#[tauri::command]
+async fn retry_outbox(app: AppHandle, id: i64) -> CmdResult<FlushReport> {
+    blocking(app, move |st| {
+        st.store.lock().unwrap().retry_outbox(id).map_err(err)?;
+        Ok(flush_pending(st))
+    })
+    .await
+}
+
 #[tauri::command]
 fn set_focused(state: State<'_, AppState>, focused: bool) {
     state.focused.store(focused, Ordering::Relaxed);
@@ -1019,7 +1155,7 @@ fn setting_of(st: &AppState, key: &str) -> Option<String> {
 /// Sincroniza a Entrada e, se chegou algo, roda o que depende de mensagem nova: férias e regras.
 fn sync_inbox_hooked(st: &AppState, store: &mut Store, acc: &ImapAccount) -> CmdResult<mail_core::SyncReport> {
     let mark = store.max_id().map_err(err)?;
-    let report = imap_sync::sync_mailbox(acc, store, "INBOX", None).map_err(err)?;
+    let report = imap_sync::sync_mailbox(acc, store, "INBOX", Some(offline_keep(st))).map_err(err)?;
     if report.fetched > 0 {
         let new = st.store.lock().unwrap().inbox_after(&acc.id, mark).map_err(err)?;
         auto_reply(st, acc, &new);
@@ -1049,7 +1185,7 @@ fn auto_reply(st: &AppState, acc: &ImapAccount, new: &[Candidate]) {
         }
         let reply = st.store.lock().unwrap().reply_ref(c.id).ok().flatten();
         let subject = if vac.subject.trim().is_empty() { format!("Resposta automática: {}", c.subject) } else { vac.subject.clone() };
-        let out = Outgoing { to: addr.to_string(), subject, body: vac.body.clone(), html: None, cc: String::new(), bcc: String::new(), attachments: Vec::new() };
+        let out = Outgoing { to: addr.to_string(), subject, body: vac.body.clone(), html: None, cc: String::new(), bcc: String::new(), attachments: Vec::new(), from: None };
         match send::send_auto(acc, &out, reply.as_ref()) {
             Ok(_) => {
                 st.store.lock().unwrap().mark_vacation_replied(&acc.id, addr, now_ts()).ok();
@@ -1188,6 +1324,17 @@ fn set_pinned(state: State<'_, AppState>, ids: Vec<i64>, pinned: bool) -> CmdRes
     state.store.lock().unwrap().set_pinned(&ids, pinned).map_err(err)
 }
 
+/// O remetente alternativo só vale se for o endereço da conta ou um alias cadastrado.
+fn check_from(st: &AppState, acc: &ImapAccount, draft: &Draft) -> CmdResult<()> {
+    if let Some(from) = draft.message.from.as_deref().filter(|f| !f.trim().is_empty()) {
+        let aliases = st.store.lock().unwrap().setting(&format!("aliases:{}", draft.account)).map_err(err)?.unwrap_or_default();
+        if !send::from_allowed(&acc.username, &aliases, from) {
+            return Err(format!("{from} não é um remetente cadastrado nesta conta"));
+        }
+    }
+    Ok(())
+}
+
 /// Agenda o envio. O mesmo `id` troca o agendamento. A mensagem é montada já aqui para recusar endereço inválido na hora.
 #[tauri::command]
 async fn schedule_send(app: AppHandle, id: String, send_at: i64, draft: Draft) -> CmdResult<()> {
@@ -1197,6 +1344,7 @@ async fn schedule_send(app: AppHandle, id: String, send_at: i64, draft: Draft) -
             None => None,
         };
         let acc = st.account_with_password(&draft.account)?;
+        check_from(st, &acc, &draft)?;
         send::build(&acc, &draft.message, reply.as_ref()).map_err(err)?;
         st.store.lock().unwrap().schedule_send(&id, &draft.account, draft.reply_to, send_at, &draft.message).map_err(err)
     })
@@ -1248,7 +1396,14 @@ fn send_due(st: &AppState) -> bool {
                 None => None,
             };
             let acc = st.account_with_password(&s.account)?;
-            send::send(&acc, &s.out, reply.as_ref()).map(|_| ()).map_err(err)
+            match send::send(&acc, &s.out, reply.as_ref()) {
+                Ok(_) => Ok(()),
+                // Sem rede: passa para a Caixa de saída offline, que envia quando a conexão volta (um único caminho, sem duplicar).
+                Err(e) if e.is_network() && !reachable(st, &s.account) => {
+                    st.store.lock().unwrap().enqueue_send(&s.account, &s.out, reply.as_ref()).map(|_| ()).map_err(err)
+                }
+                Err(e) => Err(err(e)),
+            }
         })();
         let store = st.store.lock().unwrap();
         match sent {
@@ -1292,7 +1447,7 @@ pub fn run() {
             let dir = app.path().app_data_dir()?;
             fs::create_dir_all(&dir)?;
             let store = Store::open(dir.join("mail.sqlite"))?;
-            app.manage(AppState { dir, store: Mutex::new(store), syncing: Mutex::new(()), tokens: Mutex::new(HashMap::new()), watching: Mutex::new(HashSet::new()), focused: AtomicBool::new(true), tray: AtomicBool::new(false) });
+            app.manage(AppState::new(dir, store));
             #[cfg(desktop)]
             tray::init(app.handle());
             let st = app.state::<AppState>();
@@ -1300,6 +1455,15 @@ pub fn run() {
                 watch_inbox(app.handle(), acc.id);
             }
             start_scheduler(app.handle().clone());
+            // Fila offline: tenta reaplicar de tempos em tempos; a UI recarrega quando algo muda.
+            let handle = app.handle().clone();
+            std::thread::spawn(move || loop {
+                std::thread::sleep(Duration::from_secs(30));
+                let r = flush_pending(&handle.state::<AppState>());
+                if r.applied + r.discarded + r.sent + r.failed > 0 {
+                    handle.emit("queue-changed", ()).ok();
+                }
+            });
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -1360,6 +1524,11 @@ pub fn run() {
             get_settings,
             set_setting,
             set_focused,
+            queue_status,
+            flush_queue,
+            list_outbox,
+            discard_outbox,
+            retry_outbox,
             get_autostart,
             set_autostart,
             request_notify_permission,

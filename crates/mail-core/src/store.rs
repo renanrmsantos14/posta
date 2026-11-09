@@ -111,6 +111,25 @@ CREATE TABLE IF NOT EXISTS vacation_replied (
   at INTEGER NOT NULL,
   PRIMARY KEY (account, addr)
 );
+-- Fila offline (dados do usuário): ações aguardando o servidor e envios aguardando rede.
+CREATE TABLE IF NOT EXISTS pending_ops (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  account TEXT NOT NULL,
+  mailbox TEXT NOT NULL,
+  uid INTEGER NOT NULL,
+  kind TEXT NOT NULL,
+  arg TEXT NOT NULL DEFAULT '',
+  created INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+);
+CREATE TABLE IF NOT EXISTS outbox (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  account TEXT NOT NULL,
+  to_addr TEXT NOT NULL DEFAULT '',
+  subject TEXT NOT NULL DEFAULT '',
+  payload TEXT NOT NULL,
+  created INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+  error TEXT NOT NULL DEFAULT ''
+);
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5 (
   subject, from_name, from_addr, body_text,
   content = 'messages', content_rowid = 'id',
@@ -153,7 +172,7 @@ pub struct NewMessage {
 }
 
 /// O que é preciso para responder mantendo a conversa agrupada.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ReplyRef {
     pub account: String,
     pub mailbox: String,
@@ -975,6 +994,8 @@ impl Store {
             "DELETE FROM mailbox_state WHERE account = ?1",
             "DELETE FROM folders WHERE account = ?1",
             "DELETE FROM drafts WHERE account = ?1",
+            "DELETE FROM pending_ops WHERE account = ?1",
+            "DELETE FROM outbox WHERE account = ?1",
             "DELETE FROM user_folders WHERE account = ?1",
             "DELETE FROM message_categories WHERE account = ?1",
             "DELETE FROM snoozes WHERE account = ?1",
@@ -1405,6 +1426,28 @@ mod tests {
         let conn = s.conn;
         let again = Store::init(conn).unwrap();
         assert_eq!(again.list("INBOX", 5, 0).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn banco_da_integracao_outlook_ganha_as_tabelas_dos_tres_pacotes() {
+        // Esquema do feat/integracao-outlook: já tem pastas e categorias, mas não as tabelas de produtividade nem da fila offline.
+        let conn = Connection::open_in_memory().unwrap();
+        let cut = |t: &str, from: &str| -> String {
+            let a = t.find(from).unwrap();
+            let b = t[a..].find("CREATE VIRTUAL TABLE").unwrap() + a;
+            format!("{}{}", &t[..a], &t[b..])
+        };
+        conn.execute_batch(&cut(SCHEMA, "-- Produtividade")).unwrap();
+        for t in ["snoozes", "pins", "scheduled", "vacation_replied", "pending_ops", "outbox"] {
+            assert!(conn.prepare(&format!("SELECT * FROM {t}")).is_err(), "{t} não deveria existir ainda");
+        }
+        conn.pragma_update(None, "user_version", SCHEMA_VERSION).unwrap();
+        let s = Store::init(conn).unwrap();
+        for t in ["snoozes", "pins", "scheduled", "vacation_replied", "pending_ops", "outbox"] {
+            s.conn.prepare(&format!("SELECT * FROM {t}")).unwrap_or_else(|e| panic!("{t}: {e}"));
+        }
+        let again = Store::init(s.conn).unwrap();
+        assert_eq!((again.pending_count().unwrap(), again.outbox_count().unwrap()), (0, 0));
     }
 
     #[test]

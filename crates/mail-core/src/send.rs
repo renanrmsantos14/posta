@@ -68,6 +68,8 @@ pub struct SendReport {
     pub saved_to_sent: bool,
     /// A mensagem saiu, mas algo depois do envio falhou (ex.: cópia em Enviados).
     pub warning: Option<String>,
+    /// Sem rede: a mensagem foi para a Caixa de saída e sai quando a conexão voltar.
+    pub queued: bool,
 }
 
 fn mailboxes(to: &str) -> Result<Vec<Mailbox>> {
@@ -249,10 +251,11 @@ fn send_with(acc: &ImapAccount, out: &Outgoing, reply: Option<&ReplyRef>, auto: 
     let raw = msg.formatted();
     transport(acc)?.send(&msg)?;
     Ok(match after_send(acc, &raw, reply) {
-        Ok(saved_to_sent) => SendReport { saved_to_sent, warning: None },
+        Ok(saved_to_sent) => SendReport { saved_to_sent, warning: None, queued: false },
         Err(e) => SendReport {
             saved_to_sent: false,
             warning: Some(format!("Enviada, mas não foi possível guardar em Enviados: {e}")),
+            queued: false,
         },
     })
 }
