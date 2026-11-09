@@ -174,20 +174,18 @@ pub fn idle_wait(acc: &ImapAccount, mailbox: &str, timeout: Duration) -> Result<
 
 /// IDLE numa sessão já aberta (a conexão fica selecionada em `mailbox` ao voltar, pronta para `sync_on`).
 pub fn idle_on(live: &mut Live, mailbox: &str, timeout: Duration) -> Result<IdleEnd> {
-    if !live.idle {
-        return Ok(IdleEnd::Unsupported);
-    }
-    live.s.select(mailbox)?;
-    let outcome = live.s.idle().timeout(timeout).keepalive(false).wait_while(imap::extensions::idle::stop_on_any)?;
-    Ok(match outcome {
-        imap::extensions::idle::WaitOutcome::MailboxChanged => IdleEnd::Changed,
-        imap::extensions::idle::WaitOutcome::TimedOut => IdleEnd::TimedOut,
-    })
+    idle_sliced(live, mailbox, timeout, timeout, &|| false)
 }
 
-/// Como `idle_on`, mas em fatias de `IDLE_SLICE` (refaz só o IDLE, sem novo SELECT) para conferir `cancelled`.
+/// IDLE em fatias de `IDLE_SLICE` (refaz só o IDLE, sem novo SELECT) para conferir `cancelled`.
 /// Avisos que chegam entre uma fatia e outra contam como `Changed`.
 pub fn idle_until(live: &mut Live, mailbox: &str, timeout: Duration, cancelled: &dyn Fn() -> bool) -> Result<IdleEnd> {
+    idle_sliced(live, mailbox, timeout, IDLE_SLICE, cancelled)
+}
+
+/// Núcleo de `idle_on`/`idle_until`: `slice` é o tempo máximo de cada IDLE antes de conferir `cancelled`
+/// (`idle_on` passa o prazo inteiro, evitando refazer IDLE/DONE a cada 2 s numa espera de ~29 min).
+fn idle_sliced(live: &mut Live, mailbox: &str, timeout: Duration, slice: Duration, cancelled: &dyn Fn() -> bool) -> Result<IdleEnd> {
     if !live.idle {
         return Ok(IdleEnd::Unsupported);
     }
@@ -201,7 +199,7 @@ pub fn idle_until(live: &mut Live, mailbox: &str, timeout: Duration, cancelled: 
         if left.is_zero() {
             return Ok(IdleEnd::TimedOut);
         }
-        let outcome = live.s.idle().timeout(left.min(IDLE_SLICE)).keepalive(false).wait_while(imap::extensions::idle::stop_on_any)?;
+        let outcome = live.s.idle().timeout(left.min(slice)).keepalive(false).wait_while(imap::extensions::idle::stop_on_any)?;
         if matches!(outcome, imap::extensions::idle::WaitOutcome::MailboxChanged) || live.s.take_all_unsolicited().len() > 0 {
             return Ok(IdleEnd::Changed);
         }
