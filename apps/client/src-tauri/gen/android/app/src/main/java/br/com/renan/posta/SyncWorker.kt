@@ -57,15 +57,18 @@ class SyncWorker(context: Context, params: WorkerParameters) : Worker(context, p
     }
     val lines = text.split("\n")
     val total = lines[0].toIntOrNull() ?: return
-    val items = lines.drop(1).filter { it.isNotBlank() }.map { it.split("\t", limit = 2) }
-    val (title, body) = if (total == 1 && items.size == 1 && items[0].size == 2) {
-      items[0][0] to items[0][1]
-    } else {
-      "Posta" to "$total mensagens novas"
-    }
-    // Tocar na notificação abre o app.
+    // Cada linha: conta, id local, remetente, assunto (ver android_sync.rs).
+    val items = lines.drop(1).filter { it.isNotBlank() }.map { it.split("\t", limit = 4) }.filter { it.size == 4 }
+    val single = total == 1 && items.size == 1
+    val (title, body) = if (single) items[0][2] to items[0][3] else "Posta" to "$total mensagens novas"
+    // Tocar na notificação abre o app: no email, se for um só; na Entrada da conta, se agrupar vários.
     val open = ctx.packageManager.getLaunchIntentForPackage(ctx.packageName)?.apply {
       flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+      // Contas misturadas no mesmo resumo: sem destino único, o toque só abre o app.
+      val first = items.firstOrNull()
+      if (first != null && items.all { it[0] == first[0] }) {
+        NotificationOpen.put(this, first[0], "inbox", if (single) first[1].toLongOrNull() else null)
+      }
     }
     val pending = PendingIntent.getActivity(ctx, 0, open, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
     val notification = NotificationCompat.Builder(ctx, CHANNEL)

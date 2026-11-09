@@ -12,6 +12,7 @@ import { aliasFor, aliasLines, addrOf } from "./aliases";
 import { justSwiped, swipeProps, type SwipeAction, type SwipeDir } from "./swipe";
 import { escapeHtml, textToHtml } from "./richtext";
 import { Toaster, toast } from "./toast";
+import { watchOpenTarget, type OpenTarget } from "./notificationOpen";
 import { applyAppearance, themePref, watchSystem } from "./themes";
 import { FOLDERS, LOCAL_VIEWS, SHOWS_UNREAD, folderKey, folderTree, parseOpenMap, viewInfo, withStarred, type Dest, type FolderNode } from "./folders";
 import { DragGhost, placeGhost } from "./DragGhost";
@@ -480,6 +481,21 @@ export default function App() {
     });
     return () => { alive = false; offs.forEach((f) => f()); };
   }, []);
+
+  // Clique numa notificação de email novo: vai à conta e à pasta e abre o email; se ele saiu da pasta, fica a pasta e um aviso.
+  const openTarget = useRef<(t: OpenTarget) => Promise<void>>(async () => {});
+  openTarget.current = async (t) => {
+    setQuery("");
+    setResults(null);
+    setAccountFilter((accounts?.length ?? 0) > 1 ? t.account : null);
+    openFolder(t.folder);
+    if (t.id == null) return;
+    const d = await api.open(t.id).catch(() => null);
+    if (d && d.account === t.account && d.role === roleOf(t.folder)) return select(t.id);
+    toast("Esse email não está mais aqui. Abri a pasta.", "info");
+  };
+  const accountsReady = accounts !== null;
+  useEffect(() => (accountsReady ? watchOpenTarget((t) => void openTarget.current(t)) : undefined), [accountsReady]);
 
   // Busca local a cada tecla: sem debounce, o SQLite responde em < 1 ms.
   useEffect(() => {

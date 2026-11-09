@@ -5,7 +5,6 @@ use std::sync::atomic::Ordering;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager};
-use tauri_plugin_notification::NotificationExt;
 
 use crate::AppState;
 
@@ -33,16 +32,6 @@ pub fn init(app: &AppHandle) {
             }
         }
         Err(e) => eprintln!("bandeja indisponível: {e}"),
-    }
-    // Clicar na notificação (o plugin só avisa das mostradas depois deste registro) traz a janela.
-    let handle = app.clone();
-    let hooked = app.notification().on_action(move |a| {
-        if a.action_id() == "tap" {
-            show_main(&handle);
-        }
-    });
-    if let Err(e) = hooked {
-        eprintln!("clique em notificação indisponível: {e}");
     }
 }
 

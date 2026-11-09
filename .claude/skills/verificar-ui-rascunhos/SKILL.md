@@ -16,4 +16,4 @@ description: Verifica rascunhos, assinatura, remoção de conta, filtro por cont
    - Com 2+ contas (adicione uma em "Adicionar conta") a barra lateral mostra "Todas as contas" e cada conta como filtro.
    - Console sem erro nem aviso (403 de fonte fora do `fs.allow` do vite não conta).
 4. Print: sobrescreva `/home/renan/.t3/userdata/attachments/posta-rascunhos.png` (Rascunhos atrás + Configurações). Encerre o vite pelo PID de `ss -ltnp`.
-5. Não validável sem app real: a notificação do sistema (permissão no Android 13+, texto, o clique), `set_title` da janela e a remoção do segredo no cofre. No desktop o plugin de notificação não expõe o clique: o aviso não foca o app. Registre no PR.
+5. Não validável sem app real: a notificação do sistema (permissão no Android 13+, texto, o clique), `set_title` da janela e a remoção do segredo no cofre. O clique na notificação tem seu próprio roteiro em `verificar-ui-notificacao-abre` (mock) e só se valida no app instalado. Registre no PR.
