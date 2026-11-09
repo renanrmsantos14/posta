@@ -11,6 +11,11 @@ use jni::{
 use mail_core::Store;
 use std::{panic::catch_unwind, path::PathBuf};
 
+/// Tab e quebras de linha viram espaço: separam os campos da resposta.
+fn flat(t: &str) -> String {
+    t.replace(['\t', '\n', '\r'], " ")
+}
+
 /// Resposta: primeira linha = total de mensagens novas; depois até 3 linhas `conta<TAB>id<TAB>remetente<TAB>assunto`
 /// (conta e id local levam o toque na notificação à mensagem).
 /// Vazia quando não há nada a notificar (nada novo, notificações desligadas nas opções ou erro).
@@ -35,7 +40,6 @@ fn run(dir: PathBuf) -> Result<String, String> {
             for m in store.newest_unseen(&acc.id, "INBOX", n.min(3) as u32).map_err(|e| e.to_string())? {
                 let who = if m.from_name.is_empty() { m.from_addr } else { m.from_name };
                 let subject = if m.subject.is_empty() { "(sem assunto)".to_string() } else { m.subject };
-                let flat = |t: &str| t.replace(['\t', '\n', '\r'], " ");
                 lines.push(format!("{}\t{}\t{}\t{}", acc.id, m.id, flat(&who), flat(&subject)));
             }
         }

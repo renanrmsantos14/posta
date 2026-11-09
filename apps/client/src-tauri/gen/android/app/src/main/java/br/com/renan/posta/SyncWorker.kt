@@ -64,7 +64,11 @@ class SyncWorker(context: Context, params: WorkerParameters) : Worker(context, p
     // Tocar na notificação abre o app: no email, se for um só; na Entrada da conta, se agrupar vários.
     val open = ctx.packageManager.getLaunchIntentForPackage(ctx.packageName)?.apply {
       flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
-      items.firstOrNull()?.let { NotificationOpen.put(this, it[0], "inbox", if (single) it[1].toLongOrNull() else null) }
+      // Contas misturadas no mesmo resumo: sem destino único, o toque só abre o app.
+      val first = items.firstOrNull()
+      if (first != null && items.all { it[0] == first[0] }) {
+        NotificationOpen.put(this, first[0], "inbox", if (single) first[1].toLongOrNull() else null)
+      }
     }
     val pending = PendingIntent.getActivity(ctx, 0, open, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
     val notification = NotificationCompat.Builder(ctx, CHANNEL)
