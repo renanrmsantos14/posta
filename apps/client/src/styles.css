@@ -345,6 +345,7 @@ kbd {
   display: flex; flex-direction: column; gap: 14px;
   width: min(420px, 100%);
   padding: 24px;
+  max-height: calc(100vh - 32px); overflow-y: auto;
   background: var(--surface);
   border: 1px solid var(--line); border-radius: 12px;
   box-shadow: 0 16px 48px rgba(0, 0, 0, 0.08);
@@ -369,6 +370,15 @@ kbd {
 .grow { flex: 1; min-width: 0; }
 .port { width: 84px; }
 .hint { margin: -6px 0 0; font-size: 12px; color: var(--faint); }
+/* Detecção de servidores e configurações avançadas. */
+.detected { display: flex; align-items: center; gap: 6px; min-height: 18px; margin: -4px 0 0; font-size: 12px; color: var(--muted); }
+.detected .spinner { width: 12px; height: 12px; }
+.detected-hint a { color: var(--text); text-decoration: underline; }
+.adv-toggle { display: inline-flex; align-items: center; gap: 6px; align-self: flex-start; padding: 2px 0; border: 0; background: none; color: var(--muted); font-size: 12px; cursor: pointer; }
+.adv-toggle:hover { color: var(--text); }
+.adv-caret { transition: transform 150ms ease; }
+.adv-toggle[aria-expanded="true"] .adv-caret { transform: rotate(90deg); }
+.adv { display: flex; flex-direction: column; gap: 12px; }
 /* Entrar com Google / Microsoft, acima do formulário manual. */
 .oauth-buttons { display: flex; flex-direction: column; gap: 8px; }
 .oauth-buttons .btn { justify-content: center; gap: 8px; }

@@ -118,7 +118,7 @@ pub fn build(acc: &ImapAccount, out: &Outgoing, reply: Option<&ReplyRef>) -> Res
     Ok(b.multipart(multi)?)
 }
 
-fn transport(acc: &ImapAccount) -> Result<SmtpTransport> {
+pub(crate) fn transport(acc: &ImapAccount) -> Result<SmtpTransport> {
     let s = acc.smtp();
     let builder = match s.security {
         Security::Tls => SmtpTransport::relay(&s.host)?,

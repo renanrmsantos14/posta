@@ -1,31 +1,25 @@
 // Adicionar conta IMAP. Fecha por X, Esc ou clique fora; pergunta antes de descartar o que foi digitado.
 import { useEffect, useRef, useState } from "react";
-import { X, Check, GoogleLogo, MicrosoftOutlookLogo } from "@phosphor-icons/react";
-import { api, type Account, type Provider, type Security } from "./api";
+import { X, Check, CaretRight, GoogleLogo, MicrosoftOutlookLogo } from "@phosphor-icons/react";
+import { api, type Account, type Detected, type Provider, type Security } from "./api";
 
 interface Props { onClose: () => void; onAdded: (a: Account) => void }
-
-/** Servidores conhecidos pelo domínio do email. */
-const OUTLOOK = { host: "outlook.office365.com", smtp: "smtp-mail.outlook.com", smtpPort: "587" };
-const PRESETS: Record<string, { host: string; smtp: string; smtpPort: string; hint?: string }> = {
-  "gmail.com": { host: "imap.gmail.com", smtp: "smtp.gmail.com", smtpPort: "465", hint: "No Gmail, use uma senha de app (Conta Google → Segurança)." },
-  "outlook.com": OUTLOOK,
-  "hotmail.com": OUTLOOK,
-  "live.com": OUTLOOK,
-  "icloud.com": { host: "imap.mail.me.com", smtp: "smtp.mail.me.com", smtpPort: "587", hint: "No iCloud, use uma senha específica de app." },
-  "yahoo.com": { host: "imap.mail.yahoo.com", smtp: "smtp.mail.yahoo.com", smtpPort: "465" },
-};
 
 const OAUTH_BUTTONS: { provider: Provider; label: string; Icon: typeof GoogleLogo }[] = [
   { provider: "google", label: "Entrar com Google", Icon: GoogleLogo },
   { provider: "microsoft", label: "Entrar com Microsoft", Icon: MicrosoftOutlookLogo },
 ];
 
-type Status = "idle" | "saving" | "done";
+type Status = "idle" | "detecting" | "saving" | "done";
+const EMPTY_FORM = { username: "", password: "", host: "", port: "993", security: "tls" as Security, smtpHost: "", smtpPort: "465", smtpSecurity: "tls" as Security };
+const plainError = (err: unknown) => String(err).replace(/^Error: /, "");
 const EXIT_MS = 150;
 
 export function AccountDialog({ onClose, onAdded }: Props) {
-  const [form, setForm] = useState({ username: "", password: "", host: "", port: "993", security: "tls" as Security, smtpHost: "", smtpPort: "465" });
+  const [email, setEmail] = useState("");
+  const [form, setForm] = useState(EMPTY_FORM);
+  const [detected, setDetected] = useState<{ email: string; info: Detected } | null>(null);
+  const [advanced, setAdvanced] = useState(false);
   const [hostTouched, setHostTouched] = useState(false);
   const [status, setStatus] = useState<Status>("idle");
   const [error, setError] = useState("");
@@ -36,9 +30,8 @@ export function AccountDialog({ onClose, onAdded }: Props) {
   const [providers, setProviders] = useState<Provider[] | null>(null); // null = ainda carregando
   const [oauth, setOauth] = useState<Provider | null>(null);
 
-  const dirty = form.username !== "" || form.password !== "" || hostTouched;
-  const domain = form.username.split("@")[1]?.toLowerCase() ?? "";
-  const preset = PRESETS[domain];
+  const dirty = email !== "" || form.password !== "" || hostTouched;
+  const info = detected?.email === email.trim() ? detected.info : null;
 
   useEffect(() => first.current?.focus(), []);
   useEffect(() => { api.oauthProviders().then(setProviders).catch(() => setProviders([])); }, []);
@@ -66,26 +59,40 @@ export function AccountDialog({ onClose, onAdded }: Props) {
   });
 
   function update<K extends keyof typeof form>(key: K, value: (typeof form)[K]) {
-    setForm((f) => {
-      const next = { ...f, [key]: value };
-      if (key === "username" && !hostTouched) {
-        const d = String(value).split("@")[1]?.toLowerCase();
-        next.host = (d && PRESETS[d]?.host) || (d ? `imap.${d}` : "");
-        next.smtpHost = (d && PRESETS[d]?.smtp) || (d ? `smtp.${d}` : "");
-        next.smtpPort = (d && PRESETS[d]?.smtpPort) || "465";
-      }
-      if (key === "security") next.port = value === "tls" ? "993" : "143";
-      return next;
-    });
+    setForm((f) => ({ ...f, [key]: value }));
+  }
+
+  /** Detecta os servidores; preenche os campos avançados, exceto os que o usuário já editou. */
+  async function detect(): Promise<Detected | null> {
+    const addr = email.trim();
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(addr)) return null;
+    if (detected?.email === addr) return detected.info;
+    setStatus("detecting");
+    try {
+      const d = await api.detectServers(addr);
+      setDetected({ email: addr, info: d });
+      if (!hostTouched) {
+        setForm((f) => ({ ...f, username: d.username, host: d.imap.host, port: String(d.imap.port), security: d.imap.security,
+          smtpHost: d.smtp.host, smtpPort: String(d.smtp.port), smtpSecurity: d.smtp.security }));
+      } else setForm((f) => ({ ...f, username: d.username }));
+      return d;
+    } catch (err) {
+      setError(plainError(err));
+      setErrorKey((k) => k + 1);
+      return null;
+    } finally {
+      setStatus("idle");
+    }
   }
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     setError("");
+    if (!info && !(await detect())) return;
     setStatus("saving");
     try {
-      const { smtpHost, smtpPort, ...imap } = form;
-      const smtp = { host: smtpHost, port: Number(smtpPort), security: (smtpPort === "465" ? "tls" : "starttls") as Security };
+      const { smtpHost, smtpPort, smtpSecurity, ...imap } = form;
+      const smtp = { host: smtpHost, port: Number(smtpPort), security: smtpSecurity };
       const acc = await api.addAccount({ ...imap, port: Number(form.port), smtp });
       setStatus("done");
       setTimeout(() => {
@@ -94,7 +101,8 @@ export function AccountDialog({ onClose, onAdded }: Props) {
       }, 650);
     } catch (err) {
       setStatus("idle");
-      setError(String(err).includes("LOGIN") ? "Usuário ou senha recusados pelo servidor." : String(err));
+      setAdvanced(true);
+      setError(plainError(err));
       setErrorKey((k) => k + 1);
     }
   }
@@ -147,50 +155,78 @@ export function AccountDialog({ onClose, onAdded }: Props) {
 
         <label className="field">
           <span>Email</span>
-          <input ref={first} type="email" required autoComplete="username" value={form.username}
-            onChange={(e) => update("username", e.target.value)} placeholder="voce@gmail.com" />
+          <input ref={first} type="email" required autoComplete="username" value={email} onBlur={() => { if (!busy) void detect(); }}
+            onChange={(e) => { setEmail(e.target.value); setError(""); }} placeholder="voce@gmail.com" />
         </label>
         <label className="field">
           <span>Senha</span>
           <input type="password" required autoComplete="current-password" value={form.password}
             onChange={(e) => update("password", e.target.value)} />
         </label>
-        {preset?.hint && <p className="hint">{preset.hint}</p>}
 
-        <div className="field-row">
-          <label className="field grow">
-            <span>Servidor IMAP</span>
-            <input required value={form.host} onChange={(e) => { setHostTouched(true); update("host", e.target.value); }} />
-          </label>
-          <label className="field port">
-            <span>Porta</span>
-            <input required inputMode="numeric" pattern="\d+" value={form.port} onChange={(e) => update("port", e.target.value)} />
-          </label>
-        </div>
-        <div className="field-row">
-          <label className="field grow">
-            <span>Servidor SMTP (envio)</span>
-            <input required value={form.smtpHost} onChange={(e) => { setHostTouched(true); update("smtpHost", e.target.value); }} />
-          </label>
-          <label className="field port">
-            <span>Porta</span>
-            <input required inputMode="numeric" pattern="\d+" value={form.smtpPort} onChange={(e) => update("smtpPort", e.target.value)} />
-          </label>
-        </div>
-        <label className="field">
-          <span>Segurança IMAP</span>
-          <select value={form.security} onChange={(e) => update("security", e.target.value as Security)}>
-            <option value="tls">TLS (recomendado)</option>
-            <option value="starttls">STARTTLS</option>
-          </select>
-        </label>
+        <p className="detected" aria-live="polite">
+          {status === "detecting" ? <><span className="spinner" aria-hidden />Detectando…</>
+            : info ? <><Check size={14} weight="bold" />{info.provider ? `Detectado: ${info.provider}` : "Servidores não identificados: usei o padrão do domínio"}</> : null}
+        </p>
+        {info?.hint && (
+          <p className="hint detected-hint">
+            {info.hint.text}{" "}
+            {info.hint.url && <a href={info.hint.url} target="_blank" rel="noreferrer">Abrir página oficial</a>}
+          </p>
+        )}
+
+        <button type="button" className="adv-toggle" aria-expanded={advanced} onClick={() => setAdvanced((v) => !v)}>
+          <CaretRight size={12} weight="bold" className="adv-caret" />Configurações avançadas
+        </button>
+        {advanced && (
+          <div className="adv">
+            <label className="field">
+              <span>Usuário (login)</span>
+              <input required value={form.username} onChange={(e) => { setHostTouched(true); update("username", e.target.value); }} />
+            </label>
+            <div className="field-row">
+              <label className="field grow">
+                <span>Servidor IMAP</span>
+                <input required value={form.host} onChange={(e) => { setHostTouched(true); update("host", e.target.value); }} />
+              </label>
+              <label className="field port">
+                <span>Porta</span>
+                <input required inputMode="numeric" pattern="\d+" value={form.port} onChange={(e) => { setHostTouched(true); update("port", e.target.value); }} />
+              </label>
+            </div>
+            <label className="field">
+              <span>Segurança IMAP</span>
+              <select value={form.security} onChange={(e) => { setHostTouched(true); update("security", e.target.value as Security); }}>
+                <option value="tls">TLS (recomendado)</option>
+                <option value="starttls">STARTTLS</option>
+              </select>
+            </label>
+            <div className="field-row">
+              <label className="field grow">
+                <span>Servidor SMTP (envio)</span>
+                <input required value={form.smtpHost} onChange={(e) => { setHostTouched(true); update("smtpHost", e.target.value); }} />
+              </label>
+              <label className="field port">
+                <span>Porta</span>
+                <input required inputMode="numeric" pattern="\d+" value={form.smtpPort} onChange={(e) => { setHostTouched(true); update("smtpPort", e.target.value); }} />
+              </label>
+            </div>
+            <label className="field">
+              <span>Segurança SMTP</span>
+              <select value={form.smtpSecurity} onChange={(e) => { setHostTouched(true); update("smtpSecurity", e.target.value as Security); }}>
+                <option value="tls">TLS (recomendado)</option>
+                <option value="starttls">STARTTLS</option>
+              </select>
+            </label>
+          </div>
+        )}
 
         {error && <p key={errorKey} className="form-error" role="alert">{error}</p>}
         <p className="hint">A senha fica no cofre do sistema, nunca em arquivo.</p>
 
-        <button className="btn primary wide" data-status={status} disabled={busy}>
+        <button className="btn primary wide" data-status={status === "detecting" ? "saving" : status} disabled={busy}>
           <span className="btn-label" data-show={status === "idle" || undefined}>Conectar</span>
-          <span className="btn-label" data-show={status === "saving" || undefined}><span className="spinner" aria-hidden />Testando conexão</span>
+          <span className="btn-label" data-show={status === "saving" || status === "detecting" || undefined}><span className="spinner" aria-hidden />Testando conexão…</span>
           <span className="btn-label" data-show={status === "done" || undefined}><Check size={16} weight="bold" />Conectada</span>
         </button>
 
