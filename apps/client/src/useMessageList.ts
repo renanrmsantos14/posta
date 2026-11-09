@@ -77,6 +77,8 @@ export function useMessageList(folder: View, pending: React.MutableRefObject<Set
   const cursor = useRef<string | null>(null);
   /** Sobe a cada recarga: uma página que voltou depois dela pertence à lista antiga e é descartada. */
   const gen = useRef(0);
+  /** Sobe a cada delta aplicado: uma página que estava em voo durante um delta pode ter vindo com dados anteriores a ele. */
+  const deltaSeq = useRef(0);
   const moreRef = useRef(true);
   const setMore = (v: boolean) => { moreRef.current = v; setHasMore(v); };
 
@@ -100,6 +102,7 @@ export function useMessageList(folder: View, pending: React.MutableRefObject<Set
       more = pg.next !== null;
     } else {
       all = await api.list(folder, want, 0);
+      if (gen.current !== g) return;
       more = all.length >= want;
     }
     if (folderRef.current !== folder) return;
@@ -119,6 +122,7 @@ export function useMessageList(folder: View, pending: React.MutableRefObject<Set
     if (role) {
       if (cursor.current === null) return 0;
       const g = gen.current;
+      const seq = deltaSeq.current;
       const pg = await api.listPage(role, cursor.current, PAGE);
       if (gen.current !== g || folderRef.current !== folder) return 0;
       cursor.current = pg.next;
@@ -128,14 +132,18 @@ export function useMessageList(folder: View, pending: React.MutableRefObject<Set
         return [...l, ...pg.items.filter((m) => !have.has(m.id) && !pending.current.has(m.id))];
       });
       setMore(pg.next !== null);
+      // Delta chegou com a página em voo: ela pode trazer de volta uma linha removida ou não conter uma chegada; reconcilia do início.
+      if (deltaSeq.current !== seq) void reload(known.current?.size ?? PAGE);
       return pg.items.length;
     }
+    const g = gen.current;
     const more = await api.list(folder, PAGE, offset);
+    if (gen.current !== g || folderRef.current !== folder) return 0;
     more.forEach((m) => known.current?.add(m.id));
     setMessages((l) => (l.length === offset ? [...l, ...more.filter((m) => !pending.current.has(m.id))] : l));
     setMore(more.length === PAGE);
     return more.length;
-  }, [folder, role, pending]);
+  }, [folder, role, pending, reload]);
 
   /**
    * Aplica o evento `mail-delta` por id, sem recarregar a lista. Devolve false quando a pasta aberta não pagina por cursor
@@ -144,6 +152,7 @@ export function useMessageList(folder: View, pending: React.MutableRefObject<Set
   const applyDelta = useCallback(async (d: MailDelta) => {
     if (!role) return false;
     const f = folder;
+    deltaSeq.current++;
     const asked = new Set([...d.inserted, ...d.changed]);
     const removed = new Set(d.removed);
     const got = asked.size ? await api.summaries([...asked]) : [];

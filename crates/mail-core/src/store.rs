@@ -1723,6 +1723,25 @@ mod tests {
     }
 
     #[test]
+    fn summaries_deixa_de_fora_adiadas_e_cursor_sobrevive_a_exclusao() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.set_folders("a", &folders_a()).unwrap();
+        let msgs: Vec<_> = (1..=30u32).map(|u| msg(u, &format!("m{u}"), "", 1000 + i64::from(u))).collect();
+        s.insert_messages("a", "INBOX", &msgs).unwrap();
+        let all: Vec<i64> = s.list_box_page("a", "INBOX", None, 100).unwrap().items.iter().map(|m| m.id).collect();
+        s.snooze(&[all[1]], i64::MAX / 2).unwrap();
+        let got = s.summaries(&[all[0], all[1]]).unwrap();
+        assert_eq!(got.iter().map(|m| m.id).collect::<Vec<_>>(), [all[0]], "adiada sai, como no delta");
+        // O cursor guarda posição (fixada, data, id), não a linha: apagar a linha do cursor não invalida a próxima página.
+        let first = s.list_box_page("a", "INBOX", None, 10).unwrap();
+        let last = first.items.last().unwrap().id;
+        s.remove(last).unwrap();
+        let second = s.list_box_page("a", "INBOX", first.next.as_deref(), 10).unwrap();
+        assert_eq!(second.items.len(), 10);
+        assert!(second.items.iter().all(|m| m.id != last && !first.items.iter().any(|f| f.id == m.id)));
+    }
+
+    #[test]
     fn estado_do_servidor_remove_e_marca_lida() {
         let mut s = Store::open_in_memory().unwrap();
         s.set_uid_validity("a", "INBOX", 1).unwrap();
