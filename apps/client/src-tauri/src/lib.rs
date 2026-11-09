@@ -421,6 +421,12 @@ fn list_starred(state: State<'_, AppState>, limit: u32, offset: u32) -> CmdResul
     state.store.lock().unwrap().list_starred(limit, offset).map_err(err)
 }
 
+/// Mensagens do mesmo fio (conversa) da mensagem `id`, da mais antiga à mais nova.
+#[tauri::command]
+fn thread_messages(state: State<'_, AppState>, id: i64) -> CmdResult<Vec<MessageSummary>> {
+    state.store.lock().unwrap().thread(id).map_err(err)
+}
+
 #[tauri::command]
 fn search_starred(state: State<'_, AppState>, query: String) -> CmdResult<Vec<MessageSummary>> {
     state.store.lock().unwrap().search_starred(&query, 200).map_err(err)
@@ -783,6 +789,7 @@ pub fn run() {
             search_messages,
             list_starred,
             search_starred,
+            thread_messages,
             unread_counts,
             set_seen_many,
             set_flagged_many,

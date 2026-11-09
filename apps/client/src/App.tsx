@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, ArrowsIn, ArrowsOut, ArrowBendUpLeft, ArrowBendDoubleUpLeft, ArrowBendUpRight, ArrowsClockwise, Archive, Check, MagnifyingGlass, NotePencil, Plus, Star, Trash, Tray, EnvelopeSimple, EnvelopeSimpleOpen, GearSix, Paperclip, FileText, X } from "@phosphor-icons/react";
+import { ArrowLeft, ArrowsIn, ArrowsOut, ArrowBendUpLeft, ArrowBendDoubleUpLeft, ArrowBendUpRight, ArrowsClockwise, Archive, CaretUp, Check, MagnifyingGlass, NotePencil, Plus, Star, Trash, Tray, EnvelopeSimple, EnvelopeSimpleOpen, GearSix, Paperclip, FileText, X } from "@phosphor-icons/react";
 import { HtmlBody, hasRemoteImages } from "./HtmlBody";
 import { api, isTauri, type Account, type Attachment, type MessageDetail, type MessageSummary, type OutAttachment, type Role, type Settings, type StoredDraft, type UnreadCounts, type View } from "./api";
 import { AccountDialog } from "./AccountDialog";
 import { Composer, type ComposeInit } from "./Composer";
 import { Toaster, toast } from "./toast";
-import { FOLDERS, SHOWS_UNREAD, withStarred } from "./folders";
+import { FOLDERS, LOCAL_VIEWS, SHOWS_UNREAD, withStarred } from "./folders";
 import { fmtSize } from "./format";
 import { Resizer } from "./Resizer";
 import { SettingsPage } from "./SettingsPage";
@@ -66,6 +66,9 @@ const archiveTo = (m: MessageSummary): Role => (m.role === "trash" || m.role ===
 
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 
+/** Uma linha da lista: a conversa (ou a mensagem solta). `head` é a mais recente; `members` são as mensagens dela nesta lista. */
+interface Row { head: MessageSummary; members: MessageSummary[] }
+
 export default function App() {
   const [accounts, setAccounts] = useState<Account[] | null>(null);
   const [messages, setMessages] = useState<MessageSummary[]>([]);
@@ -116,6 +119,10 @@ export default function App() {
   /** Conta escolhida na barra lateral; null = todas as caixas juntas. */
   const [accountFilter, setAccountFilter] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
+  /** Mensagens do fio aberto (da mais antiga à mais nova), as já abertas por expansão e quais estão expandidas. */
+  const [thread, setThread] = useState<MessageSummary[]>([]);
+  const [bodies, setBodies] = useState<Record<number, MessageDetail>>({});
+  const [expanded, setExpanded] = useState<Set<number>>(new Set());
   const known = useRef<Set<number> | null>(null);
   const folderRef = useRef(folder);
   folderRef.current = folder;
@@ -126,12 +133,43 @@ export default function App() {
   const searchRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLUListElement>(null);
 
+  const grouped = settings.group !== "0";
   const shown = results ?? messages;
-  const visible = useMemo(() => (accountFilter ? shown.filter((m) => m.account === accountFilter) : shown), [shown, accountFilter]);
+  // "Todas as caixas" ignora o filtro de conta: é justamente a Entrada de todas juntas.
+  const visible = useMemo(() => (accountFilter && folder !== "all" ? shown.filter((m) => m.account === accountFilter) : shown), [shown, accountFilter, folder]);
   const draftsShown = useMemo(() => (accountFilter ? drafts.filter((d) => d.account === accountFilter) : drafts), [drafts, accountFilter]);
-  const checkedList = useMemo(() => visible.filter((m) => checked.has(m.id)), [visible, checked]);
-  /** Só a pasta real sincroniza com o servidor; "Com estrela" é uma visão do banco local. */
-  const remote = folder !== "inbox" && folder !== "starred";
+  /** Conversas: mensagens do mesmo fio e da mesma conta viram uma linha (a lista já vem da mais nova para a mais velha). */
+  const rows = useMemo<Row[]>(() => {
+    if (!grouped) return visible.map((m) => ({ head: m, members: [m] }));
+    const byThread = new Map<string, Row>();
+    const out: Row[] = [];
+    for (const m of visible) {
+      const key = m.thread_id ? `${m.account}:${m.thread_id}` : "";
+      const row = key ? byThread.get(key) : undefined;
+      if (row) { row.members.push(m); continue; }
+      const created = { head: m, members: [m] };
+      if (key) byThread.set(key, created);
+      out.push(created);
+    }
+    return out;
+  }, [visible, grouped]);
+  const rowOf = useMemo(() => new Map(rows.flatMap((r) => r.members.map((m) => [m.id, r] as const))), [rows]);
+  /** Ações valem para o fio todo: troca cada mensagem pelas do seu fio nesta lista. */
+  const withThread = (ms: MessageSummary[]) => [...new Map(ms.flatMap((m) => rowOf.get(m.id)?.members ?? [m]).map((m) => [m.id, m])).values()];
+  const checkedRows = useMemo(() => rows.filter((r) => checked.has(r.head.id)), [rows, checked]);
+  const checkedList = useMemo(() => checkedRows.flatMap((r) => r.members), [checkedRows]);
+  /** Só a pasta real sincroniza com o servidor; "Com estrela" e "Todas as caixas" são visões do banco local. */
+  const remote = !LOCAL_VIEWS.includes(folder);
+  /** "Todas as caixas" só existe com 2+ contas. */
+  const navFolders: View[] = accounts && accounts.length > 1 ? ["all", ...folderList] : folderList;
+  const unreadOf = (r: View) => (r === "all" ? counts.inbox : r !== "starred" && SHOWS_UNREAD.includes(r) ? counts[r] : 0);
+  /** Rótulo curto da conta na linha: a parte antes do @, ou o endereço inteiro se duas contas começam igual. */
+  const acctLabel = (id: string) => {
+    const a = accounts?.find((x) => x.id === id);
+    if (!a) return id;
+    const local = a.username.split("@")[0];
+    return accounts!.some((x) => x.id !== id && x.username.split("@")[0] === local) ? a.username : local;
+  };
 
   const current = visible.find((m) => m.id === selectedId) ?? null;
   const pane = settings.pane === "bottom" || settings.pane === "off" ? settings.pane : "right";
@@ -190,7 +228,7 @@ export default function App() {
     setSyncing(true);
     try {
       if (manual && remote) {
-        await syncFolder(folder, keep);
+        await syncFolder(folder as Role, keep);
         await reload(messages.length);
         return;
       }
@@ -263,7 +301,7 @@ export default function App() {
         if (alive && remote) {
           setSyncing(true);
           // A sincronização periódica da Caixa de entrada pode estar rodando: espera a vez em vez de mostrar a pasta vazia.
-          for (let i = 0; i < 8 && alive && !(await syncFolder(folder, KEEP)); i++) {
+          for (let i = 0; i < 8 && alive && !(await syncFolder(folder as Role, KEEP)); i++) {
             await new Promise((r) => setTimeout(r, 1500));
           }
           if (alive) await reload();
@@ -305,7 +343,7 @@ export default function App() {
   const onMailChanged = useRef(async (_fetched: number) => {});
   onMailChanged.current = async (fetched: number) => {
     api.folders().then((r) => setFolderList(withStarred(r))).catch(() => {});
-    if (folderRef.current !== "inbox" && folderRef.current !== "starred") return;
+    if (!LOCAL_VIEWS.includes(folderRef.current)) return;
     await reload(messages.length);
     if (fetched) toast(plural(fetched, "mensagem nova", "mensagens novas"), "success");
   };
@@ -326,6 +364,19 @@ export default function App() {
     api.search(query, folder).then((r) => alive && setResults(r));
     return () => { alive = false; };
   }, [query, folder]);
+
+  // Fio da mensagem aberta: recarrega quando chega mensagem nova nele.
+  const threadCount = current?.thread_count;
+  useEffect(() => {
+    if (selectedId === null || !grouped) return setThread([]);
+    let alive = true;
+    api.thread(selectedId).then((t) => alive && setThread(t)).catch(() => {});
+    return () => { alive = false; };
+  }, [selectedId, grouped, threadCount]);
+  useEffect(() => { setBodies({}); setExpanded(new Set()); }, [selectedId]);
+
+  // Com a conta removida só resta uma caixa: a visão unificada deixa de existir.
+  useEffect(() => { if (folder === "all" && accounts && accounts.length < 2) openFolder("inbox"); });
 
   function openFolder(role: View) {
     setShowDrafts(false);
@@ -350,11 +401,34 @@ export default function App() {
     const d = await api.open(id);
     setDetail(d);
     if (d) {
-      const markSeen = (l: MessageSummary[]) => l.map((m) => (m.id === id ? { ...m, seen: true } : m));
-      setMessages(markSeen);
-      setResults((r) => r && markSeen(r));
+      const markLocal = (l: MessageSummary[]) => l.map((m) => (m.id === id ? { ...m, seen: true } : m));
+      setMessages(markLocal);
+      setResults((r) => r && markLocal(r));
       refreshCounts();
+      // Abrir a conversa lê o fio todo.
+      const rest = (rowOf.get(id)?.members ?? []).filter((m) => m.id !== id && !m.seen);
+      if (rest.length) void markSeen(rest, true);
     }
+  }
+
+  /** Abre uma mensagem anterior do fio (marca como lida) ou a recolhe. */
+  async function toggleThreadMsg(id: number) {
+    if (expanded.has(id)) return setExpanded((s) => { const n = new Set(s); n.delete(id); return n; });
+    if (!bodies[id]) {
+      try {
+        const d = await api.open(id);
+        if (!d) return;
+        setBodies((b) => ({ ...b, [id]: d }));
+        const seen = (l: MessageSummary[]) => l.map((m) => (m.id === id ? { ...m, seen: true } : m));
+        setMessages(seen);
+        setResults((r) => r && seen(r));
+        setThread(seen);
+        refreshCounts();
+      } catch (e) {
+        return toast(`Não foi possível abrir a mensagem: ${e}`, "error");
+      }
+    }
+    setExpanded((s) => new Set(s).add(id));
   }
 
   async function saveAttachment(id: number, a: Attachment) {
@@ -509,7 +583,7 @@ export default function App() {
       } else if (remote && serverTotal !== null && serverTotal > keep) {
         const next = keep + KEEP_STEP;
         setKeep(next);
-        await syncFolder(folder, next);
+        await syncFolder(folder as Role, next);
         await reload(messages.length + PAGE);
       }
     } catch (e) {
@@ -523,7 +597,8 @@ export default function App() {
   function takeOut(m: MessageSummary) {
     const from = folder;
     const idx = visible.findIndex((x) => x.id === m.id);
-    const next = visible[idx + 1] ?? visible[idx - 1];
+    const ridx = rows.findIndex((r) => r.head.id === m.id);
+    const next = (rows[ridx + 1] ?? rows[ridx - 1])?.head;
     const drop = (l: MessageSummary[]) => l.filter((x) => x.id !== m.id);
     setMessages(drop);
     setResults((r) => r && drop(r));
@@ -653,12 +728,13 @@ export default function App() {
   }
 
   function toggleCheck(m: MessageSummary, range: boolean) {
-    const from = visible.findIndex((x) => x.id === (anchor.current ?? selectedId));
-    const to = visible.findIndex((x) => x.id === m.id);
+    const anchorId = anchor.current ?? selectedId;
+    const from = rows.findIndex((r) => r.members.some((x) => x.id === anchorId));
+    const to = rows.findIndex((r) => r.head.id === m.id);
     setChecked((c) => {
       const next = new Set(c);
       if (range && from >= 0) {
-        visible.slice(Math.min(from, to), Math.max(from, to) + 1).forEach((x) => next.add(x.id));
+        rows.slice(Math.min(from, to), Math.max(from, to) + 1).forEach((r) => next.add(r.head.id));
       } else if (!next.delete(m.id)) {
         next.add(m.id);
       }
@@ -727,15 +803,15 @@ export default function App() {
         return;
       }
       if (typing || e.metaKey || e.ctrlKey || e.altKey) return;
-      const idx = visible.findIndex((m) => m.id === selectedId);
-      const acts = checkedList.length ? checkedList : current ? [current] : [];
+      const idx = rows.findIndex((r) => r.members.some((m) => m.id === selectedId));
+      const acts = checkedList.length ? checkedList : current ? withThread([current]) : [];
       if (e.key === "j" || e.key === "ArrowDown") {
         e.preventDefault();
-        const next = visible[Math.min(idx + 1, visible.length - 1)];
+        const next = rows[Math.min(idx + 1, rows.length - 1)]?.head;
         if (next) select(next.id, true);
       } else if (e.key === "k" || e.key === "ArrowUp") {
         e.preventDefault();
-        const prev = visible[Math.max(idx - 1, 0)];
+        const prev = rows[Math.max(idx - 1, 0)]?.head;
         if (prev) select(prev.id, true);
       } else if (e.key === "/") {
         e.preventDefault();
@@ -771,6 +847,102 @@ export default function App() {
   }, [selectedId]);
 
   const empty = accounts !== null && accounts.length === 0;
+  /** Conversa com mais de uma mensagem aberta no painel (o fio carrega logo após a seleção). */
+  const threaded = grouped && !!detail && thread.length > 1 && thread.some((t) => t.id === detail.id);
+  const actionsBar = (
+      <div className="actions">
+        <button className="btn" onClick={reply}>
+          <ArrowBendUpLeft size={15} weight="bold" /> Responder <kbd>r</kbd>
+        </button>
+        <button className="btn icon-only" onClick={replyAll} aria-label="Responder a todos" title="Responder a todos (a)">
+          <ArrowBendDoubleUpLeft size={15} weight="bold" />
+        </button>
+        <button className="btn icon-only" onClick={forward} aria-label="Encaminhar" title="Encaminhar (f)">
+          <ArrowBendUpRight size={15} weight="bold" />
+        </button>
+        {current && canArchive(current) && (
+          <button className="btn" onClick={() => archive(withThread([current]))}>
+            {archiveTo(current) === "inbox"
+              ? <><Tray size={15} weight="bold" /> Mover para a entrada</>
+              : <><Archive size={15} weight="bold" /> Arquivar</>} <kbd>e</kbd>
+          </button>
+        )}
+        <button className="btn" onClick={() => current && remove(withThread([current]))} disabled={!current || !canTrash(current)}
+          title={current && !canTrash(current) ? "Esta conta não tem Lixeira" : undefined}>
+          <Trash size={15} weight="bold" /> {current?.role === "trash" ? "Excluir de vez" : "Excluir"} <kbd>#</kbd>
+        </button>
+        {current && (
+          <>
+            <button className="btn icon-only star-btn" data-on={current.flagged || undefined} data-pop={popId === current.id || undefined}
+              onClick={() => toggleStar(withThread([current]))} aria-pressed={current.flagged}
+              aria-label={current.flagged ? "Tirar a estrela" : "Marcar com estrela"} title="Estrela (s)">
+              <Star size={15} weight={current.flagged ? "fill" : "bold"} />
+            </button>
+            <button className="btn icon-only" onClick={() => markSeen(withThread([current]), false)}
+              aria-label="Marcar como não lida" title="Marcar como não lida (u)">
+              <EnvelopeSimple size={15} weight="bold" />
+            </button>
+          </>
+        )}
+      </div>
+  );
+
+  /** Cabeçalho, anexos e corpo de uma mensagem. Em conversa, as anteriores trazem "Recolher" no lugar de "Expandir". */
+  function renderMessage(d: MessageDetail, fold: boolean) {
+    return (
+      <>
+        <div className="meta">
+              <span className="avatar large" aria-hidden>{(d.from_name || d.from_addr)[0]?.toUpperCase()}</span>
+              <div>
+                <div className="meta-from">{d.from_name || d.from_addr}</div>
+                <div className="meta-addr">{d.from_addr}</div>
+              </div>
+              <time className="meta-date">{fmtLong.format(new Date(d.date * 1000))}</time>
+              {fold ? (
+                <button type="button" className="icon-btn expand-btn" onClick={() => void toggleThreadMsg(d.id)}
+                  aria-label="Recolher mensagem" title="Recolher">
+                  <CaretUp size={15} weight="bold" />
+                </button>
+              ) : (
+                <button type="button" className="icon-btn expand-btn" onClick={() => setFull(!full)}
+                  aria-label={full ? "Sair da tela cheia" : "Expandir mensagem"} title={full ? "Voltar (Esc)" : "Expandir (clique duplo na lista)"}>
+                  {full ? <ArrowsIn size={15} weight="bold" /> : <ArrowsOut size={15} weight="bold" />}
+                </button>
+              )}
+            </div>
+            {!threaded && d.id === selectedId && actionsBar}
+            {d.attachments.length > 0 && (
+              <ul className="attachments" aria-label="Anexos">
+                {d.attachments.map((a) => (
+                  <li key={a.index}>
+                    <button type="button" className="chip attachment" disabled={savingAtt === `${d.id}:${a.index}`}
+                      title={`Salvar e abrir ${a.name}`} onClick={() => void saveAttachment(d.id, a)}>
+                      <Paperclip size={14} weight="bold" aria-hidden />
+                      <span className="chip-name">{a.name}</span>
+                      <span className="chip-size">{fmtSize(a.size)}</span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+            {d.body_html ? (
+              <>
+                {!imagesOk.has(d.id) && hasRemoteImages(d.body_html) && (
+                  <div className="img-banner" role="status">
+                    <span>Imagens remotas bloqueadas para proteger sua privacidade.</span>
+                    <button type="button" className="btn" onClick={() => setImagesOk((s) => new Set(s).add(d.id))}>
+                      Mostrar imagens
+                    </button>
+                  </div>
+                )}
+                <HtmlBody html={d.body_html} remote={imagesOk.has(d.id)} />
+              </>
+            ) : (
+              <div className="body">{d.body_text}</div>
+            )}
+      </>
+    );
+  }
 
   return (
     <div ref={appRef} className="app" data-reader={readerOpen || undefined} data-pane={pane === "right" ? undefined : pane}
@@ -783,14 +955,14 @@ export default function App() {
           <NotePencil size={16} weight="bold" /> <span>Escrever</span>
         </button>
         <nav>
-          {folderList.map((r) => {
+          {navFolders.map((r) => {
             const Icon = FOLDERS[r].icon;
             return (
               <button key={r} className="nav-item" title={FOLDERS[r].label} onClick={() => openFolder(r)}
                 aria-current={r === folder && !showDrafts ? "page" : undefined}>
                 <Icon size={16} weight="bold" />
                 <span>{FOLDERS[r].label}</span>
-                {r !== "starred" && SHOWS_UNREAD.includes(r) && !!counts[r] && <span className="count">{counts[r]}</span>}
+                {!!unreadOf(r) && <span className="count">{unreadOf(r)}</span>}
               </button>
             );
           })}
@@ -811,7 +983,7 @@ export default function App() {
           )}
           {accounts?.map((a) => accounts.length > 1 ? (
             <button key={a.id} type="button" className="account account-btn" title={a.id} aria-pressed={accountFilter === a.id}
-              onClick={() => setAccountFilter(accountFilter === a.id ? null : a.id)}>
+              onClick={() => { setAccountFilter(accountFilter === a.id ? null : a.id); if (folder === "all") openFolder("inbox"); }}>
               <span className="avatar" aria-hidden>{a.username[0]?.toUpperCase()}</span>
               <span className="account-name">{a.username}</span>
             </button>
@@ -862,7 +1034,7 @@ export default function App() {
           </button>
         </div>
         <div className="folder-tabs mobile-only" role="group" aria-label="Pastas">
-          {folderList.map((r) => {
+          {navFolders.map((r) => {
             const Icon = FOLDERS[r].icon;
             return (
               <button key={r} className="btn ghost small" onClick={() => openFolder(r)}
@@ -880,9 +1052,9 @@ export default function App() {
             <button className="icon-btn" onClick={() => setChecked(new Set())} aria-label="Limpar seleção" title="Limpar seleção (Esc)">
               <X size={15} weight="bold" />
             </button>
-            <span className="bulk-count">{checkedList.length} {checkedList.length === 1 ? "selecionada" : "selecionadas"}</span>
-            {checkedList.length < visible.length && (
-              <button className="btn ghost small" onClick={() => setChecked(new Set(visible.map((m) => m.id)))}>Todas</button>
+            <span className="bulk-count">{checkedRows.length} {checkedRows.length === 1 ? "selecionada" : "selecionadas"}</span>
+            {checkedRows.length < rows.length && (
+              <button className="btn ghost small" onClick={() => setChecked(new Set(rows.map((r) => r.head.id)))}>Todas</button>
             )}
             <span className="bulk-actions">
               <button className="icon-btn" onClick={() => archive(checkedList)} disabled={!checkedList.some(canArchive)}
@@ -936,29 +1108,42 @@ export default function App() {
               const el = e.currentTarget;
               if (el.scrollHeight - el.scrollTop - el.clientHeight < 400) loadMore();
             }}>
-            {visible.map((m, i) => (
-              <li key={m.id} role="option" aria-selected={m.id === selectedId}
-                className="row" data-unread={!m.seen || undefined} data-fresh={freshIds.has(m.id) || undefined}
-                data-checked={checked.has(m.id) || undefined}
-                style={{ "--i": Math.min(i, 12) } as React.CSSProperties}
-                onClick={(e) => onRowClick(e, m)} onDoubleClick={(e) => { if (!(e.target as Element).closest("button")) setFull(true); }}>
-                <span className="dot" aria-hidden />
-                <button type="button" className="check" role="checkbox" aria-checked={checked.has(m.id)}
-                  aria-label={`Selecionar mensagem de ${m.from_name || m.from_addr}`}
-                  onClick={(e) => { e.stopPropagation(); toggleCheck(m, e.shiftKey); }}>
-                  <Check size={11} weight="bold" />
-                </button>
-                <span className="from">{m.from_name || m.from_addr}</span>
-                <time className="date" dateTime={new Date(m.date * 1000).toISOString()}>{shortDate(m.date)}</time>
-                <button type="button" className="star" data-on={m.flagged || undefined} data-pop={popId === m.id || undefined}
-                  aria-pressed={m.flagged} aria-label={m.flagged ? "Tirar a estrela" : "Marcar com estrela"}
-                  onClick={(e) => { e.stopPropagation(); toggleStar([m]); }}>
-                  <Star size={15} weight={m.flagged ? "fill" : "bold"} />
-                </button>
-                <span className="subject">{m.subject || "(sem assunto)"}</span>
-                <span className="snippet">{m.snippet}</span>
-              </li>
-            ))}
+            {rows.map((row, i) => {
+              const m = row.head;
+              const unread = row.members.some((x) => !x.seen);
+              const starred = row.members.some((x) => x.flagged);
+              const n = grouped ? Math.max(row.members.length, m.thread_count) : 1;
+              const open = row.members.some((x) => x.id === selectedId);
+              return (
+                <li key={m.id} role="option" aria-selected={open}
+                  className="row" data-unread={unread || undefined} data-fresh={freshIds.has(m.id) || undefined}
+                  data-checked={checked.has(m.id) || undefined}
+                  style={{ "--i": Math.min(i, 12) } as React.CSSProperties}
+                  onClick={(e) => onRowClick(e, m)} onDoubleClick={(e) => { if (!(e.target as Element).closest("button")) setFull(true); }}>
+                  <span className="dot" aria-hidden />
+                  <button type="button" className="check" role="checkbox" aria-checked={checked.has(m.id)}
+                    aria-label={`Selecionar ${n > 1 ? "conversa" : "mensagem"} de ${m.from_name || m.from_addr}`}
+                    onClick={(e) => { e.stopPropagation(); toggleCheck(m, e.shiftKey); }}>
+                    <Check size={11} weight="bold" />
+                  </button>
+                  <span className="from has-meta">
+                    <span className="from-name">{m.from_name || m.from_addr}</span>
+                    {n > 1 && <span className="thread-n" title={`${n} mensagens na conversa`}>{n}</span>}
+                  </span>
+                  <time className="date" dateTime={new Date(m.date * 1000).toISOString()}>{shortDate(m.date)}</time>
+                  <button type="button" className="star" data-on={starred || undefined} data-pop={popId === m.id || undefined}
+                    aria-pressed={starred} aria-label={starred ? "Tirar a estrela" : "Marcar com estrela"}
+                    onClick={(e) => { e.stopPropagation(); toggleStar(row.members); }}>
+                    <Star size={15} weight={starred ? "fill" : "bold"} />
+                  </button>
+                  <span className="subject">
+                    {folder === "all" && <span className="acct" title={m.account}>{acctLabel(m.account)}</span>}
+                    {m.subject || "(sem assunto)"}
+                  </span>
+                  <span className="snippet">{m.snippet}</span>
+                </li>
+              );
+            })}
           </ul>
         )}
       </section>
@@ -988,82 +1173,26 @@ export default function App() {
               <ArrowLeft size={14} weight="bold" /> {full ? "Voltar" : FOLDERS[folder].label}
             </button>
             <h1>{detail.subject || "(sem assunto)"}</h1>
-            <div className="meta">
-              <span className="avatar large" aria-hidden>{(detail.from_name || detail.from_addr)[0]?.toUpperCase()}</span>
-              <div>
-                <div className="meta-from">{detail.from_name || detail.from_addr}</div>
-                <div className="meta-addr">{detail.from_addr}</div>
+            {threaded && actionsBar}
+            {threaded ? (
+              <div className="thread">
+                {thread.map((t) => {
+                  const d = t.id === detail.id ? detail : bodies[t.id];
+                  if (d && (t.id === detail.id || expanded.has(t.id))) {
+                    return <section key={t.id} className="thread-msg" data-current={t.id === detail.id || undefined}>{renderMessage(d, t.id !== detail.id)}</section>;
+                  }
+                  return (
+                    <button key={t.id} type="button" className="thread-fold" data-unread={!t.seen || undefined} aria-expanded="false"
+                      onClick={() => void toggleThreadMsg(t.id)}>
+                      <span className="avatar" aria-hidden>{(t.from_name || t.from_addr)[0]?.toUpperCase()}</span>
+                      <span className="fold-from">{t.from_name || t.from_addr}</span>
+                      <span className="fold-snip">{t.snippet}</span>
+                      <time className="fold-date">{shortDate(t.date)}</time>
+                    </button>
+                  );
+                })}
               </div>
-              <time className="meta-date">{fmtLong.format(new Date(detail.date * 1000))}</time>
-              <button type="button" className="icon-btn expand-btn" onClick={() => setFull(!full)}
-                aria-label={full ? "Sair da tela cheia" : "Expandir mensagem"} title={full ? "Voltar (Esc)" : "Expandir (clique duplo na lista)"}>
-                {full ? <ArrowsIn size={15} weight="bold" /> : <ArrowsOut size={15} weight="bold" />}
-              </button>
-            </div>
-            <div className="actions">
-              <button className="btn" onClick={reply}>
-                <ArrowBendUpLeft size={15} weight="bold" /> Responder <kbd>r</kbd>
-              </button>
-              <button className="btn icon-only" onClick={replyAll} aria-label="Responder a todos" title="Responder a todos (a)">
-                <ArrowBendDoubleUpLeft size={15} weight="bold" />
-              </button>
-              <button className="btn icon-only" onClick={forward} aria-label="Encaminhar" title="Encaminhar (f)">
-                <ArrowBendUpRight size={15} weight="bold" />
-              </button>
-              {current && canArchive(current) && (
-                <button className="btn" onClick={() => archive([current])}>
-                  {archiveTo(current) === "inbox"
-                    ? <><Tray size={15} weight="bold" /> Mover para a entrada</>
-                    : <><Archive size={15} weight="bold" /> Arquivar</>} <kbd>e</kbd>
-                </button>
-              )}
-              <button className="btn" onClick={() => current && remove([current])} disabled={!current || !canTrash(current)}
-                title={current && !canTrash(current) ? "Esta conta não tem Lixeira" : undefined}>
-                <Trash size={15} weight="bold" /> {current?.role === "trash" ? "Excluir de vez" : "Excluir"} <kbd>#</kbd>
-              </button>
-              {current && (
-                <>
-                  <button className="btn icon-only star-btn" data-on={current.flagged || undefined} data-pop={popId === current.id || undefined}
-                    onClick={() => toggleStar([current])} aria-pressed={current.flagged}
-                    aria-label={current.flagged ? "Tirar a estrela" : "Marcar com estrela"} title="Estrela (s)">
-                    <Star size={15} weight={current.flagged ? "fill" : "bold"} />
-                  </button>
-                  <button className="btn icon-only" onClick={() => markSeen([current], false)}
-                    aria-label="Marcar como não lida" title="Marcar como não lida (u)">
-                    <EnvelopeSimple size={15} weight="bold" />
-                  </button>
-                </>
-              )}
-            </div>
-            {detail.attachments.length > 0 && (
-              <ul className="attachments" aria-label="Anexos">
-                {detail.attachments.map((a) => (
-                  <li key={a.index}>
-                    <button type="button" className="chip attachment" disabled={savingAtt === `${detail.id}:${a.index}`}
-                      title={`Salvar e abrir ${a.name}`} onClick={() => void saveAttachment(detail.id, a)}>
-                      <Paperclip size={14} weight="bold" aria-hidden />
-                      <span className="chip-name">{a.name}</span>
-                      <span className="chip-size">{fmtSize(a.size)}</span>
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            )}
-            {detail.body_html ? (
-              <>
-                {!imagesOk.has(detail.id) && hasRemoteImages(detail.body_html) && (
-                  <div className="img-banner" role="status">
-                    <span>Imagens remotas bloqueadas para proteger sua privacidade.</span>
-                    <button type="button" className="btn" onClick={() => setImagesOk((s) => new Set(s).add(detail.id))}>
-                      Mostrar imagens
-                    </button>
-                  </div>
-                )}
-                <HtmlBody html={detail.body_html} remote={imagesOk.has(detail.id)} />
-              </>
-            ) : (
-              <div className="body">{detail.body_text}</div>
-            )}
+            ) : renderMessage(detail, false)}
           </article>
         ) : (
           <div className="reader-empty">

@@ -17,9 +17,13 @@ const seed: [string, string, string, string, number][] = [
   ["Prefeitura de Campinas", "nfse@campinas.sp.gov.br", "Nota fiscal de serviço emitida", "A NFS-e nº 00012873 foi emitida. Consulte o documento pelo código de verificação no portal.", 140],
 ];
 
-let accounts: Account[] = [{ id: "renan@imap.exemplo.com", host: "imap.exemplo.com", port: 993, security: "tls", username: "renan@exemplo.com" }];
+let accounts: Account[] = [
+  { id: "renan@imap.exemplo.com", host: "imap.exemplo.com", port: 993, security: "tls", username: "renan@exemplo.com" },
+  { id: "contato@imap.betinhos.com.br", host: "imap.betinhos.com.br", port: 993, security: "tls", username: "contato@betinhos.com.br" },
+];
 
-type MockMessage = MessageDetail & { role: Role };
+/** `thread_count` é calculado ao responder; `thread_id` 0 = mensagem sem fio. */
+type MockMessage = Omit<MessageDetail, "thread_count"> & { role: Role };
 
 let messages: MockMessage[] = Array.from({ length: 60 }, (_, i) => {
   const [from_name, from_addr, subject, body, hoursAgo] = seed[i % seed.length];
@@ -42,6 +46,7 @@ let messages: MockMessage[] = Array.from({ length: 60 }, (_, i) => {
     to_addrs: "renan@exemplo.com",
     cc_addrs: i % 3 === 0 ? "carla.mendes@outlook.com, pedro@antunes.dev" : "",
     role: "inbox",
+    thread_id: 0,
   };
 });
 
@@ -58,7 +63,7 @@ htmlSamples.forEach(([from_name, from_addr, subject, text, html, hoursAgo], i) =
   messages.unshift({
     id, account: accounts[0].id, uid: id, from_name, from_addr, subject,
     date: now - Math.round(hoursAgo * H), snippet: text, body_text: text, body_html: html,
-    seen: false, flagged: false, reply_addr: from_addr, attachments: [], to_addrs: "renan@exemplo.com", cc_addrs: "", role: "inbox",
+    seen: false, flagged: false, reply_addr: from_addr, attachments: [], to_addrs: "renan@exemplo.com", cc_addrs: "", role: "inbox", thread_id: 0,
   });
 });
 
@@ -70,7 +75,7 @@ messages.unshift({
   subject: "Planta e orçamento da sala de reunião", date: now - Math.round(0.2 * H),
   snippet: "Seguem a planta revisada e o orçamento em anexo.", body_text: "Seguem a planta revisada e o orçamento em anexo.\n\nMarina",
   body_html: `<div style="font-family:Arial,sans-serif;max-width:560px"><img src="${LOGO}" width="160" height="48" alt="Lumen"><p>Oi, Renan! Seguem a <b>planta revisada</b> e o orçamento em anexo.</p><p>Marina</p></div>`,
-  seen: false, flagged: true, reply_addr: "marina@lumenarquitetura.com.br", role: "inbox",
+  seen: false, flagged: true, reply_addr: "marina@lumenarquitetura.com.br", role: "inbox", thread_id: 1100,
   to_addrs: "renan@exemplo.com", cc_addrs: "carla.mendes@outlook.com, pedro@antunes.dev",
   attachments: [
     { name: "planta-sala-reuniao-v3.pdf", mime: "application/pdf", size: 2_516_582, index: 0 },
@@ -94,9 +99,30 @@ extra.forEach(([role, name, addr, subject, body], i) => {
     id, account: accounts[0].id, uid: id,
     from_name: mine ? "Renan" : name, from_addr: mine ? "renan@exemplo.com" : addr,
     subject, date: now - (i + 1) * 30 * H, snippet: body, body_text: `${body}\n\n${mine ? "Renan" : name}`, body_html: "",
-    seen: true, flagged: false, reply_addr: addr, attachments: [], to_addrs: mine ? addr : "renan@exemplo.com", cc_addrs: "", role,
+    seen: true, flagged: false, reply_addr: addr, attachments: [], to_addrs: mine ? addr : "renan@exemplo.com", cc_addrs: "", role, thread_id: 0,
   });
 });
+
+// Conversas: o fio da Marina (3 mensagens dela e a minha resposta em Enviados) e um fio da segunda conta.
+const second = accounts[1].id;
+const thread = (id: number, account: string, role: Role, thread_id: number, subject: string, from: [string, string], text: string, hoursAgo: number, seen: boolean, to: string) =>
+  messages.push({
+    id, account, uid: id, from_name: from[0], from_addr: from[1], subject, date: now - Math.round(hoursAgo * H),
+    snippet: text.slice(0, 200), body_text: `${text}\n\n${from[0].split(" ")[0]}`, body_html: "", seen, flagged: false,
+    reply_addr: from[1], attachments: [], to_addrs: to, cc_addrs: "", role, thread_id,
+  });
+const MARINA: [string, string] = ["Marina Duarte", "marina@lumenarquitetura.com.br"];
+const ME: [string, string] = ["Renan", "renan@exemplo.com"];
+thread(1101, accounts[0].id, "inbox", 1100, "Planta e orçamento da sala de reunião", MARINA, "Oi, Renan! Posso te mandar a planta da sala de reunião ainda hoje? Preciso só do teu ok no orçamento.", 30, true, "renan@exemplo.com");
+thread(1102, accounts[0].id, "sent", 1100, "Re: Planta e orçamento da sala de reunião", ME, "Pode mandar sim. O orçamento fecha se o prazo de entrega for até o dia 16.", 26, true, MARINA[1]);
+thread(1103, accounts[0].id, "inbox", 1100, "Re: Planta e orçamento da sala de reunião", MARINA, "Fechado, o prazo é dia 16. Estou revisando a iluminação e já te envio a versão final.", 6, true, "renan@exemplo.com");
+const HELENA: [string, string] = ["Helena Bastos", "helena@cliente-alfa.com.br"];
+const CONTATO = "contato@betinhos.com.br";
+thread(2001, second, "inbox", 2001, "Transfer aeroporto: sexta às 18h", HELENA, "Preciso de um transfer de Congonhas para o hotel na sexta, 18h, para 2 passageiros.", 22, true, CONTATO);
+thread(2002, second, "sent", 2001, "Re: Transfer aeroporto: sexta às 18h", ["Betinhos", CONTATO], "Olá, Helena! Confirmado: sedan executivo, motorista com placa de recepção. Valor R$ 280,00.", 21, true, HELENA[1]);
+thread(2003, second, "inbox", 2001, "RES: Transfer aeroporto: sexta às 18h", HELENA, "Perfeito. Pode incluir também a volta no domingo, às 16h?", 3, false, CONTATO);
+thread(2004, second, "inbox", 0, "Renovação do seguro frota", ["Porto Seguro", "frota@portoseguro.com.br"], "A renovação da apólice da frota vence em 30 dias. Veja as condições no anexo.", 8, false, CONTATO);
+thread(2005, second, "inbox", 0, "Nota fiscal de combustível", ["Posto Ipiranga", "nf@postoipiranga.com.br"], "Sua nota fiscal de combustível de outubro está disponível.", 52, true, CONTATO);
 
 // Rascunhos e configurações de exemplo (a tela de Rascunhos e as assinaturas aparecem preenchidas).
 let drafts: StoredDraft[] = [
@@ -109,10 +135,17 @@ let settings: Settings = { [`signature:${accounts[0].id}`]: "Renan\nBetinhos Exe
 try { settings = { ...settings, ...JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? "{}") }; } catch { /* sem armazenamento */ }
 
 const norm = (s: string) => s.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase();
-const summary = ({ body_text: _b, body_html: _h, reply_addr: _r, attachments: _a, to_addrs: _t, cc_addrs: _c, ...s }: MockMessage): MessageSummary => s;
-/** Pasta virtual: com estrela e fora de Lixeira e Spam. */
+const withCount = <T extends MockMessage>(m: T) => ({
+  ...m,
+  thread_count: m.thread_id ? messages.filter((x) => x.account === m.account && x.thread_id === m.thread_id).length : 1,
+});
+const summary = (m: MockMessage): MessageSummary => {
+  const { body_text: _b, body_html: _h, reply_addr: _r, attachments: _a, to_addrs: _t, cc_addrs: _c, ...s } = withCount(m);
+  return s;
+};
+/** Pastas virtuais: "Com estrela" (fora de Lixeira e Spam) e "Todas as caixas" (a Entrada de todas as contas). */
 const inView = (m: MockMessage, view: View) =>
-  view === "starred" ? m.flagged && m.role !== "trash" && m.role !== "junk" : m.role === view;
+  view === "starred" ? m.flagged && m.role !== "trash" && m.role !== "junk" : m.role === (view === "all" ? "inbox" : view);
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 let syncCount = 0;
 
@@ -181,7 +214,7 @@ export const mockApi = {
         id, account: accounts[0].id, uid: id, from_name: "Marina Duarte", from_addr: "marina@lumenarquitetura.com.br",
         subject: "Orçamento aprovado", date: Math.floor(Date.now() / 1000),
         snippet: "Tudo certo com o orçamento. Podemos assinar na segunda?", body_text: "Tudo certo com o orçamento. Podemos assinar na segunda?\n\nMarina", body_html: "", seen: false, flagged: false,
-        reply_addr: "marina@lumenarquitetura.com.br", attachments: [], to_addrs: "renan@exemplo.com", cc_addrs: "", role: "inbox",
+        reply_addr: "marina@lumenarquitetura.com.br", attachments: [], to_addrs: "renan@exemplo.com", cc_addrs: "", role: "inbox", thread_id: 0,
       },
       ...messages,
     ];
@@ -197,11 +230,17 @@ export const mockApi = {
       .sort((a, b) => b.date - a.date)
       .map(summary);
   },
+  async thread(id: number): Promise<MessageSummary[]> {
+    const m = messages.find((x) => x.id === id);
+    if (!m) return [];
+    const all = m.thread_id ? messages.filter((x) => x.account === m.account && x.thread_id === m.thread_id && x.role !== "trash" && x.role !== "junk") : [m];
+    return all.sort((a, b) => a.date - b.date).map(summary);
+  },
   async open(id: number): Promise<MessageDetail | null> {
     const m = messages.find((x) => x.id === id);
     if (!m) return null;
     m.seen = true;
-    return { ...m };
+    return withCount(m);
   },
   /** Para testar a falha: assunto com "fatura" não move. */
   async move(id: number, role: Role): Promise<void> {

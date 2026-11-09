@@ -790,3 +790,34 @@ kbd {
   .settings-row { flex-wrap: wrap; }
 }
 @media (max-width: 1080px) { .settings-nav .nav-item span { display: inline; } .settings-nav .nav-item { justify-content: flex-start; } }
+
+/* Conversas: contagem ao lado do remetente, conta de origem na "Todas as caixas" e o fio no painel de leitura. */
+.from.has-meta { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.from-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.thread-n {
+  flex: none; padding: 0 5px; border-radius: 999px; background: var(--hover); color: var(--muted);
+  font: 500 10.5px/16px var(--mono);
+}
+.acct {
+  display: inline-block; margin-right: 6px; padding: 0 6px; border-radius: 4px; vertical-align: 1px;
+  background: var(--hover); color: var(--muted); font: 500 10.5px/16px var(--mono);
+}
+.thread { display: flex; flex-direction: column; gap: 10px; }
+.thread-msg { padding: 18px 20px 20px; border: 1px solid var(--line); border-radius: 10px; }
+.thread-msg[data-current] { border-color: transparent; padding: 0; }
+.thread-msg .meta { margin-bottom: 18px; padding-bottom: 16px; }
+.thread-msg[data-current] .meta { padding-bottom: 24px; margin-bottom: 28px; }
+.message h1 + .actions { margin-top: -8px; }
+.thread-fold {
+  display: grid; grid-template-columns: 24px minmax(0, 150px) 1fr auto; align-items: center; gap: 10px;
+  width: 100%; padding: 10px 14px; border: 1px solid var(--line); border-radius: 10px;
+  background: transparent; color: var(--muted); font: inherit; text-align: left; cursor: pointer;
+  transition: background-color 120ms ease;
+}
+.thread-fold:hover { background: var(--hover); }
+.thread-fold[data-unread] .fold-from { font-weight: 600; color: var(--strong); }
+.thread-fold .avatar { width: 24px; height: 24px; font-size: 11px; }
+.fold-from { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+.fold-snip { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fold-date { font: 11px/1.4 var(--mono); color: var(--faint); white-space: nowrap; }
+@media (hover: none) { .thread-fold:hover { background: transparent; } }

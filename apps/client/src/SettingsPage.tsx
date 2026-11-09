@@ -177,6 +177,10 @@ export function SettingsPage({ accounts, settings, onSetting, onRemoveAccount, o
                 <Segmented label="Prévia do texto" value={settings.preview} fallback="1" onChange={(v) => onSetting("preview", v)}
                   options={[["1", "Mostrar"], ["0", "Ocultar"]]} />
               </Row>
+              <Row title="Agrupar por conversa" sub="Respostas do mesmo assunto viram uma linha; o painel mostra o fio inteiro">
+                <Segmented label="Agrupar por conversa" value={settings.group} fallback="1" onChange={(v) => onSetting("group", v)}
+                  options={[["1", "Sim"], ["0", "Não"]]} />
+              </Row>
               <Row title="Painel de leitura" sub="Desligado abre a mensagem em tela cheia ao clicar">
                 <Segmented label="Painel de leitura" value={settings.pane} fallback="right" onChange={(v) => onSetting("pane", v)}
                   options={[["right", "Direita"], ["bottom", "Embaixo"], ["off", "Desligado"]]} />

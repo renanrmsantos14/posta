@@ -6,6 +6,7 @@ use std::path::Path;
 
 use crate::attachments::Attachment;
 use crate::folders::{Folder, Role};
+use crate::threads;
 use crate::Result;
 
 /// O banco é só uma cópia do servidor: mudou o esquema, apaga e sincroniza de novo.
@@ -40,6 +41,7 @@ CREATE TABLE IF NOT EXISTS messages (
   attachments TEXT NOT NULL DEFAULT '[]',
   to_addrs TEXT NOT NULL DEFAULT '',
   cc_addrs TEXT NOT NULL DEFAULT '',
+  thread_id INTEGER NOT NULL DEFAULT 0,
   UNIQUE (account, mailbox, uid)
 );
 CREATE INDEX IF NOT EXISTS messages_by_date ON messages (date DESC);
@@ -132,6 +134,10 @@ pub struct MessageSummary {
     pub flagged: bool,
     /// Papel da pasta onde a mensagem está (`inbox`, `trash`...); `None` se a pasta não tem papel.
     pub role: Option<String>,
+    /// Fio (conversa) da conta a que a mensagem pertence; 0 = ainda sem fio.
+    pub thread_id: i64,
+    /// Mensagens do fio, em qualquer pasta.
+    pub thread_count: u32,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -178,7 +184,9 @@ const IN_ROLE: &str = "m.mailbox = COALESCE(
 
 const SUMMARY_COLS: &str = "m.id, m.account, m.uid, m.from_name, m.from_addr, m.subject, m.date, m.snippet, m.seen, m.flagged,
     COALESCE((SELECT f.role FROM folders f WHERE f.account = m.account AND f.name = m.mailbox),
-    CASE WHEN m.mailbox = 'INBOX' THEN 'inbox' END)";
+    CASE WHEN m.mailbox = 'INBOX' THEN 'inbox' END),
+    m.thread_id,
+    CASE WHEN m.thread_id = 0 THEN 1 ELSE (SELECT COUNT(*) FROM messages t WHERE t.account = m.account AND t.thread_id = m.thread_id) END";
 
 /// Fora da Lixeira e do Spam.
 const NOT_DISCARDED: &str = "COALESCE((SELECT f.role FROM folders f WHERE f.account = m.account AND f.name = m.mailbox), '') NOT IN ('trash', 'junk')";
@@ -196,6 +204,8 @@ fn row_to_summary(r: &rusqlite::Row) -> rusqlite::Result<MessageSummary> {
         seen: r.get(8)?,
         flagged: r.get(9)?,
         role: r.get(10)?,
+        thread_id: r.get(11)?,
+        thread_count: r.get(12)?,
     })
 }
 
@@ -246,8 +256,64 @@ impl Store {
                 conn.execute_batch(&format!("ALTER TABLE drafts ADD COLUMN {col} TEXT NOT NULL DEFAULT ''"))?;
             }
         }
+        // Bancos da v5 já têm as mensagens, mas não o fio: ganham a coluna e os fios são calculados aqui.
+        let has_thread: bool =
+            conn.query_row("SELECT COUNT(*) > 0 FROM pragma_table_info('messages') WHERE name = 'thread_id'", [], |r| r.get(0))?;
+        if !has_thread {
+            conn.execute_batch("ALTER TABLE messages ADD COLUMN thread_id INTEGER NOT NULL DEFAULT 0")?;
+        }
+        conn.execute_batch("CREATE INDEX IF NOT EXISTS messages_by_thread ON messages (account, thread_id)")?;
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-        Ok(Self { conn })
+        let store = Self { conn };
+        let pending: Vec<String> = {
+            let mut st = store.conn.prepare("SELECT DISTINCT account FROM messages WHERE thread_id = 0")?;
+            let rows = st.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+            rows
+        };
+        for account in pending {
+            store.rebuild_threads(&account)?;
+        }
+        Ok(store)
+    }
+
+    /// Recalcula os fios da conta e grava só os que mudaram.
+    fn rebuild_threads(&self, account: &str) -> Result<()> {
+        let rows: Vec<(i64, String, String, String, i64)> = {
+            let mut st = self
+                .conn
+                .prepare_cached("SELECT id, message_id, refs, subject, thread_id FROM messages WHERE account = ?1 ORDER BY id")?;
+            let rows = st
+                .query_map(params![account], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            rows
+        };
+        let entries: Vec<threads::Entry> = rows
+            .iter()
+            .map(|(id, message_id, refs, subject, _)| threads::Entry { id: *id, message_id, refs, subject })
+            .collect();
+        let keys = threads::group(&entries);
+        let tx = self.conn.unchecked_transaction()?;
+        {
+            let mut up = tx.prepare_cached("UPDATE messages SET thread_id = ?1 WHERE id = ?2")?;
+            for ((id, _, _, _, old), key) in rows.iter().zip(keys) {
+                if *old != key {
+                    up.execute(params![key, id])?;
+                }
+            }
+        }
+        Ok(tx.commit()?)
+    }
+
+    /// Mensagens do mesmo fio (qualquer pasta, fora Lixeira/Spam), da mais antiga à mais nova. Sempre inclui `id`.
+    pub fn thread(&self, id: i64) -> Result<Vec<MessageSummary>> {
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT {SUMMARY_COLS} FROM messages m, messages o
+             WHERE o.id = ?1 AND m.account = o.account
+               AND (m.id = o.id OR (o.thread_id <> 0 AND m.thread_id = o.thread_id AND {NOT_DISCARDED}))
+             ORDER BY m.date ASC, m.id ASC"
+        ))?;
+        let rows = stmt.query_map(params![id], row_to_summary)?.collect::<rusqlite::Result<_>>()?;
+        Ok(rows)
     }
 
     pub fn uid_validity(&self, account: &str, mailbox: &str) -> Result<Option<u32>> {
@@ -320,7 +386,11 @@ impl Store {
                 ])?;
             }
         }
-        Ok(tx.commit()?)
+        tx.commit()?;
+        if !msgs.is_empty() {
+            self.rebuild_threads(account)?;
+        }
+        Ok(())
     }
 
     /// Aplica o estado do servidor: remove o que sumiu e atualiza as flags de lida e estrela.
@@ -433,12 +503,12 @@ impl Store {
                 |r| {
                     Ok(MessageDetail {
                         summary: row_to_summary(r)?,
-                        body_text: r.get(11)?,
-                        body_html: r.get(12)?,
-                        reply_addr: r.get(13)?,
-                        attachments: serde_json::from_str(&r.get::<_, String>(14)?).unwrap_or_default(),
-                        to_addrs: r.get(15)?,
-                        cc_addrs: r.get(16)?,
+                        body_text: r.get(13)?,
+                        body_html: r.get(14)?,
+                        reply_addr: r.get(15)?,
+                        attachments: serde_json::from_str(&r.get::<_, String>(16)?).unwrap_or_default(),
+                        to_addrs: r.get(17)?,
+                        cc_addrs: r.get(18)?,
                     })
                 },
             )
@@ -944,5 +1014,53 @@ mod tests {
         let n = s.newest_unseen("a", "INBOX", 5).unwrap();
         assert_eq!(n.iter().map(|m| m.subject.as_str()).collect::<Vec<_>>(), ["nova", "velha"]);
         assert_eq!(s.newest_unseen("a", "INBOX", 1).unwrap().len(), 1);
+    }
+
+    fn reply_to(mut m: NewMessage, parent_uid: u32, subject: &str) -> NewMessage {
+        m.refs = format!("{parent_uid}@exemplo.com");
+        m.subject = subject.into();
+        m
+    }
+
+    #[test]
+    fn conversa_junta_entrada_e_enviados_e_deixa_a_lixeira_de_fora() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.set_folders("a", &folders_a()).unwrap();
+        s.insert_messages("a", "INBOX", &[msg(1, "Contrato", "", 10), msg(9, "Outro assunto", "", 5)]).unwrap();
+        s.insert_messages("a", "Enviados", &[reply_to(msg(2, "", "", 20), 1, "Re: Contrato")]).unwrap();
+        // Chega depois e cita só a resposta; ao entrar, o fio é recalculado.
+        s.insert_messages("a", "INBOX", &[reply_to(msg(3, "", "", 30), 2, "RES: Contrato")]).unwrap();
+        s.insert_messages("a", "Lixeira", &[reply_to(msg(4, "", "", 40), 3, "Re: Contrato")]).unwrap();
+        // Outra conta com o mesmo assunto não se mistura.
+        s.insert_messages("b", "INBOX", &[msg(1, "Contrato", "", 11), reply_to(msg(2, "", "", 12), 1, "Re: Contrato")]).unwrap();
+
+        let inbox = s.list_folder(Role::Inbox, 10, 0).unwrap();
+        let last = inbox.iter().find(|m| m.account == "a" && m.uid == 3).unwrap();
+        assert_eq!(last.thread_count, 4);
+        let ids: Vec<_> = s.thread(last.id).unwrap().iter().map(|m| m.uid).collect();
+        assert_eq!(ids, [1, 2, 3]);
+        let outro = inbox.iter().find(|m| m.uid == 9).unwrap();
+        assert_ne!(outro.thread_id, last.thread_id);
+        assert_eq!(s.thread(outro.id).unwrap().len(), 1);
+        let b = inbox.iter().find(|m| m.account == "b" && m.uid == 2).unwrap();
+        assert_eq!(s.thread(b.id).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn banco_da_v5_ganha_coluna_e_fios_calculados() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(&SCHEMA.replace("  thread_id INTEGER NOT NULL DEFAULT 0,\n", "")).unwrap();
+        conn.execute_batch(
+            "INSERT INTO messages (account, mailbox, uid, subject, date, message_id, refs) VALUES
+               ('a', 'INBOX', 1, 'Pauta', 1, 'p1', ''),
+               ('a', 'INBOX', 2, 'Re: Pauta', 2, 'p2', 'p1');",
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", SCHEMA_VERSION).unwrap();
+        let s = Store::init(conn).unwrap();
+        let list = s.list("INBOX", 5, 0).unwrap();
+        assert_eq!(list.len(), 2);
+        assert!(list[0].thread_id != 0 && list[0].thread_id == list[1].thread_id);
+        assert_eq!(list[0].thread_count, 2);
     }
 }
