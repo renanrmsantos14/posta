@@ -20,7 +20,7 @@ pub use imap_sync::{AuthMode, IdleEnd, ImapAccount, MsgFlag, Security, SmtpServe
 pub use session::{Hub, Kind, Live};
 pub use outbox::{FlushReport, OpKind, OutboxItem, PendingOp};
 pub use send::{OutAttachment, Outgoing, SendReport};
-pub use store::{Contact, DraftRecord, MessageDetail, MessageSummary, ReplyRef, Store, UserFolder};
+pub use store::{Contact, Cursor, Delta, DraftRecord, Page, SyncState, MessageDetail, MessageSummary, ReplyRef, Store, UserFolder};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
