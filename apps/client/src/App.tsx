@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowBendUpLeft, ArrowBendDoubleUpLeft, ArrowBendUpRight, ArrowsClockwise, Archive, Copy, FolderOpen, FolderSimple, NotePencil, Star, Tag, Trash, EnvelopeSimple, EnvelopeSimpleOpen, FloppyDisk, Printer, PushPin, Clock } from "@phosphor-icons/react";
 import { api, isTauri, type Account, type Attachment, type MailDelta, type MessageDetail, type MessageSummary, type OutAttachment, type OutboxItem, type Role, type Settings, type StoredDraft, type UnreadCounts, type UserFolder, type View } from "./api";
 import { AccountDialog } from "./AccountDialog";
+import { colorKey } from "./accountColors";
 import { parseCategories } from "./Categories";
 import { FolderDialog, type FolderDialogState } from "./FolderDialog";
 import { OutboxPane, useQueue } from "./Offline";
@@ -896,7 +897,7 @@ export default function App() {
   async function removeAccount(id: string) {
     await api.removeAccount(id);
     setAccounts((l) => (l ?? []).filter((a) => a.id !== id));
-    setSettings((s) => Object.fromEntries(Object.entries(s).filter(([k]) => k !== `signature:${id}`)));
+    setSettings((s) => Object.fromEntries(Object.entries(s).filter(([k]) => k !== `signature:${id}` && k !== colorKey(id))));
     setAccountFilter((f) => (f === id ? null : f));
     setSelectedId(null);
     setDetail(null);
@@ -1567,7 +1568,7 @@ export default function App() {
         <Rail navFolders={navFolders} favorites={favorites} folder={folder} inList={inList} unread={(v) => (Object.hasOwn(FOLDERS, v) ? (unreadOf(v as Role | "starred" | "all") ?? 0) : 0)}
           open={openFolder}
           drop={dropProps} openMap={openMap} onToggleFolder={toggleFolder} folderUnread={folderUnread} hoverView={dropKey}
-          onContext={folderContext} userFolders={userFolders} categories={categories} tree={tree} accounts={accounts}
+          onContext={folderContext} userFolders={userFolders} categories={categories} tree={tree} accounts={accounts} settings={settings}
           accountFilter={accountFilter} onAccountFilter={(id) => { setAccountFilter(id); if (id && folder === "all") openFolder("inbox"); }}
           drafts={drafts.length} scheduled={scheduled.length} outbox={net.outbox} showDrafts={showDrafts} showScheduled={showScheduled} showOutbox={showOutbox}
           openDrafts={openDrafts} openScheduled={openScheduled} openOutbox={openOutbox}
@@ -1671,10 +1672,18 @@ export default function App() {
       {dialog && (
         <AccountDialog
           onClose={() => setDialog(false)}
+          onSetting={changeSetting}
           onAdded={(a) => {
+            const isNew = !(accounts ?? []).some((x) => x.id === a.id);
             setAccounts((l) => [...(l ?? []).filter((x) => x.id !== a.id), a]);
+            if (!isNew) return;
             if (settings.notify !== "0") api.requestNotifyPermission().catch(() => {});
             toast(`Conta ${a.username} conectada`, "success");
+          }}
+          onDone={(a) => {
+            setSettingsOpen(false);
+            setAccountFilter((accounts?.length ?? 0) > 1 ? a.id : null);
+            openFolder("inbox");
           }}
         />
       )}

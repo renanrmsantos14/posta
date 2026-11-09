@@ -41,6 +41,16 @@ export interface Account {
   auth?: "password" | Provider;
 }
 
+/** Resultado da descoberta do domínio no assistente de conta (`detect_provider`). */
+export type Hosting = "microsoft" | "google" | "other";
+export interface ServerGuess { host: string; port: number; security: Security }
+export interface Detection { imap: ServerGuess | null; smtp: ServerGuess | null; hosting: Hosting | null }
+
+/** Etapas do teste de conexão e causa da falha (`check_account`); o texto cru vai em `detail`. */
+export type CheckStep = "connect" | "login" | "smtp";
+export type FailKind = "dns" | "timeout" | "refused" | "tls" | "auth" | "imap_disabled" | "offline" | "unknown";
+export interface CheckFailure { step: CheckStep; kind: FailKind; detail: string }
+
 export interface NewAccount extends Omit<Account, "id"> {
   password: string;
 }
@@ -260,6 +270,8 @@ export const api = isTauri
       listAccounts: () => invoke<Account[]>("list_accounts"),
       addAccount: (account: NewAccount) =>
         invoke<Account>("add_imap_account", { account: { ...account, id: "" } }),
+      detectProvider: (domain: string) => invoke<Detection>("detect_provider", { domain }),
+      checkAccount: (account: NewAccount, step: CheckStep) => invoke<void>("check_account", { account: { ...account, id: "" }, step }),
       oauthProviders: () => invoke<Provider[]>("oauth_providers"),
       oauthLogin: (provider: Provider) => invoke<Account>("oauth_login", { provider }),
       oauthRelogin: (id: string) => invoke<void>("oauth_relogin", { id }),

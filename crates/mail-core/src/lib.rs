@@ -7,6 +7,7 @@ pub mod later;
 pub mod oauth;
 pub mod rules;
 pub mod session;
+pub mod setup;
 pub mod search;
 pub mod outbox;
 pub mod send;

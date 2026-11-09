@@ -1,5 +1,5 @@
 // Dados de exemplo para rodar a UI no navegador (pnpm dev), sem Tauri e sem rede.
-import type { Account, Contact, Draft, FlushReport, MailDelta, MessagePage, OutboxItem, QueueStatus, Provider, OauthConfig, OauthConfigView, MessageDetail, MessageSummary, NewAccount, OutAttachment, Role, ScheduledEdit, SendReport, Settings, StoredDraft, SyncResult, UnreadCounts, UserFolder, View, DragFiles, FolderUnread } from "./api";
+import type { Account, CheckFailure, CheckStep, Detection, FailKind, Contact, Draft, FlushReport, MailDelta, MessagePage, OutboxItem, QueueStatus, Provider, OauthConfig, OauthConfigView, MessageDetail, MessageSummary, NewAccount, OutAttachment, Role, ScheduledEdit, SendReport, Settings, StoredDraft, SyncResult, UnreadCounts, UserFolder, View, DragFiles, FolderUnread } from "./api";
 import { parseRules, type ScheduledItem } from "./productivity";
 import { parseBox, parseCat } from "./views";
 
@@ -302,9 +302,31 @@ export const mockApi = {
   async addAccount(a: NewAccount): Promise<Account> {
     await wait(900);
     if (a.password.length < 3) throw "LOGIN failed. Invalid login/password";
-    const acc = { id: `${a.username}@${a.host}`, host: a.host, port: a.port, security: a.security, username: a.username, smtp: a.smtp };
+    const acc = { id: `${a.username}@${a.host}`, host: a.host, port: a.port, security: a.security, username: a.username, smtp: a.smtp, name: a.name };
     accounts = [...accounts.filter((x) => x.id !== acc.id), acc];
     return acc;
+  },
+  /** Domínios de teste: empresa.com.br (MX Microsoft), workspace.com.br (MX Google), exemplo.org (autoconfig), offline.com (sem resposta); o resto não é encontrado. */
+  async detectProvider(domain: string): Promise<Detection> {
+    await wait(700);
+    if (domain === "empresa.com.br") return { imap: null, smtp: null, hosting: "microsoft" };
+    if (domain === "workspace.com.br") return { imap: null, smtp: null, hosting: "google" };
+    if (domain === "exemplo.org") return { imap: { host: "mail.exemplo.org", port: 143, security: "starttls" }, smtp: { host: "smtp.exemplo.org", port: 587, security: "starttls" }, hosting: "other" };
+    if (domain === "offline.com") await wait(7000);
+    return { imap: null, smtp: null, hosting: null };
+  },
+  /** Para testar as falhas: servidor com "invalido" (DNS), "lento" (prazo), porta 1234 (recusada), "tls" (certificado), senha "errada" ou "imap" (IMAP desativado). */
+  async checkAccount(a: NewAccount, step: CheckStep): Promise<void> {
+    await wait(step === "connect" ? 600 : 800);
+    const host = step === "smtp" ? a.smtp?.host ?? "" : a.host;
+    const port = step === "smtp" ? a.smtp?.port : a.port;
+    const bad = (kind: FailKind, detail: string) => Promise.reject({ step, kind, detail } satisfies CheckFailure);
+    if (host.includes("invalido")) return bad("dns", `failed to lookup address information: Name or service not known (${host})`);
+    if (host.includes("lento")) return bad("timeout", "sem resposta do servidor no prazo");
+    if (port === 1234) return bad("refused", "Connection refused (os error 111)");
+    if (host.includes("tls")) return bad("tls", "invalid peer certificate: UnknownIssuer");
+    if (step === "login" && a.password === "errada") return bad("auth", "No Response: [AUTHENTICATIONFAILED] Invalid credentials (Failure)");
+    if (step === "login" && a.password === "imap") return bad("imap_disabled", "No Response: [ALERT] Your account is not enabled for IMAP use.");
   },
   async oauthProviders(): Promise<Provider[]> {
     return ["google", "microsoft"];
@@ -331,6 +353,7 @@ export const mockApi = {
     drafts = drafts.filter((d) => d.account !== id);
     messages = messages.filter((m) => m.account !== id);
     delete settings[`signature:${id}`];
+    delete settings[`color:${id}`];
   },
   async saveDraft(d: Omit<StoredDraft, "updated">): Promise<void> {
     drafts = [{ ...d, updated: Math.floor(Date.now() / 1000) }, ...drafts.filter((x) => x.id !== d.id)];

@@ -1,6 +1,7 @@
 // Painel de pastas: Favoritos, pastas da conta, pastas do usuário e categorias, rascunhos/agendados e contas.
 import { FileText, PaperPlaneTilt, Plus, Clock } from "@phosphor-icons/react";
-import type { Account, Category, UserFolder, View } from "./api";
+import type { Account, Category, Settings, UserFolder, View } from "./api";
+import { colorKey } from "./accountColors";
 import { FolderTree } from "./FolderTree";
 import { PageLayout } from "./layout/primitives";
 import { viewInfo, type FolderNode, type OpenMap } from "./folders";
@@ -20,6 +21,7 @@ interface Props {
   categories: Category[];
   tree: FolderNode[];
   accounts: Account[] | null;
+  settings: Settings;
   accountFilter: string | null;
   onAccountFilter: (id: string | null) => void;
   drafts: number;
@@ -94,12 +96,12 @@ export function Rail(p: Props) {
         {p.accounts?.map((a) => p.accounts!.length > 1 ? (
           <button key={a.id} type="button" className="account account-btn" title={a.id} aria-pressed={p.accountFilter === a.id}
             onClick={() => p.onAccountFilter(p.accountFilter === a.id ? null : a.id)}>
-            <span className="avatar" aria-hidden>{a.username[0]?.toUpperCase()}</span>
+            <span className="avatar" data-color={p.settings[colorKey(a.id)]} aria-hidden>{a.username[0]?.toUpperCase()}</span>
             <span className="account-name">{a.username}</span>
           </button>
         ) : (
           <div key={a.id} className="account" title={a.id}>
-            <span className="avatar" aria-hidden>{a.username[0]?.toUpperCase()}</span>
+            <span className="avatar" data-color={p.settings[colorKey(a.id)]} aria-hidden>{a.username[0]?.toUpperCase()}</span>
             <span className="account-name">{a.username}</span>
           </div>
         ))}

@@ -383,6 +383,20 @@ async fn add_imap_account(app: AppHandle, mut account: ImapAccount) -> CmdResult
     Ok(account)
 }
 
+/// Descobre servidores (autoconfig do Thunderbird) e hospedagem (MX) do domínio. Falha de rede = resposta vazia.
+#[tauri::command]
+async fn detect_provider(domain: String) -> CmdResult<mail_core::setup::Detection> {
+    tauri::async_runtime::spawn_blocking(move || mail_core::setup::detect(&domain)).await.map_err(err)
+}
+
+/// Uma etapa do teste de conexão do assistente de conta (não salva nada nem envia email).
+#[tauri::command]
+async fn check_account(account: ImapAccount, step: mail_core::setup::Step) -> Result<(), mail_core::setup::CheckFailure> {
+    tauri::async_runtime::spawn_blocking(move || mail_core::setup::check_step(&account, step))
+        .await
+        .map_err(|e| mail_core::setup::CheckFailure { step, kind: mail_core::setup::FailKind::Unknown, detail: e.to_string() })?
+}
+
 #[tauri::command]
 fn list_accounts(state: State<'_, AppState>) -> CmdResult<Vec<ImapAccount>> {
     state.accounts()
@@ -1625,6 +1639,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             add_imap_account,
+            detect_provider,
+            check_account,
             oauth_app::oauth_providers,
             oauth_app::oauth_login,
             oauth_app::oauth_relogin,

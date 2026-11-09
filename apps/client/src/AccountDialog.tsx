@@ -1,48 +1,62 @@
-// Adicionar conta IMAP. Fecha por X, Esc ou clique fora; pergunta antes de descartar o que foi digitado.
-import { useEffect, useRef, useState } from "react";
-import { X, Check, GoogleLogo, MicrosoftOutlookLogo } from "@phosphor-icons/react";
-import { api, type Account, type Provider, type Security } from "./api";
-import { openExternal } from "./HtmlBody";
+// Assistente para adicionar conta: Email → Login → Teste → Personalizar. Fecha por X, Esc ou clique fora;
+// pergunta antes de descartar o que foi digitado e não fecha durante o teste, a espera do navegador e o salvamento.
+import { useEffect, useState } from "react";
+import { ArrowLeft, Check, X } from "@phosphor-icons/react";
+import { api, type Account, type CheckFailure, type CheckStep, type NewAccount, type Provider } from "./api";
+import { ACCOUNT_COLORS, colorKey } from "./accountColors";
+import { asFailure, detectSetup, isServerFailure, type Setup } from "./accountSetup";
+import { FailureBox, GmailGuide, ManualServers, OauthButton, Personalize, TestProgress, type ServerForm } from "./AccountSteps";
 
-interface Props { onClose: () => void; onAdded: (a: Account) => void }
+interface Props {
+  onClose: () => void;
+  /** A conta existe: registra na lista do app. */
+  onAdded: (a: Account) => void;
+  /** Assistente concluído: abre a Caixa de Entrada da conta nova. */
+  onDone: (a: Account) => void;
+  onSetting: (key: string, value: string) => void;
+}
 
-/** Servidores conhecidos pelo domínio do email. */
-const OUTLOOK = { host: "outlook.office365.com", smtp: "smtp-mail.outlook.com", smtpPort: "587" };
-const PRESETS: Record<string, { host: string; smtp: string; smtpPort: string; hint?: string; link?: { url: string; label: string } }> = {
-  "gmail.com": { host: "imap.gmail.com", smtp: "smtp.gmail.com", smtpPort: "465", hint: "No Gmail, use uma senha de app (exige verificação em duas etapas).", link: { url: "https://myaccount.google.com/apppasswords", label: "Gerar senha de app" } },
-  "outlook.com": OUTLOOK,
-  "hotmail.com": OUTLOOK,
-  "live.com": OUTLOOK,
-  "icloud.com": { host: "imap.mail.me.com", smtp: "smtp.mail.me.com", smtpPort: "587", hint: "No iCloud, use uma senha específica de app." },
-  "yahoo.com": { host: "imap.mail.yahoo.com", smtp: "smtp.mail.yahoo.com", smtpPort: "465" },
-};
+type Stage = "email" | "login" | "test" | "custom";
+/** Conta ainda não gravada (senha, só guardada ao concluir) ou já criada pelo navegador (OAuth). */
+type Pending = { kind: "password"; account: NewAccount } | { kind: "oauth"; account: Account };
 
-const OAUTH_BUTTONS: { provider: Provider; label: string; Icon: typeof GoogleLogo }[] = [
-  { provider: "google", label: "Entrar com Google", Icon: GoogleLogo },
-  { provider: "microsoft", label: "Entrar com Microsoft", Icon: MicrosoftOutlookLogo },
-];
-
-type Status = "idle" | "saving" | "done";
 const EXIT_MS = 150;
+const STEPS: CheckStep[] = ["connect", "login", "smtp"];
+const TITLE: Record<Stage, string> = { email: "Adicionar conta", login: "Entrar na conta", test: "Testando a conexão", custom: "Personalizar" };
+const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-export function AccountDialog({ onClose, onAdded }: Props) {
-  const [form, setForm] = useState({ username: "", password: "", host: "", port: "993", security: "tls" as Security, smtpHost: "", smtpPort: "465" });
-  const [hostTouched, setHostTouched] = useState(false);
-  const [status, setStatus] = useState<Status>("idle");
+export function AccountDialog({ onClose, onAdded, onDone, onSetting }: Props) {
+  const [stage, setStage] = useState<Stage>("email");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [setup, setSetup] = useState<Setup | null>(null);
+  const [form, setForm] = useState<ServerForm>({ host: "", port: "993", security: "tls", smtpHost: "", smtpPort: "465" });
+  const [manualOpen, setManualOpen] = useState(false);
+  const [usePassword, setUsePassword] = useState(false);
+  const [existing, setExisting] = useState<Account[]>([]);
+  const [providers, setProviders] = useState<Provider[] | null>(null); // null = ainda carregando
+  const [oauth, setOauth] = useState<Provider | null>(null);
+  const [detecting, setDetecting] = useState(false);
+  const [reached, setReached] = useState(0);
+  const [failure, setFailure] = useState<CheckFailure | null>(null);
+  const [pending, setPending] = useState<Pending | null>(null);
+  const [name, setName] = useState("");
+  const [signature, setSignature] = useState("");
+  const [color, setColor] = useState<string>(ACCOUNT_COLORS[0].id);
+  const [saving, setSaving] = useState<"idle" | "saving" | "done">("idle");
   const [error, setError] = useState("");
   const [errorKey, setErrorKey] = useState(0);
   const [confirming, setConfirming] = useState(false);
   const [leaving, setLeaving] = useState(false);
-  const first = useRef<HTMLInputElement>(null);
-  const [providers, setProviders] = useState<Provider[] | null>(null); // null = ainda carregando
-  const [oauth, setOauth] = useState<Provider | null>(null);
 
-  const dirty = form.username !== "" || form.password !== "" || hostTouched;
-  const domain = form.username.split("@")[1]?.toLowerCase() ?? "";
-  const preset = PRESETS[domain];
-
-  useEffect(() => first.current?.focus(), []);
   useEffect(() => { api.oauthProviders().then(setProviders).catch(() => setProviders([])); }, []);
+
+  const testing = stage === "test" && !failure;
+  const busy = testing || oauth !== null || saving !== "idle" || detecting;
+  const hosting = setup?.hosting ?? "other";
+  const canMicrosoft = providers?.includes("microsoft") ?? false;
+  // O que foi digitado só se perde se ninguém gravou a conta ainda.
+  const dirty = stage === "custom" ? pending?.kind === "password" || name !== "" || signature !== "" : email !== "" || password !== "";
 
   function close() {
     setLeaving(true);
@@ -50,7 +64,7 @@ export function AccountDialog({ onClose, onAdded }: Props) {
   }
 
   function requestClose() {
-    if (status !== "idle" || oauth) return; // durante o salvamento e a espera do navegador não fecha
+    if (testing || oauth || saving !== "idle") return;
     if (dirty) setConfirming(true);
     else close();
   }
@@ -66,136 +80,206 @@ export function AccountDialog({ onClose, onAdded }: Props) {
     return () => window.removeEventListener("keydown", onKey, true);
   });
 
-  function update<K extends keyof typeof form>(key: K, value: (typeof form)[K]) {
-    setForm((f) => {
-      const next = { ...f, [key]: value };
-      if (key === "username" && !hostTouched) {
-        const d = String(value).split("@")[1]?.toLowerCase();
-        next.host = (d && PRESETS[d]?.host) || (d ? `imap.${d}` : "");
-        next.smtpHost = (d && PRESETS[d]?.smtp) || (d ? `smtp.${d}` : "");
-        next.smtpPort = (d && PRESETS[d]?.smtpPort) || "465";
-      }
-      if (key === "security") next.port = value === "tls" ? "993" : "143";
-      return next;
-    });
+  function fail(message: string) {
+    setError(message);
+    setErrorKey((k) => k + 1);
   }
 
-  async function submit(e: React.FormEvent) {
+  async function submitEmail(e: React.FormEvent) {
     e.preventDefault();
+    const address = email.trim();
     setError("");
-    setStatus("saving");
-    try {
-      const { smtpHost, smtpPort, ...imap } = form;
-      const smtp = { host: smtpHost, port: Number(smtpPort), security: (smtpPort === "465" ? "tls" : "starttls") as Security };
-      const acc = await api.addAccount({ ...imap, port: Number(form.port), smtp });
-      setStatus("done");
-      setTimeout(() => {
-        onAdded(acc);
-        close();
-      }, 650);
-    } catch (err) {
-      setStatus("idle");
-      setError(String(err).includes("LOGIN") ? "Usuário ou senha recusados pelo servidor." : String(err));
-      setErrorKey((k) => k + 1);
+    setDetecting(true);
+    const accounts = await api.listAccounts().catch(() => [] as Account[]);
+    setExisting(accounts);
+    if (accounts.some((a) => a.username.toLowerCase() === address.toLowerCase())) {
+      setDetecting(false);
+      fail("Esta conta já está cadastrada no Posta.");
+      return;
     }
+    const s = await detectSetup(address);
+    setEmail(address);
+    setSetup(s);
+    setForm({ host: s.imap.host, port: String(s.imap.port), security: s.imap.security === "starttls" ? "starttls" : "tls", smtpHost: s.smtp.host, smtpPort: String(s.smtp.port) });
+    setManualOpen(false);
+    setUsePassword(false);
+    setFailure(null);
+    setDetecting(false);
+    setStage("login");
+  }
+
+  const patchForm = (patch: Partial<ServerForm>) =>
+    setForm((f) => {
+      const next = { ...f, ...patch };
+      if (patch.security) next.port = patch.security === "tls" ? "993" : "143";
+      return next;
+    });
+
+  function buildAccount(): NewAccount {
+    return {
+      username: email,
+      // Senha de app do Google vem em grupos separados por espaço.
+      password: hosting === "google" ? password.replace(/\s+/g, "") : password,
+      host: form.host.trim(),
+      port: Number(form.port),
+      security: form.security,
+      smtp: { host: form.smtpHost.trim(), port: Number(form.smtpPort), security: form.smtpPort === "465" ? "tls" : "starttls" },
+    };
+  }
+
+  async function runTest(e?: React.FormEvent) {
+    e?.preventDefault();
+    if (!form.host.trim() || !form.smtpHost.trim() || !/^\d+$/.test(form.port) || !/^\d+$/.test(form.smtpPort)) {
+      setManualOpen(true);
+      fail("Preencha os servidores e as portas em Configuração manual.");
+      return;
+    }
+    const account = buildAccount();
+    setError("");
+    setFailure(null);
+    setReached(0);
+    setStage("test");
+    for (const step of STEPS) {
+      try {
+        await api.checkAccount(account, step);
+      } catch (err) {
+        setFailure(asFailure(err));
+        return;
+      }
+      setReached((r) => r + 1);
+    }
+    await wait(450); // deixa o último ✓ aparecer
+    toCustomize({ kind: "password", account });
+  }
+
+  function toCustomize(p: Pending) {
+    setPending(p);
+    setName(p.account.name ?? "");
+    setColor(ACCOUNT_COLORS[existing.length % ACCOUNT_COLORS.length].id);
+    setStage("custom");
   }
 
   async function signIn(provider: Provider) {
     setError("");
+    setFailure(null);
+    setStage("login");
     setOauth(provider);
     try {
       const acc = await api.oauthLogin(provider);
-      setStatus("done");
-      setTimeout(() => {
-        onAdded(acc);
-        close();
-      }, 650);
+      onAdded(acc);
+      toCustomize({ kind: "oauth", account: acc });
     } catch (err) {
-      setError(String(err));
-      setErrorKey((k) => k + 1);
+      fail(String(err));
     } finally {
       setOauth(null);
     }
   }
 
-  const busy = status !== "idle" || oauth !== null;
-  // Só aparecem os logins com Client ID configurado (no build ou em Configurações › Contas › Avançado).
-  const buttons = OAUTH_BUTTONS.filter((b) => providers?.includes(b.provider));
+  async function finish(e: React.FormEvent) {
+    e.preventDefault();
+    if (!pending) return;
+    setSaving("saving");
+    setError("");
+    try {
+      const display = name.trim() || null;
+      const acc = pending.kind === "password"
+        ? await api.addAccount({ ...pending.account, name: display })
+        : display ? await api.updateAccount({ ...pending.account, name: display }, null) : pending.account;
+      if (signature.trim()) onSetting(`signature:${acc.id}`, signature);
+      onSetting(colorKey(acc.id), color);
+      onAdded(acc);
+      setSaving("done");
+      await wait(650);
+      onDone(acc);
+      close();
+    } catch (err) {
+      setSaving("idle");
+      fail(`Não consegui salvar a conta: ${err}`);
+    }
+  }
+
+  function back() {
+    setError("");
+    setFailure(null);
+    setStage("email");
+  }
+
+  const ctx = { hosting, form, canMicrosoft };
+  const microsoftFirst = hosting === "microsoft" && canMicrosoft && !usePassword;
 
   return (
     <div className="overlay" data-leaving={leaving || undefined} onPointerDown={(e) => e.target === e.currentTarget && requestClose()}>
-      <form className="dialog" role="dialog" aria-modal="true" aria-labelledby="dlg-title" onSubmit={submit}>
+      <div className="dialog wizard" role="dialog" aria-modal="true" aria-labelledby="dlg-title">
         <header className="dialog-head">
-          <h2 id="dlg-title">Adicionar conta</h2>
-          <button type="button" className="icon-btn" aria-label="Fechar" onClick={requestClose} disabled={busy}>
+          <h2 id="dlg-title">{TITLE[stage]}</h2>
+          <button type="button" className="icon-btn" aria-label="Fechar" onClick={requestClose} disabled={busy && !detecting}>
             <X size={16} weight="bold" />
           </button>
         </header>
 
-        {buttons.length > 0 && (
-          <div className="oauth-buttons">
-            {buttons.map(({ provider, label, Icon }) => (
-              <button key={provider} type="button" className="btn wide" disabled={busy} onClick={() => signIn(provider)}>
-                {oauth === provider ? <><span className="spinner" aria-hidden />Aguardando o navegador…</> : <><Icon size={18} weight="bold" />{label}</>}
-              </button>
-            ))}
-            <p className="oauth-or"><span>ou use email e senha</span></p>
-          </div>
+        {stage === "email" && (
+          <form className="wizard-step" key="email" onSubmit={submitEmail}>
+            <label className="field">
+              <span>Qual é o seu email?</span>
+              <input type="email" required autoFocus autoComplete="username" value={email} onChange={(e) => { setEmail(e.target.value); setError(""); }} placeholder="voce@gmail.com" />
+            </label>
+            <p className="hint">O Posta descobre sozinho o servidor. Só o domínio é consultado, nunca a senha.</p>
+            {error && <p key={errorKey} className="form-error" role="alert">{error}</p>}
+            <button className="btn primary wide" disabled={detecting}>
+              {detecting ? <><span className="spinner" aria-hidden />Procurando seu provedor…</> : "Continuar"}
+            </button>
+          </form>
         )}
 
-        <label className="field">
-          <span>Email</span>
-          <input ref={first} type="email" required autoComplete="username" value={form.username}
-            onChange={(e) => update("username", e.target.value)} placeholder="voce@gmail.com" />
-        </label>
-        <label className="field">
-          <span>Senha</span>
-          <input type="password" required autoComplete="current-password" value={form.password}
-            onChange={(e) => update("password", e.target.value)} />
-        </label>
-        {preset?.hint && (
-          <p className="hint">
-            {preset.hint}
-            {preset.link && <> <button type="button" className="link-btn" onClick={() => openExternal(preset.link!.url)}>{preset.link.label}</button></>}
-          </p>
+        {stage === "login" && setup && (
+          <form className="wizard-step" key="login" onSubmit={runTest}>
+            <p className="wizard-sub">{email}</p>
+            {microsoftFirst ? (
+              <>
+                <OauthButton provider="microsoft" waiting={oauth} disabled={busy} primary onClick={() => signIn("microsoft")} />
+                <button type="button" className="link-btn" onClick={() => setUsePassword(true)}>Usar senha em vez disso</button>
+              </>
+            ) : (
+              <>
+                {hosting === "google" && <GmailGuide />}
+                {hosting === "microsoft" && <p className="hint">A Microsoft costuma exigir uma senha de app (com verificação em duas etapas) em vez da senha normal.</p>}
+                <label className="field">
+                  <span>{hosting === "google" ? "Senha de app" : "Senha"}</span>
+                  <input type="password" required autoFocus autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} />
+                </label>
+                {hosting === "google" && providers?.includes("google") && (
+                  <OauthButton provider="google" waiting={oauth} disabled={busy} onClick={() => signIn("google")} />
+                )}
+                <ManualServers form={form} open={manualOpen} onToggle={setManualOpen} onChange={patchForm} />
+                {failure && <FailureBox failure={failure} {...ctx} />}
+                {error && <p key={errorKey} className="form-error" role="alert">{error}</p>}
+                <p className="hint">A senha fica no cofre do sistema, nunca em arquivo.</p>
+                <button className="btn primary wide" disabled={busy}>Conectar</button>
+              </>
+            )}
+            {microsoftFirst && error && <p key={errorKey} className="form-error" role="alert">{error}</p>}
+            <button type="button" className="btn ghost small" onClick={back} disabled={busy}><ArrowLeft size={14} weight="bold" />Trocar email</button>
+          </form>
         )}
 
-        <div className="field-row">
-          <label className="field grow">
-            <span>Servidor IMAP</span>
-            <input required value={form.host} onChange={(e) => { setHostTouched(true); update("host", e.target.value); }} />
-          </label>
-          <label className="field port">
-            <span>Porta</span>
-            <input required inputMode="numeric" pattern="\d+" value={form.port} onChange={(e) => update("port", e.target.value)} />
-          </label>
-        </div>
-        <div className="field-row">
-          <label className="field grow">
-            <span>Servidor SMTP (envio)</span>
-            <input required value={form.smtpHost} onChange={(e) => { setHostTouched(true); update("smtpHost", e.target.value); }} />
-          </label>
-          <label className="field port">
-            <span>Porta</span>
-            <input required inputMode="numeric" pattern="\d+" value={form.smtpPort} onChange={(e) => update("smtpPort", e.target.value)} />
-          </label>
-        </div>
-        <label className="field">
-          <span>Segurança IMAP</span>
-          <select value={form.security} onChange={(e) => update("security", e.target.value as Security)}>
-            <option value="tls">TLS (recomendado)</option>
-            <option value="starttls">STARTTLS</option>
-          </select>
-        </label>
+        {stage === "test" && (
+          <TestProgress reached={reached} failure={failure} busy={busy} {...ctx}
+            onFix={() => { setManualOpen(!!failure && isServerFailure(failure)); setStage("login"); }}
+            onRetry={() => void runTest()} onMicrosoft={() => signIn("microsoft")} />
+        )}
 
-        {error && <p key={errorKey} className="form-error" role="alert">{error}</p>}
-        <p className="hint">A senha fica no cofre do sistema, nunca em arquivo.</p>
-
-        <button className="btn primary wide" data-status={status} disabled={busy}>
-          <span className="btn-label" data-show={status === "idle" || undefined}>Conectar</span>
-          <span className="btn-label" data-show={status === "saving" || undefined}><span className="spinner" aria-hidden />Testando conexão</span>
-          <span className="btn-label" data-show={status === "done" || undefined}><Check size={16} weight="bold" />Conectada</span>
-        </button>
+        {stage === "custom" && pending && (
+          <form className="wizard-step" key="custom" onSubmit={finish}>
+            <Personalize email={pending.account.username} name={name} signature={signature} color={color}
+              onName={setName} onSignature={setSignature} onColor={setColor} />
+            {error && <p key={errorKey} className="form-error" role="alert">{error}</p>}
+            <button className="btn primary wide" data-status={saving} disabled={saving !== "idle"}>
+              <span className="btn-label" data-show={saving === "idle" || undefined}>Concluir</span>
+              <span className="btn-label" data-show={saving === "saving" || undefined}><span className="spinner" aria-hidden />Salvando</span>
+              <span className="btn-label" data-show={saving === "done" || undefined}><Check size={16} weight="bold" />Pronto</span>
+            </button>
+          </form>
+        )}
 
         {confirming && (
           <div className="confirm" role="alertdialog" aria-labelledby="confirm-title">
@@ -206,7 +290,7 @@ export function AccountDialog({ onClose, onAdded }: Props) {
             </div>
           </div>
         )}
-      </form>
+      </div>
     </div>
   );
 }
