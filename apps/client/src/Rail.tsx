@@ -43,7 +43,7 @@ export function Rail(p: Props) {
     const { label, icon: Icon } = viewInfo(view, p.userFolders, p.categories);
     const n = p.unread(view);
     return (
-      <button key={key} type="button" className="nav-item" title={label} aria-label={n > 0 ? `${label}, ${n} não lidas` : label} aria-current={here(view)} onClick={() => p.open(view)}
+      <button key={key} type="button" className="nav-item" title={label} aria-label={n > 0 ? `${label} ${n} não lidas` : label} aria-current={here(view)} onClick={() => p.open(view)}
         onContextMenu={(e) => { e.preventDefault(); p.onContext(e.clientX, e.clientY, view); }}
         {...(view === "starred" || view === "all" ? {} : p.drop(view, view))}>
         <span className="nav-icon"><Icon size={16} weight="bold" />{n > 0 && <span className="count" aria-hidden>{n}</span>}</span>
@@ -52,7 +52,7 @@ export function Rail(p: Props) {
     );
   };
   const extra = (label: string, Icon: typeof FileText, n: number, current: boolean, run: () => void) => (
-    <button type="button" className="nav-item" title={label} aria-label={n > 0 ? `${label}, ${n}` : label} onClick={run} aria-current={current ? "page" : undefined}>
+    <button type="button" className="nav-item" title={label} aria-label={n > 0 ? `${label} ${n}` : label} onClick={run} aria-current={current ? "page" : undefined}>
       <span className="nav-icon"><Icon size={16} weight="bold" />{n > 0 && <span className="count plain" aria-hidden>{n}</span>}</span>
       <span className="nav-label">{label}</span>
     </button>
