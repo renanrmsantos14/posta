@@ -66,8 +66,8 @@ export function Rail(p: Props) {
           {p.favorites.map((v) => item(v, `fav:${v}`))}
         </nav>
       )}
-      <nav className="rail-section" aria-label="Pastas da conta">
-        <div className="rail-label">Pastas</div>
+      <nav className="rail-section" aria-label="Caixa de correio">
+        <div className="rail-label">Caixa de correio</div>
         {p.navFolders.map((r) => item(r))}
         {extra("Rascunhos", FileText, p.drafts, p.showDrafts && !p.showOutbox, p.openDrafts)}
         {extra("Agendados", Clock, p.scheduled, p.showScheduled, p.openScheduled)}

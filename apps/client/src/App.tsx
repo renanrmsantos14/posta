@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, ArrowsIn, ArrowsOut, ArrowBendUpLeft, ArrowBendDoubleUpLeft, ArrowBendUpRight, ArrowsClockwise, Archive, CaretUp, Check, MagnifyingGlass, NotePencil, Plus, Star, Trash, Tray, EnvelopeSimple, EnvelopeSimpleOpen, GearSix, Paperclip, FileText, FloppyDisk, FunnelSimple, PaperPlaneTilt, Printer, PushPin, Clock, X } from "@phosphor-icons/react";
+import { ArrowBendUpLeft, ArrowBendDoubleUpLeft, ArrowBendUpRight, ArrowsClockwise, Archive, CaretUp, Copy, FolderOpen, FolderSimple, NotePencil, Star, Tag, Trash, EnvelopeSimple, EnvelopeSimpleOpen, FloppyDisk, PaperPlaneTilt, FileText, Paperclip, Printer, PushPin, Clock, X, ArrowLeft, ArrowsIn, ArrowsOut, Tray } from "@phosphor-icons/react";
 import { HtmlBody, hasRemoteImages } from "./HtmlBody";
 import { api, isTauri, type Account, type Attachment, type MessageDetail, type MessageSummary, type OutAttachment, type OutboxItem, type Role, type Settings, type StoredDraft, type UnreadCounts, type UserFolder, type View } from "./api";
 import { AccountDialog } from "./AccountDialog";
-import { CategoryChip, CategoryPicker, parseCategories } from "./Categories";
+import { CategoryPicker, parseCategories } from "./Categories";
+import { WhenMenu } from "./WhenMenu";
 import { FolderDialog, type FolderDialogState } from "./FolderDialog";
-import { FolderTree } from "./FolderTree";
-import { OfflineBadge, OutboxPane, useQueue } from "./Offline";
+import { OutboxPane, useQueue } from "./Offline";
 import { boxView, catView, parseBox, parseCat } from "./views";
 import { Composer, type ComposeInit } from "./Composer";
 import { aliasFor, aliasLines, addrOf } from "./aliases";
@@ -19,11 +19,21 @@ import { Resizer } from "./Resizer";
 import { SettingsPage } from "./SettingsPage";
 import { UpdateDialog } from "./UpdateDialog";
 import { autoCheck, checkUpdate, CHECK_EVERY_MS, skip, skipped, type Update } from "./updater";
-import { addFilter, hasFilters, parseTemplates, SEARCH_FILTERS, whenLabel, type ScheduledItem } from "./productivity";
-import { useDismiss, WhenMenu } from "./WhenMenu";
+import { addFilter, hasFilters, parseTemplates, whenLabel, whenPresets, type ScheduledItem } from "./productivity";
+import { AppShell, RouteLayout, PageLayout } from "./layout/primitives";
+import { TopBar, type SearchScope } from "./TopBar";
+import { CommandBar, type Cmd } from "./CommandBar";
+import { Rail } from "./Rail";
+import { MessageList, type Density, type ListHandle, type ListRow } from "./MessageList";
+import { PAGE, useMessageList } from "./useMessageList";
+import { ContextMenu, type MenuItem, type MenuState } from "./ContextMenu";
+import { ContactCard, parseContact, type ContactState } from "./ContactCard";
+import { fmtLong, shortDate } from "./dates";
+import { isFocused, repliedThreads } from "./focus";
+import { dropUndo, popUndo, pushUndo } from "./undo";
+import { isTyping, ownsKeys, shortcutOf, type ShortcutAction } from "./shortcuts";
 import build from "./version.json";
 
-const PAGE = 100;
 /** O WebView do Android não tem impressão por `window.print`. */
 const ANDROID = /Android/i.test(navigator.userAgent);
 // Rede de segurança: a chegada normal vem do IDLE (evento `mail-changed`).
@@ -32,26 +42,14 @@ const SYNC_EVERY_MS = 300_000;
 const KEEP = 1000;
 const KEEP_STEP = 500;
 const UNDO_MS = 4000;
-const TZ = "America/Sao_Paulo";
+/** Quantos emails abertos ficam em memória para reabrir na hora. */
+const DETAIL_CACHE = 50;
 /** Larguras padrão e limites das colunas (px); o resto da janela fica com a leitura. */
 const RAIL = { def: 232, min: 180, max: 360 };
 const LIST = { def: 360, min: 280, max: 720 };
 const LIST_H = { def: 320, min: 140 };
 const MIN_READER = 360;
-
-const fmtTime = new Intl.DateTimeFormat("pt-BR", { timeZone: TZ, hour: "2-digit", minute: "2-digit" });
-const fmtDay = new Intl.DateTimeFormat("pt-BR", { timeZone: TZ, day: "numeric", month: "short" });
-const fmtFull = new Intl.DateTimeFormat("pt-BR", { timeZone: TZ, day: "2-digit", month: "2-digit", year: "2-digit" });
-const fmtLong = new Intl.DateTimeFormat("pt-BR", { timeZone: TZ, dateStyle: "full", timeStyle: "short" });
-const dayKey = new Intl.DateTimeFormat("en-CA", { timeZone: TZ });
-
-function shortDate(unix: number) {
-  const d = new Date(unix * 1000);
-  const now = new Date();
-  if (dayKey.format(d) === dayKey.format(now)) return fmtTime.format(d);
-  if (d.getFullYear() === now.getFullYear()) return fmtDay.format(d).replace(".", "");
-  return fmtFull.format(d);
-}
+const DEFAULT_FAVORITES: View[] = ["inbox", "starred"];
 
 /** Original citado com a formatação que ele tinha (o Composer limpa o HTML); sem HTML, o texto. */
 const quoted = (d: MessageDetail) => `<blockquote>${d.body_html || textToHtml(d.body_text.trimEnd())}</blockquote>`;
@@ -80,15 +78,14 @@ const archiveTo = (m: MessageSummary): Role => (m.role === "trash" || m.role ===
 
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 
-/** Uma linha da lista: a conversa (ou a mensagem solta). `head` é a mais recente; `members` são as mensagens dela nesta lista. */
-interface Row { head: MessageSummary; members: MessageSummary[] }
+type Row = ListRow;
+
+/** Separa "A <a@x>, B <b@x>" em endereços (vírgulas dentro de aspas não separam). */
+const splitAddrs = (v: string) => v.split(/,(?=(?:[^"]*"[^"]*")*[^"]*$)/).map((x) => x.trim()).filter(Boolean);
 
 export default function App() {
   const [accounts, setAccounts] = useState<Account[] | null>(null);
-  const [messages, setMessages] = useState<MessageSummary[]>([]);
-  const [hasMore, setHasMore] = useState(true);
   const [query, setQuery] = useState("");
-  const [results, setResults] = useState<MessageSummary[] | null>(null);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [detail, setDetail] = useState<MessageDetail | null>(null);
   /** Seleção por teclado troca o conteúdo sem animação. */
@@ -108,8 +105,6 @@ export default function App() {
   const [update, setUpdate] = useState<Update | null>(null);
   /** Remonta o painel a cada abertura, mesmo com o mesmo rascunho. */
   const [composeKey, setComposeKey] = useState(0);
-  /** Ids que chegaram depois da primeira carga: entram com destaque. */
-  const [freshIds, setFreshIds] = useState<Set<number>>(new Set());
   /** Cascata só na primeira abertura; buscas e atualizações trocam a lista sem animar. */
   const [intro, setIntro] = useState(true);
   const [folder, setFolder] = useState<View>("inbox");
@@ -132,7 +127,11 @@ export default function App() {
   const [showDrafts, setShowDrafts] = useState(false);
   const [showScheduled, setShowScheduled] = useState(false);
   const [scheduled, setScheduled] = useState<ScheduledItem[]>([]);
-  const [filterMenu, setFilterMenu] = useState(false);
+  const [scope, setScope] = useState<SearchScope>("folder");
+  const [menu, setMenu] = useState<MenuState | null>(null);
+  const [contact, setContact] = useState<ContactState | null>(null);
+  /** Fios em que o usuário já escreveu (para a aba Foco). */
+  const [replied, setReplied] = useState<Set<string>>(new Set());
   const [serverBusy, setServerBusy] = useState(false);
   const [fromServer, setFromServer] = useState(false);
   /** Caixa de saída: usa o mesmo painel dos rascunhos (`showDrafts` junto) para mostrar outra lista. */
@@ -154,7 +153,6 @@ export default function App() {
   const dragging = useRef<MessageSummary[]>([]);
   const [dragIds, setDragIds] = useState<Set<number>>(new Set());
   const [dropKey, setDropKey] = useState<string | null>(null);
-  const known = useRef<Set<number> | null>(null);
   const folderRef = useRef(folder);
   /** Verdadeiro enquanto uma ação de deslizar roda (takeOut não troca a seleção). */
   const swiping = useRef(false);
@@ -164,14 +162,33 @@ export default function App() {
   const pendingMove = useRef<Set<number>>(new Set());
   const appRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
-  const filterRoot = useRef<HTMLSpanElement>(null);
-  useDismiss(filterMenu, () => setFilterMenu(false), filterRoot);
-  const listRef = useRef<HTMLUListElement>(null);
+  const listRef = useRef<ListHandle>(null);
+  /** Emails já abertos (mais recentes por último): reabrir não passa pelo backend. */
+  const detailCache = useRef(new Map<number, MessageDetail>());
+  const selectedRef = useRef<number | null>(null);
+
+  const refreshCounts = useCallback(() => {
+    api.unreadCounts().then(setCounts).catch(() => {});
+  }, []);
+  const { messages, setMessages, results, setResults, hasMore, freshIds, reload, loadPage, resetKnown } = useMessageList(folder, pendingMove, refreshCounts);
+  /** Tamanho atual da lista, para os "Desfazer" recarregarem sem encolher a janela. */
+  const listLen = useRef(0);
+  listLen.current = messages.length;
 
   const grouped = settings.group !== "0";
   const shown = results ?? messages;
   // "Todas as caixas" ignora o filtro de conta: é justamente a Entrada de todas juntas.
-  const visible = useMemo(() => (accountFilter && folder !== "all" ? shown.filter((m) => m.account === accountFilter) : shown), [shown, accountFilter, folder]);
+  const byAccount = useMemo(() => (accountFilter && folder !== "all" ? shown.filter((m) => m.account === accountFilter) : shown), [shown, accountFilter, folder]);
+  /** Foco/Outros só na Caixa de entrada sem busca; a escolha da aba fica salva. */
+  const tabsOn = folder === "inbox" && settings.focusTabs !== "0" && !results;
+  const tab = settings["inbox:tab"] === "other" ? "other" : "focused";
+  const visible = useMemo(() => (tabsOn ? byAccount.filter((m) => isFocused(m, replied) === (tab === "focused")) : byAccount), [byAccount, tabsOn, tab, replied]);
+  const tabUnread = useMemo(() => {
+    if (!tabsOn) return { focused: 0, other: 0 };
+    let focused = 0, other = 0;
+    for (const m of byAccount) if (!m.seen) (isFocused(m, replied) ? focused++ : other++);
+    return { focused, other };
+  }, [byAccount, tabsOn, replied]);
   const draftsShown = useMemo(() => (accountFilter ? drafts.filter((d) => d.account === accountFilter) : drafts), [drafts, accountFilter]);
   /** Conversas: mensagens do mesmo fio e da mesma conta viram uma linha (a lista já vem da mais nova para a mais velha). */
   const rows = useMemo<Row[]>(() => {
@@ -209,6 +226,16 @@ export default function App() {
   const templates = useMemo(() => parseTemplates(settings.templates), [settings.templates]);
   const tree = useMemo(() => folderTree(userFolders.filter((f) => !accountFilter || f.account === accountFilter)), [userFolders, accountFilter]);
   const info = viewInfo(folder, userFolders, categories);
+  const density: Density = settings.density === "compact" || settings.density === "comfortable" ? settings.density : "medium";
+  const favorites = useMemo<View[]>(() => {
+    let raw: unknown = DEFAULT_FAVORITES;
+    try { if (settings.favorites) raw = JSON.parse(settings.favorites); } catch { /* valor inválido: volta ao padrão */ }
+    const list = Array.isArray(raw) ? (raw.filter((v) => typeof v === "string") as View[]) : DEFAULT_FAVORITES;
+    return list.filter((v) =>
+      Object.hasOwn(FOLDERS, v) ? navFolders.includes(v as Role | "starred" | "all")
+        : parseBox(v) ? userFolders.some((f) => boxView(f.account, f.name) === v)
+        : parseCat(v) ? categories.some((c) => catView(c.id) === v) : false);
+  }, [settings.favorites, navFolders, userFolders, categories]);
 
   const current = visible.find((m) => m.id === selectedId) ?? null;
   const pane = settings.pane === "bottom" || settings.pane === "off" ? settings.pane : "right";
@@ -227,9 +254,6 @@ export default function App() {
   const canArchive = (m: MessageSummary) => m.role !== "archive" && folderList.includes(archiveTo(m));
   const canTrash = (m: MessageSummary) => m.role === "trash" || folderList.includes("trash");
 
-  const refreshCounts = useCallback(() => {
-    api.unreadCounts().then(setCounts).catch(() => {});
-  }, []);
   /** Ajusta o contador na hora; `refreshCounts` confere com o banco depois. */
   const bumpCounts = (ms: MessageSummary[], delta: number) =>
     setCounts((c) => {
@@ -237,23 +261,6 @@ export default function App() {
       for (const m of ms) if (m.role) next[m.role] = Math.max(0, (next[m.role] ?? 0) + delta);
       return next;
     });
-
-  const reload = useCallback(async (count = PAGE) => {
-    const all = await api.list(folder, Math.max(count, PAGE), 0);
-    if (folderRef.current !== folder) return;
-    const list = all.filter((m) => !pendingMove.current.has(m.id));
-    if (known.current) {
-      const fresh = list.filter((m) => !known.current!.has(m.id)).map((m) => m.id);
-      if (fresh.length) {
-        setFreshIds(new Set(fresh));
-        setTimeout(() => setFreshIds(new Set()), 2000);
-      }
-    }
-    known.current = new Set(list.map((m) => m.id));
-    setMessages(list);
-    setHasMore(all.length >= Math.max(count, PAGE));
-    refreshCounts();
-  }, [folder, refreshCounts]);
 
   const syncFolder = useCallback(async (view: View, window: number) => {
     const r = await api.syncFolder(view, window);
@@ -344,7 +351,7 @@ export default function App() {
   // Carga da pasta: o banco local responde na hora; fora da Caixa de entrada, o servidor vem depois.
   useEffect(() => {
     let alive = true;
-    known.current = null;
+    resetKnown();
     setKeep(KEEP);
     setServerTotal(null);
     setLoadingFolder(true);
@@ -370,7 +377,7 @@ export default function App() {
       }
     })();
     return () => { alive = false; };
-  }, [reload, syncFolder, folder, remote]);
+  }, [reload, syncFolder, folder, remote, resetKnown]);
 
   // As mensagens do diálogo sumiram (ex.: excluídas no servidor): fecha, senão os atalhos ficam bloqueados.
   useEffect(() => {
@@ -432,9 +439,26 @@ export default function App() {
     setFromServer(false);
     if (!query.trim()) return setResults(null);
     let alive = true;
-    (hasFilters(query) ? api.searchFiltered(query, folder) : api.search(query, folder)).then((r) => alive && setResults(r));
+    const where: View = scope === "all" && (accounts?.length ?? 0) > 1 ? "all" : folder;
+    (hasFilters(query) ? api.searchFiltered(query, where) : api.search(query, where)).then((r) => alive && setResults(r));
     return () => { alive = false; };
-  }, [query, folder]);
+  }, [query, folder, scope, accounts?.length]);
+
+  // Foco/Outros: fios em que já escrevi saem dos enviados.
+  useEffect(() => {
+    if (folder !== "inbox" || settings.focusTabs === "0") return;
+    let alive = true;
+    api.list("sent", 500, 0).then((s) => alive && setReplied(repliedThreads(s))).catch(() => {});
+    return () => { alive = false; };
+  }, [folder, settings.focusTabs, syncing]);
+
+  // Mock (navegador): `__mockMany`/`__mockOffline` avisam que o banco simulado mudou.
+  useEffect(() => {
+    if (isTauri) return;
+    const on = () => { reload(listLen.current).catch(() => {}); };
+    window.addEventListener("mock-changed", on);
+    return () => window.removeEventListener("mock-changed", on);
+  }, [reload]);
 
   // Fio da mensagem aberta: recarrega quando chega mensagem nova nele.
   const threadCount = current?.thread_count;
@@ -467,20 +491,51 @@ export default function App() {
     setFolder(role);
   }
 
+  const remember = (d: MessageDetail) => {
+    const c = detailCache.current;
+    c.delete(d.id);
+    c.set(d.id, d);
+    if (c.size > DETAIL_CACHE) c.delete(c.keys().next().value!);
+  };
+  const detailOf = async (id: number) => {
+    const hit = detailCache.current.get(id);
+    if (hit) return hit;
+    const d = await api.open(id);
+    if (d) remember(d);
+    return d;
+  };
+
+  /** Marca como lida só na tela (o servidor já sabe: `api.open` marca). */
+  const markLocalSeen = (id: number) => {
+    const upd = (l: MessageSummary[]) => l.map((m) => (m.id === id && !m.seen ? { ...m, seen: true } : m));
+    setMessages(upd);
+    setResults((r) => r && upd(r));
+    refreshCounts();
+  };
+
   async function select(id: number, keyboard = false) {
     setViaKeyboard(keyboard);
     setSelectedId(id);
+    selectedRef.current = id;
     setReaderOpen(true);
-    const d = await api.open(id);
-    setDetail(d);
+    const hit = detailCache.current.get(id);
+    let d: MessageDetail | null;
+    if (hit) {
+      d = hit;
+      setDetail(hit);
+      remember(hit);
+      const sum = rowOf.get(id)?.members.find((m) => m.id === id);
+      if (sum && !sum.seen) void markSeen([sum], true, false);
+    } else {
+      d = await api.open(id);
+      if (selectedRef.current !== id) return;
+      setDetail(d);
+      if (d) { remember(d); markLocalSeen(id); }
+    }
     if (d) {
-      const markLocal = (l: MessageSummary[]) => l.map((m) => (m.id === id ? { ...m, seen: true } : m));
-      setMessages(markLocal);
-      setResults((r) => r && markLocal(r));
-      refreshCounts();
       // Abrir a conversa lê o fio todo.
       const rest = (rowOf.get(id)?.members ?? []).filter((m) => m.id !== id && !m.seen);
-      if (rest.length) void markSeen(rest, true);
+      if (rest.length) void markSeen(rest, true, false);
     }
   }
 
@@ -489,7 +544,7 @@ export default function App() {
     if (expanded.has(id)) return setExpanded((s) => { const n = new Set(s); n.delete(id); return n; });
     if (!bodies[id]) {
       try {
-        const d = await api.open(id);
+        const d = await detailOf(id);
         if (!d) return;
         setBodies((b) => ({ ...b, [id]: d }));
         const seen = (l: MessageSummary[]) => l.map((m) => (m.id === id ? { ...m, seen: true } : m));
@@ -536,9 +591,9 @@ export default function App() {
     return sig ? `<div><br></div>${textToHtml(`-- \n${sig}`)}` : "";
   };
 
-  function writeNew() {
+  function writeNew(to = "") {
     if (!accounts?.length) return setDialog(true);
-    openComposer({ title: "Nova mensagem", account: accounts[0].id, reply_to: null, to: "", subject: "", body: "", html: `<div><br></div>${signatureFor(accounts[0].id)}` });
+    openComposer({ title: "Nova mensagem", account: accounts[0].id, reply_to: null, to, subject: "", body: "", html: `<div><br></div>${signatureFor(accounts[0].id)}` });
   }
 
   function openDraft(d: StoredDraft) {
@@ -717,46 +772,55 @@ export default function App() {
   /** Responde pelo alias para o qual a mensagem foi enviada (se for de um da conta). */
   const replyFrom = (d: MessageDetail, account: string) => aliasFor(aliasLines(settings[`aliases:${account}`]), d.to_addrs, d.cc_addrs);
 
-  function reply() {
-    if (!detail || !accounts?.length) return;
-    const subject = /^re:/i.test(detail.subject) ? detail.subject : `Re: ${detail.subject}`;
-    const account = accounts.some((a) => a.id === detail.account) ? detail.account : accounts[0].id;
-    openComposer({ title: "Responder", account, reply_to: detail.id, to: detail.reply_addr, subject, body: "", html: signatureFor(account) + replyHtml(detail), from: replyFrom(detail, account) });
+  function reply(d: MessageDetail | null = detail) {
+    if (!d || !accounts?.length) return;
+    const subject = /^re:/i.test(d.subject) ? d.subject : `Re: ${d.subject}`;
+    const account = accounts.some((a) => a.id === d.account) ? d.account : accounts[0].id;
+    openComposer({ title: "Responder", account, reply_to: d.id, to: d.reply_addr, subject, body: "", html: signatureFor(account) + replyHtml(d), from: replyFrom(d, account) });
   }
 
   /** Remetente em Para; os demais destinatários da original em Cc, sem as minhas contas e sem repetir. */
-  function replyAll() {
-    if (!detail || !accounts?.length) return;
+  function replyAll(d: MessageDetail | null = detail) {
+    if (!d || !accounts?.length) return;
     const own = new Set([...accounts.map((a) => a.username.toLowerCase()), ...accounts.flatMap((a) => aliasLines(settings[`aliases:${a.id}`]).map(addrOf))]);
-    const split = (v: string) => v.split(",").map((x) => x.trim()).filter(Boolean);
-    const seen = new Set([detail.reply_addr.toLowerCase()]);
-    const others = [...split(detail.to_addrs), ...split(detail.cc_addrs)].filter((a) => {
+    const seen = new Set([d.reply_addr.toLowerCase()]);
+    const others = [...splitAddrs(d.to_addrs), ...splitAddrs(d.cc_addrs)].filter((a) => {
       const k = a.toLowerCase();
       if (own.has(k) || seen.has(k)) return false;
       seen.add(k);
       return true;
     });
-    const subject = /^re:/i.test(detail.subject) ? detail.subject : `Re: ${detail.subject}`;
-    const account = accounts.some((a) => a.id === detail.account) ? detail.account : accounts[0].id;
+    const subject = /^re:/i.test(d.subject) ? d.subject : `Re: ${d.subject}`;
+    const account = accounts.some((a) => a.id === d.account) ? d.account : accounts[0].id;
     openComposer({
-      title: "Responder a todos", account, reply_to: detail.id,
-      to: detail.reply_addr, cc: others.join(", "), subject, body: "", html: replyHtml(detail), from: replyFrom(detail, account),
+      title: "Responder a todos", account, reply_to: d.id,
+      to: d.reply_addr, cc: others.join(", "), subject, body: "", html: replyHtml(d), from: replyFrom(d, account),
     });
   }
 
-  async function forward() {
-    if (!detail || !accounts?.length) return;
-    const subject = /^(fwd?|enc):/i.test(detail.subject) ? detail.subject : `Fwd: ${detail.subject}`;
-    const account = accounts.some((a) => a.id === detail.account) ? detail.account : accounts[0].id;
+  async function forward(d: MessageDetail | null = detail) {
+    if (!d || !accounts?.length) return;
+    const subject = /^(fwd?|enc):/i.test(d.subject) ? d.subject : `Fwd: ${d.subject}`;
+    const account = accounts.some((a) => a.id === d.account) ? d.account : accounts[0].id;
     let attachments: OutAttachment[] = [];
-    if (detail.attachments.length) {
+    if (d.attachments.length) {
       try {
-        attachments = await api.forwardAttachments(detail.id);
+        attachments = await api.forwardAttachments(d.id);
       } catch (e) {
         toast(`Anexos não incluídos no encaminhamento: ${e}`, "error");
       }
     }
-    openComposer({ title: "Encaminhar", account, reply_to: null, to: "", subject, body: "", html: forwardHtml(detail), attachments });
+    openComposer({ title: "Encaminhar", account, reply_to: null, to: "", subject, body: "", html: forwardHtml(d), attachments });
+  }
+
+  /** Responder/encaminhar a partir de qualquer lugar (atalho, faixa de comandos, menu): usa o email já aberto ou busca. */
+  async function act(kind: "reply" | "replyAll" | "forward", id: number | null = selectedId) {
+    if (id === null) return;
+    const d = detail?.id === id ? detail : await detailOf(id);
+    if (!d) return;
+    if (kind === "reply") reply(d);
+    else if (kind === "replyAll") replyAll(d);
+    else void forward(d);
   }
 
   // O painel fecha na hora; o envio espera o "Desfazer" expirar. Se falhar, o rascunho volta intacto.
@@ -835,21 +899,27 @@ export default function App() {
     });
   }
 
+  const applyPin = (ids: number[], v: boolean) => {
+    const set = new Set(ids);
+    const f = (l: MessageSummary[]) => l.map((m) => (set.has(m.id) ? { ...m, pinned: v } : m));
+    setMessages(f);
+    setResults((r) => r && f(r));
+  };
+
   /** Fixar: se todas já estão fixadas, desafixa; senão fixa todas. */
   async function togglePin(ms: MessageSummary[]) {
     if (!ms.length) return;
     const on = !ms.every((m) => m.pinned);
-    const ids = new Set(ms.map((m) => m.id));
-    const set = (v: boolean) => (l: MessageSummary[]) => l.map((m) => (ids.has(m.id) ? { ...m, pinned: v } : m));
-    setMessages(set(on));
-    setResults((r) => r && set(on)(r));
+    const ids = ms.map((m) => m.id);
+    applyPin(ids, on);
     try {
-      await api.setPinned([...ids], on);
-      await reload(messages.length);
-      toast(on ? "Fixada no topo" : "Desafixada", "info");
+      await api.setPinned(ids, on);
+      await reload(listLen.current);
+      const back = async () => { applyPin(ids, !on); await api.setPinned(ids, !on).catch(() => {}); await reload(listLen.current).catch(() => {}); };
+      pushUndo(on ? "Fixar" : "Desafixar", back);
+      toast(on ? "Fixada no topo" : "Desafixada", "info", { action: { label: "Desfazer", onClick: () => { dropUndo(back); void back(); } }, duration: UNDO_MS });
     } catch (e) {
-      setMessages(set(!on));
-      setResults((r) => r && set(!on)(r));
+      applyPin(ids, !on);
       toast(`Não foi possível fixar: ${e}`, "error");
     }
   }
@@ -883,10 +953,7 @@ export default function App() {
     loadingMore.current = true;
     try {
       if (hasMore) {
-        const more = await api.list(folder, PAGE, messages.length);
-        more.forEach((m) => known.current?.add(m.id));
-        setMessages((l) => [...l, ...more]);
-        setHasMore(more.length === PAGE);
+        await loadPage(messages.length);
       } else if (remote && serverTotal !== null && serverTotal > keep) {
         const next = keep + KEEP_STEP;
         setKeep(next);
@@ -913,8 +980,11 @@ export default function App() {
     const quiet = swiping.current;
     if (quiet) {
       if (selectedId === m.id) { setSelectedId(null); setDetail(null); setReaderOpen(false); }
-    } else if (next) select(next.id, true);
-    else { setSelectedId(null); setDetail(null); setReaderOpen(false); }
+    } else if (next) {
+      select(next.id, true);
+      const a = document.activeElement;
+      if (!a || a === document.body || a.closest(".list")) listRef.current?.reveal(next.id, true);
+    } else { setSelectedId(null); setDetail(null); setReaderOpen(false); }
     return () => {
       if (folderRef.current !== from) return;
       const put = (l: MessageSummary[]) => (l.some((x) => x.id === m.id) ? l : [...l.slice(0, idx), m, ...l.slice(idx)]);
@@ -939,30 +1009,55 @@ export default function App() {
     };
   }
 
-  /** Sai da lista na hora; o servidor só recebe quando o "Desfazer" expira. */
+  /** Sai da lista na hora; o servidor só recebe quando o "Desfazer" expira. Ctrl+Z vale antes e depois disso. */
   function moveOut(ms: MessageSummary[], to: Dest) {
     const ids = ms.map((m) => m.id);
+    const origin = new Map<Role, number[]>();
+    ms.forEach((m) => { if (m.role) origin.set(m.role, [...(origin.get(m.role) ?? []), m.id]); });
     const undo = takeOutMany(ms);
     ids.forEach((id) => pendingMove.current.add(id));
-    const restore = () => { ids.forEach((id) => pendingMove.current.delete(id)); undo(); };
+    let undone = false;
+    const bringBack = () => { undone = true; ids.forEach((id) => pendingMove.current.delete(id)); undo(); };
     const text = typeof to !== "string" ? `Movida para ${to.label}`
       : to === "trash" ? "Movida para a Lixeira" : to === "inbox" ? "Movida para a Caixa de entrada" : to === "archive" ? "Arquivada" : `Movida para ${FOLDERS[to].label}`;
-    toast(ms.length === 1 ? text : `${plural(ms.length, "mensagem movida", "mensagens movidas")}`, "info", {
-      action: { label: "Desfazer", onClick: restore },
+    const label = ms.length === 1 ? text : `${plural(ms.length, "mensagem movida", "mensagens movidas")}`;
+    pushUndo(label, bringBack);
+    toast(label, "info", {
+      action: { label: "Desfazer", onClick: () => { dropUndo(bringBack); bringBack(); } },
       duration: UNDO_MS,
       onClose: async (reason) => {
-        if (reason === "action") return;
+        if (reason === "action" || undone) return;
         try {
           if (typeof to === "string") await api.moveMany(ids, to);
           else await api.moveToFolder(ids, to.account, to.name);
           ids.forEach((id) => pendingMove.current.delete(id));
           refreshCounts();
+          // Depois do envio ao servidor, Ctrl+Z move de volta para a pasta de origem.
+          dropUndo(bringBack);
+          pushUndo(label, async () => {
+            for (const [role, list] of origin) await api.moveMany(list, role);
+            await reload(listLen.current);
+            refreshCounts();
+          });
         } catch (e) {
-          restore();
+          dropUndo(bringBack);
+          bringBack();
           toast(`Não foi possível mover: ${e}`, "error");
         }
       },
     });
+  }
+
+  /** Move para qualquer destino (menu e arrasto). Entre contas diferentes não dá. */
+  function moveToDest(ms: MessageSummary[], dest: Dest) {
+    if (typeof dest !== "string") {
+      const other = ms.filter((m) => m.account !== dest.account);
+      if (other.length) toast("Só dá para mover para pastas da mesma conta", "info");
+      const same = ms.filter((m) => m.account === dest.account);
+      if (same.length) moveOut(same, dest);
+      return;
+    }
+    moveEach(ms.filter((m) => m.role !== dest), () => dest);
   }
 
   /** Gestos de deslizar a linha (toque): configuráveis em Configurações. */
@@ -1017,43 +1112,59 @@ export default function App() {
     }
   }
 
-  /** Lida/não lida: muda na lista na hora e desfaz se o servidor recusar. */
-  async function markSeen(ms: MessageSummary[], seen: boolean) {
+  const applySeen = (todo: MessageSummary[], seen: boolean) => {
+    const ids = new Set(todo.map((m) => m.id));
+    const set = (l: MessageSummary[]) => l.map((m) => (ids.has(m.id) ? { ...m, seen } : m));
+    setMessages(set);
+    setResults((r) => r && set(r));
+    setThread(set);
+    bumpCounts(todo, seen ? -1 : 1);
+  };
+
+  /** Lida/não lida: muda na lista na hora e desfaz se o servidor recusar. `record`: entra no Ctrl+Z e mostra "Desfazer". */
+  async function markSeen(ms: MessageSummary[], seen: boolean, record = true) {
     const todo = ms.filter((m) => m.seen !== seen);
     if (!todo.length) return;
-    const ids = new Set(todo.map((m) => m.id));
-    const set = (v: boolean) => (l: MessageSummary[]) => l.map((m) => (ids.has(m.id) ? { ...m, seen: v } : m));
-    setMessages(set(seen));
-    setResults((r) => r && set(seen)(r));
-    bumpCounts(todo, seen ? -1 : 1);
+    const ids = todo.map((m) => m.id);
+    applySeen(todo, seen);
     try {
-      await api.setSeen([...ids], seen);
+      await api.setSeen(ids, seen);
+      if (record) {
+        const back = async () => { applySeen(todo.map((m) => ({ ...m, seen })), !seen); await api.setSeen(ids, !seen).catch(() => {}); refreshCounts(); };
+        pushUndo(seen ? "Marcada como lida" : "Marcada como não lida", back);
+        toast(ids.length === 1 ? (seen ? "Marcada como lida" : "Marcada como não lida") : `${plural(ids.length, "mensagem marcada", "mensagens marcadas")} como ${seen ? "lidas" : "não lidas"}`, "info",
+          { action: { label: "Desfazer", onClick: () => { dropUndo(back); void back(); } }, duration: 3000 });
+      }
     } catch (e) {
-      setMessages(set(!seen));
-      setResults((r) => r && set(!seen)(r));
+      applySeen(todo.map((m) => ({ ...m, seen })), !seen);
       toast(`Não foi possível marcar: ${e}`, "error");
     }
     refreshCounts();
   }
 
-  /** Estrela: se todas já têm, tira; senão põe em todas. Só o clique do mouse anima. */
+  const applyFlag = (ids: number[], on: boolean) => {
+    const set = new Set(ids);
+    const f = (l: MessageSummary[]) => l.map((m) => (set.has(m.id) ? { ...m, flagged: on } : m));
+    setMessages(f);
+    setResults((r) => r && f(r));
+  };
+
+  /** Estrela/sinalizador: se todas já têm, tira; senão põe em todas. Só o clique do mouse anima. */
   async function toggleStar(ms: MessageSummary[], keyboard = false) {
     if (!ms.length) return;
     const on = !ms.every((m) => m.flagged);
-    const ids = new Set(ms.filter((m) => m.flagged !== on).map((m) => m.id));
-    const set = (v: boolean) => (l: MessageSummary[]) => l.map((m) => (ids.has(m.id) ? { ...m, flagged: v } : m));
-    setMessages(set(on));
-    setResults((r) => r && set(on)(r));
+    const ids = ms.filter((m) => m.flagged !== on).map((m) => m.id);
+    applyFlag(ids, on);
     if (!keyboard && ms.length === 1) {
       setPopId(ms[0].id);
       setTimeout(() => setPopId(null), 400);
     }
     try {
-      await api.setFlagged([...ids], on);
+      await api.setFlagged(ids, on);
+      pushUndo(on ? "Sinalizar" : "Remover sinalização", async () => { applyFlag(ids, !on); await api.setFlagged(ids, !on).catch(() => {}); });
     } catch (e) {
-      setMessages(set(!on));
-      setResults((r) => r && set(!on)(r));
-      toast(`Não foi possível marcar com estrela: ${e}`, "error");
+      applyFlag(ids, !on);
+      toast(`Não foi possível sinalizar: ${e}`, "error");
     }
   }
 
@@ -1113,11 +1224,106 @@ export default function App() {
     return () => clearInterval(timer);
   }, [showUpdate]);
 
-  // Atalhos: j/k ou setas navegam, / busca, r responde, a responde a todos, f encaminha, c escreve, e arquiva, # exclui,
-  // s estrela, u marca não lida. Com mensagens marcadas (checkbox), e/#/s/u valem para todas. Esc limpa a busca, a seleção ou volta.
+  // ---- Favoritos, menus de contexto e contato ----
+
+  const toggleFavorite = (v: View) => changeSetting("favorites", JSON.stringify(favorites.includes(v) ? favorites.filter((f) => f !== v) : [...favorites, v]));
+
+  /** Mover para ▸: pastas do sistema que a conta tem e as pastas do usuário. */
+  const moveItems = (ms: MessageSummary[]): MenuItem[] => {
+    const roles = (["inbox", "archive", "junk", "trash"] as Role[]).filter((r) => folderList.includes(r));
+    const items: MenuItem[] = roles.map((r) => ({ label: FOLDERS[r].label, icon: FOLDERS[r].icon, onSelect: () => moveToDest(ms, r) }));
+    if (tree.length) {
+      items.push({ separator: true });
+      for (const n of tree) items.push({ label: `${"· ".repeat(n.depth)}${n.leaf}`, icon: FolderSimple, onSelect: () => moveToDest(ms, { account: n.account, name: n.name, label: n.leaf }) });
+    }
+    return items;
+  };
+  const snoozeItems = (ms: MessageSummary[]): MenuItem[] =>
+    whenPresets(Math.floor(Date.now() / 1000)).map((p) => ({ label: p.label, onSelect: () => snooze(ms, p.at) }));
+  const categoryItems = (ms: MessageSummary[]): MenuItem[] => [
+    { label: "Sem categoria", onSelect: () => void applyCategory(ms, null) },
+    ...categories.map((c) => ({ label: c.name, onSelect: () => void applyCategory(ms, c.id) })),
+  ];
+
+  /** Itens do menu para as mensagens `ms`; `headId` (uma só conversa) liga Responder/Encaminhar/.eml. */
+  const menuFor = (ms: MessageSummary[], headId: number | null): MenuItem[] => {
+    if (!ms.length) return [];
+    const items: MenuItem[] = [];
+    if (headId !== null) {
+      items.push(
+        { label: "Responder", icon: ArrowBendUpLeft, kbd: "Ctrl+R", onSelect: () => void act("reply", headId) },
+        { label: "Responder a todos", icon: ArrowBendDoubleUpLeft, kbd: "Ctrl+Shift+R", onSelect: () => void act("replyAll", headId) },
+        { label: "Encaminhar", icon: ArrowBendUpRight, kbd: "Ctrl+F", onSelect: () => void act("forward", headId) },
+        { separator: true },
+      );
+    }
+    const arch = ms.filter(canArchive);
+    items.push(
+      { label: arch.length && archiveTo(arch[0]) === "inbox" ? "Mover para a entrada" : "Arquivar", icon: Archive, kbd: "E", disabled: !arch.length, onSelect: () => archive(ms) },
+      { label: ms.every((m) => m.role === "trash") ? "Excluir de vez" : "Excluir", icon: Trash, kbd: "Delete", danger: true, disabled: !ms.some(canTrash), onSelect: () => remove(ms) },
+      { label: "Mover para", icon: FolderOpen, items: moveItems(ms) },
+      { separator: true },
+      ms.every((m) => m.seen)
+        ? { label: "Marcar como não lida", icon: EnvelopeSimple, kbd: "Ctrl+U", onSelect: () => void markSeen(ms, false) }
+        : { label: "Marcar como lida", icon: EnvelopeSimpleOpen, kbd: "Ctrl+Q", onSelect: () => void markSeen(ms, true) },
+      { label: ms.every((m) => m.flagged) ? "Remover sinalização" : "Sinalizar", icon: Star, kbd: "Insert", onSelect: () => void toggleStar(ms, true) },
+      { label: ms.every((m) => m.pinned) ? "Desafixar" : "Fixar no topo", icon: PushPin, kbd: "P", onSelect: () => void togglePin(ms) },
+      { label: "Adiar", icon: Clock, items: snoozeItems(ms) },
+    );
+    if (categories.length) items.push({ label: "Categorias", icon: Tag, items: categoryItems(ms) });
+    if (headId !== null) items.push({ separator: true }, { label: "Salvar como .eml", icon: FloppyDisk, onSelect: () => void saveEml(headId) });
+    return items;
+  };
+
+  const rowContext = (x: number, y: number, row: Row) => {
+    const mine = checked.has(row.head.id);
+    const ms = mine ? checkedList : withThread(row.members);
+    if (!mine && !window.matchMedia("(max-width: 720px)").matches && selectedId !== row.head.id) void select(row.head.id);
+    setMenu({ x, y, items: menuFor(ms, mine && checkedList.length > 1 ? null : row.head.id), label: "Ações da mensagem" });
+  };
+
+  const readerContext = (x: number, y: number, selection: string) => {
+    if (!current) return;
+    const items: MenuItem[] = [];
+    if (selection) items.push({ label: "Copiar", icon: Copy, kbd: "Ctrl+C", onSelect: () => { navigator.clipboard?.writeText(selection).catch(() => {}); } }, { separator: true });
+    items.push(...menuFor(withThread([current]), current.id));
+    if (!ANDROID) items.push({ separator: true }, { label: "Imprimir", icon: Printer, kbd: "Ctrl+P", onSelect: () => window.print() });
+    setMenu({ x, y, items, label: "Ações da mensagem" });
+  };
+
+  const folderContext = (x: number, y: number, view: View) => {
+    const items: MenuItem[] = [
+      { label: "Abrir", icon: FolderOpen, onSelect: () => openFolder(view) },
+      { label: favorites.includes(view) ? "Remover dos Favoritos" : "Adicionar aos Favoritos", icon: Star, onSelect: () => toggleFavorite(view) },
+    ];
+    if (!LOCAL_VIEWS.includes(view) && !parseCat(view)) {
+      items.push({ label: "Sincronizar", icon: ArrowsClockwise, onSelect: () => {
+        syncFolder(view, view === folder ? keep : KEEP).then((ok) => { if (ok && view === folder) return reload(listLen.current); }).catch((e) => toast(`Falha ao sincronizar: ${e}`, "error"));
+      } });
+    }
+    if (parseBox(view)) {
+      const node = tree.find((n) => boxView(n.account, n.name) === view);
+      if (node) {
+        items.push(
+          { separator: true },
+          { label: "Nova subpasta", icon: FolderSimple, onSelect: () => setFolderDialog({ mode: "create", account: node.account, parent: node.name }) },
+          { label: "Renomear", icon: NotePencil, onSelect: () => setFolderDialog({ mode: "rename", node }) },
+          { label: "Excluir pasta", icon: Trash, danger: true, onSelect: () => void askDeleteFolder(node) },
+        );
+      }
+    }
+    setMenu({ x, y, items, label: "Ações da pasta" });
+  };
+
+  function openContact(e: React.MouseEvent<HTMLElement>, raw: string) {
+    const r = e.currentTarget.getBoundingClientRect();
+    setContact({ x: r.left, y: r.bottom + 4, ...parseContact(raw) });
+  }
+
+  // ---- Atalhos (estilo Outlook + teclas simples) ----
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (dialog || compose || settingsOpen || update || folderDialog) return;
+      if (dialog || compose || settingsOpen || update || folderDialog || menu || contact) return;
       if (folderDelete) {
         if (e.key === "Escape" && !folderBusy) setFolderDelete(null);
         return;
@@ -1126,9 +1332,9 @@ export default function App() {
         if (e.key === "Escape" && !deleting) setConfirmDelete(null);
         return;
       }
-      if ((showDrafts || showScheduled) && !(e.key === "c" || e.key === "Escape")) return;
       const t = e.target;
-      const typing = t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement || t instanceof HTMLSelectElement;
+      if (ownsKeys(t)) return;
+      const typing = isTyping(t);
       if (e.key === "Escape") {
         if (full && !typing) setFull(false);
         else if (typing) { setQuery(""); searchRef.current?.blur(); }
@@ -1136,530 +1342,451 @@ export default function App() {
         else setReaderOpen(false);
         return;
       }
-      if (typing || e.metaKey || e.ctrlKey || e.altKey) return;
+      const action: ShortcutAction | null = shortcutOf(e, typing);
+      if (!action) return;
+      if ((showDrafts || showScheduled || showOutbox) && action !== "compose" && action !== "search") return;
+      if (action === "open" && !(t instanceof Element && t.closest("[role=option]"))) return;
+      e.preventDefault();
       const idx = rows.findIndex((r) => r.members.some((m) => m.id === selectedId));
-      const acts = checkedList.length ? checkedList : current ? withThread([current]) : [];
-      if (e.key === "j" || e.key === "ArrowDown") {
-        e.preventDefault();
-        const next = rows[Math.min(idx + 1, rows.length - 1)]?.head;
-        if (next) select(next.id, true);
-      } else if (e.key === "k" || e.key === "ArrowUp") {
-        e.preventDefault();
-        const prev = rows[Math.max(idx - 1, 0)]?.head;
-        if (prev) select(prev.id, true);
-      } else if (e.key === "/") {
-        e.preventDefault();
-        searchRef.current?.focus();
-      } else if (e.key === "r") {
-        e.preventDefault();
-        reply();
-      } else if (e.key === "c") {
-        e.preventDefault();
-        writeNew();
-      } else if (e.key === "a") {
-        e.preventDefault();
-        replyAll();
-      } else if (e.key === "f") {
-        e.preventDefault();
-        forward();
-      } else if (e.key === "e") {
-        archive(acts);
-      } else if (e.key === "#") {
-        remove(acts);
-      } else if (e.key === "s") {
-        toggleStar(acts, true);
-      } else if (e.key === "u") {
-        markSeen(acts, false);
-      } else if (e.key === "p") {
-        togglePin(acts);
+      const targets = checkedList.length ? checkedList : current ? withThread([current]) : [];
+      const go = (i: number) => {
+        const r = rows[Math.max(0, Math.min(i, rows.length - 1))];
+        if (!r) return;
+        void select(r.head.id, true);
+        listRef.current?.reveal(r.head.id, true);
+      };
+      switch (action) {
+        case "next": return go(idx < 0 ? 0 : idx + 1);
+        case "prev": return go(idx < 0 ? 0 : idx - 1);
+        case "first": return go(0);
+        case "last": return go(rows.length - 1);
+        case "open": return setFull(true);
+        case "search": searchRef.current?.focus(); searchRef.current?.select(); return;
+        case "reply": return void act("reply");
+        case "replyAll": return void act("replyAll");
+        case "forward": return void act("forward");
+        case "compose": return writeNew();
+        case "archive": return archive(targets);
+        case "delete": return remove(targets);
+        case "star": return void toggleStar(targets, true);
+        case "read": return void markSeen(targets, true);
+        case "unread": return void markSeen(targets, false);
+        case "pin": return void togglePin(targets);
+        case "undo":
+          return void popUndo().then((label) => toast(label ? `Desfeito: ${label}` : "Nada para desfazer", "info", { duration: 2000 }));
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   });
 
-  useEffect(() => {
-    listRef.current?.querySelector<HTMLElement>("[aria-selected=true]")?.scrollIntoView({ block: "nearest" });
-  }, [selectedId]);
-
   const empty = accounts !== null && accounts.length === 0;
   /** Conversa com mais de uma mensagem aberta no painel (o fio carrega logo após a seleção). */
   const threaded = grouped && !!detail && thread.length > 1 && thread.some((t) => t.id === detail.id);
+
+  const targets = checkedList.length ? checkedList : current ? withThread([current]) : [];
+  const none = targets.length === 0;
+  const cmds: Cmd[] = [
+    { id: "new", label: "Novo email", icon: NotePencil, pri: 1, group: 0, kbd: "Ctrl+N", primary: true, run: () => writeNew() },
+    { id: "delete", label: targets.length && targets.every((m) => m.role === "trash") ? "Excluir de vez" : "Excluir", icon: Trash, pri: 2, group: 1, kbd: "Delete", disabled: !targets.some(canTrash), run: () => remove(targets) },
+    { id: "archive", label: targets.length && targets.some(canArchive) && archiveTo(targets.find(canArchive)!) === "inbox" ? "Mover para a entrada" : "Arquivar", icon: Archive, pri: 3, group: 1, kbd: "E", disabled: !targets.some(canArchive), run: () => archive(targets) },
+    { id: "reply", label: "Responder", icon: ArrowBendUpLeft, pri: 4, group: 2, kbd: "Ctrl+R", disabled: !current, run: () => void act("reply") },
+    { id: "replyAll", label: "Responder a todos", icon: ArrowBendDoubleUpLeft, pri: 5, group: 2, kbd: "Ctrl+Shift+R", disabled: !current, run: () => void act("replyAll") },
+    { id: "forward", label: "Encaminhar", icon: ArrowBendUpRight, pri: 6, group: 2, kbd: "Ctrl+F", disabled: !current, run: () => void act("forward") },
+    { id: "move", label: "Mover", icon: FolderOpen, pri: 7, group: 3, disabled: none, menu: () => moveItems(targets) },
+    targets.length && targets.every((m) => m.seen)
+      ? { id: "read", label: "Marcar não lida", icon: EnvelopeSimple, pri: 8, group: 4, kbd: "Ctrl+U", run: () => void markSeen(targets, false) }
+      : { id: "read", label: "Marcar lida", icon: EnvelopeSimpleOpen, pri: 8, group: 4, kbd: "Ctrl+Q", disabled: none, run: () => void markSeen(targets, true) },
+    { id: "flag", label: "Sinalizar", icon: Star, pri: 9, group: 4, kbd: "Insert", disabled: none, pressed: !none && targets.every((m) => m.flagged), run: () => void toggleStar(targets, true) },
+    { id: "pin", label: "Fixar", icon: PushPin, pri: 10, group: 4, kbd: "P", disabled: none, pressed: !none && targets.every((m) => m.pinned), run: () => void togglePin(targets) },
+    { id: "snooze", label: "Adiar", icon: Clock, pri: 11, group: 5, disabled: none, menu: () => snoozeItems(targets) },
+    ...(categories.length ? [{ id: "cats", label: "Categorias", icon: Tag, pri: 12, group: 5, disabled: none, menu: () => categoryItems(targets) }] : []),
+    ...(!ANDROID ? [{ id: "print", label: "Imprimir", icon: Printer, pri: 13, group: 6, disabled: !current, run: () => window.print() }] : []),
+    { id: "eml", label: "Salvar .eml", icon: FloppyDisk, pri: 14, group: 6, disabled: !current, run: () => current && void saveEml(current.id) },
+  ];
+
+  /** Barra de ações do leitor: só no celular (no desktop quem cuida disso é a faixa de comandos). */
   const actionsBar = (
-      <div className="actions">
-        <button className="btn" onClick={reply}>
-          <ArrowBendUpLeft size={15} weight="bold" /> Responder <kbd>r</kbd>
+    <div className="actions mobile-actions">
+      <button className="btn" onClick={() => void act("reply")}>
+        <ArrowBendUpLeft size={15} weight="bold" /> Responder
+      </button>
+      <button className="btn icon-only" onClick={() => void act("replyAll")} aria-label="Responder a todos" title="Responder a todos">
+        <ArrowBendDoubleUpLeft size={15} weight="bold" />
+      </button>
+      <button className="btn icon-only" onClick={() => void act("forward")} aria-label="Encaminhar" title="Encaminhar">
+        <ArrowBendUpRight size={15} weight="bold" />
+      </button>
+      {current && canArchive(current) && (
+        <button className="btn icon-only" onClick={() => archive(withThread([current]))}
+          aria-label={archiveTo(current) === "inbox" ? "Mover para a entrada" : "Arquivar"} title={archiveTo(current) === "inbox" ? "Mover para a entrada" : "Arquivar"}>
+          {archiveTo(current) === "inbox" ? <Tray size={15} weight="bold" /> : <Archive size={15} weight="bold" />}
         </button>
-        <button className="btn icon-only" onClick={replyAll} aria-label="Responder a todos" title="Responder a todos (a)">
-          <ArrowBendDoubleUpLeft size={15} weight="bold" />
-        </button>
-        <button className="btn icon-only" onClick={forward} aria-label="Encaminhar" title="Encaminhar (f)">
-          <ArrowBendUpRight size={15} weight="bold" />
-        </button>
-        {current && canArchive(current) && (
-          <button className="btn" onClick={() => archive(withThread([current]))}>
-            {archiveTo(current) === "inbox"
-              ? <><Tray size={15} weight="bold" /> Mover para a entrada</>
-              : <><Archive size={15} weight="bold" /> Arquivar</>} <kbd>e</kbd>
+      )}
+      <button className="btn icon-only" onClick={() => current && remove(withThread([current]))} disabled={!current || !canTrash(current)}
+        aria-label={current?.role === "trash" ? "Excluir de vez" : "Excluir"} title={current && !canTrash(current) ? "Esta conta não tem Lixeira" : "Excluir"}>
+        <Trash size={15} weight="bold" />
+      </button>
+      {current && (
+        <>
+          <button className="btn icon-only star-btn" data-on={current.flagged || undefined} data-pop={popId === current.id || undefined}
+            onClick={() => toggleStar(withThread([current]))} aria-pressed={current.flagged}
+            aria-label={current.flagged ? "Tirar a estrela" : "Marcar com estrela"} title="Estrela">
+            <Star size={15} weight={current.flagged ? "fill" : "bold"} />
           </button>
-        )}
-        <button className="btn" onClick={() => current && remove(withThread([current]))} disabled={!current || !canTrash(current)}
-          title={current && !canTrash(current) ? "Esta conta não tem Lixeira" : undefined}>
-          <Trash size={15} weight="bold" /> {current?.role === "trash" ? "Excluir de vez" : "Excluir"} <kbd>#</kbd>
-        </button>
-        {current && (
-          <>
-            {!ANDROID && (
-              <button className="btn icon-only" onClick={() => window.print()}
-                aria-label="Imprimir ou salvar como PDF" title="Imprimir ou salvar como PDF">
-                <Printer size={15} weight="bold" />
-              </button>
-            )}
-            <button className="btn icon-only" onClick={() => void saveEml(current.id)}
-              aria-label="Salvar como .eml" title="Salvar como .eml">
-              <FloppyDisk size={15} weight="bold" />
-            </button>
-            <button className="btn icon-only star-btn" data-on={current.flagged || undefined} data-pop={popId === current.id || undefined}
-              onClick={() => toggleStar(withThread([current]))} aria-pressed={current.flagged}
-              aria-label={current.flagged ? "Tirar a estrela" : "Marcar com estrela"} title="Estrela (s)">
-              <Star size={15} weight={current.flagged ? "fill" : "bold"} />
-            </button>
-            <button className="btn icon-only" onClick={() => markSeen(withThread([current]), false)}
-              aria-label="Marcar como não lida" title="Marcar como não lida (u)">
-              <EnvelopeSimple size={15} weight="bold" />
-            </button>
-            <CategoryPicker className="btn icon-only" categories={categories} current={current.category ?? null} onPick={(id) => applyCategory(withThread([current]), id)} />
-            <WhenMenu className="btn icon-only" label="Adiar" onPick={(at) => snooze(withThread([current]), at)}><Clock size={15} weight="bold" /></WhenMenu>
-            <button className="btn icon-only star-btn" data-on={current.pinned || undefined} onClick={() => togglePin(withThread([current]))}
-              aria-pressed={!!current.pinned} aria-label={current.pinned ? "Desafixar" : "Fixar no topo"} title="Fixar no topo (p)">
-              <PushPin size={15} weight={current.pinned ? "fill" : "bold"} />
-            </button>
-          </>
-        )}
-      </div>
+          <button className="btn icon-only" onClick={() => markSeen(withThread([current]), false)}
+            aria-label="Marcar como não lida" title="Marcar como não lida">
+            <EnvelopeSimple size={15} weight="bold" />
+          </button>
+          <CategoryPicker className="btn icon-only" categories={categories} current={current.category ?? null} onPick={(id) => applyCategory(withThread([current]), id)} />
+          <WhenMenu className="btn icon-only" label="Adiar" onPick={(at) => snooze(withThread([current]), at)}><Clock size={15} weight="bold" /></WhenMenu>
+          <button className="btn icon-only star-btn" data-on={current.pinned || undefined} onClick={() => togglePin(withThread([current]))}
+            aria-pressed={!!current.pinned} aria-label={current.pinned ? "Desafixar" : "Fixar no topo"} title="Fixar no topo">
+            <PushPin size={15} weight={current.pinned ? "fill" : "bold"} />
+          </button>
+        </>
+      )}
+    </div>
   );
+
+  const recipients = (label: string, v: string) => {
+    const list = splitAddrs(v);
+    if (!list.length) return null;
+    return (
+      <div className="meta-to">
+        <span className="meta-to-label">{label}</span>
+        {list.slice(0, 6).map((a) => {
+          const c = parseContact(a);
+          return <button key={a} type="button" className="contact-chip" title={c.addr} onClick={(e) => openContact(e, a)}>{c.name || c.addr}</button>;
+        })}
+        {list.length > 6 && <span className="meta-more">+{list.length - 6}</span>}
+      </div>
+    );
+  };
 
   /** Cabeçalho, anexos e corpo de uma mensagem. Em conversa, as anteriores trazem "Recolher" no lugar de "Expandir". */
   function renderMessage(d: MessageDetail, fold: boolean) {
+    const sender = d.from_name ? `${d.from_name} <${d.from_addr}>` : d.from_addr;
     return (
       <>
         <div className="meta">
-              <span className="avatar large" aria-hidden>{(d.from_name || d.from_addr)[0]?.toUpperCase()}</span>
-              <div>
-                <div className="meta-from">{d.from_name || d.from_addr}</div>
-                <div className="meta-addr">{d.from_addr}</div>
+          <span className="avatar large" aria-hidden>{(d.from_name || d.from_addr)[0]?.toUpperCase()}</span>
+          <div className="meta-id">
+            <div className="meta-from"><button type="button" className="contact-link" onClick={(e) => openContact(e, sender)}>{d.from_name || d.from_addr}</button></div>
+            {d.from_name && <div className="meta-addr">{d.from_addr}</div>}
+          </div>
+          <time className="meta-date">{fmtLong.format(new Date(d.date * 1000))}</time>
+          {fold ? (
+            <button type="button" className="icon-btn expand-btn" onClick={() => void toggleThreadMsg(d.id)}
+              aria-label="Recolher mensagem" title="Recolher">
+              <CaretUp size={15} weight="bold" />
+            </button>
+          ) : (
+            <button type="button" className="icon-btn expand-btn" onClick={() => setFull(!full)}
+              aria-label={full ? "Sair da tela cheia" : "Expandir mensagem"} title={full ? "Voltar (Esc)" : "Expandir (clique duplo na lista)"}>
+              {full ? <ArrowsIn size={15} weight="bold" /> : <ArrowsOut size={15} weight="bold" />}
+            </button>
+          )}
+        </div>
+        {recipients("Para", d.to_addrs)}
+        {recipients("Cc", d.cc_addrs)}
+        {!threaded && d.id === selectedId && actionsBar}
+        {d.attachments.length > 0 && (
+          <ul className="attachments" aria-label="Anexos">
+            {d.attachments.map((a) => (
+              <li key={a.index}>
+                <button type="button" className="chip attachment" disabled={savingAtt === `${d.id}:${a.index}`}
+                  title={`Salvar e abrir ${a.name}`} onClick={() => void saveAttachment(d.id, a)}>
+                  <Paperclip size={14} weight="bold" aria-hidden />
+                  <span className="chip-name">{a.name}</span>
+                  <span className="chip-size">{fmtSize(a.size)}</span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+        {d.body_html ? (
+          <>
+            {!imagesOk.has(d.id) && hasRemoteImages(d.body_html) && (
+              <div className="img-banner" role="status">
+                <span>Imagens remotas bloqueadas para proteger sua privacidade.</span>
+                <button type="button" className="btn" onClick={() => setImagesOk((s) => new Set(s).add(d.id))}>
+                  Mostrar imagens
+                </button>
               </div>
-              <time className="meta-date">{fmtLong.format(new Date(d.date * 1000))}</time>
-              {fold ? (
-                <button type="button" className="icon-btn expand-btn" onClick={() => void toggleThreadMsg(d.id)}
-                  aria-label="Recolher mensagem" title="Recolher">
-                  <CaretUp size={15} weight="bold" />
-                </button>
-              ) : (
-                <button type="button" className="icon-btn expand-btn" onClick={() => setFull(!full)}
-                  aria-label={full ? "Sair da tela cheia" : "Expandir mensagem"} title={full ? "Voltar (Esc)" : "Expandir (clique duplo na lista)"}>
-                  {full ? <ArrowsIn size={15} weight="bold" /> : <ArrowsOut size={15} weight="bold" />}
-                </button>
-              )}
-            </div>
-            {!threaded && d.id === selectedId && actionsBar}
-            {d.attachments.length > 0 && (
-              <ul className="attachments" aria-label="Anexos">
-                {d.attachments.map((a) => (
-                  <li key={a.index}>
-                    <button type="button" className="chip attachment" disabled={savingAtt === `${d.id}:${a.index}`}
-                      title={`Salvar e abrir ${a.name}`} onClick={() => void saveAttachment(d.id, a)}>
-                      <Paperclip size={14} weight="bold" aria-hidden />
-                      <span className="chip-name">{a.name}</span>
-                      <span className="chip-size">{fmtSize(a.size)}</span>
-                    </button>
-                  </li>
-                ))}
-              </ul>
             )}
-            {d.body_html ? (
-              <>
-                {!imagesOk.has(d.id) && hasRemoteImages(d.body_html) && (
-                  <div className="img-banner" role="status">
-                    <span>Imagens remotas bloqueadas para proteger sua privacidade.</span>
-                    <button type="button" className="btn" onClick={() => setImagesOk((s) => new Set(s).add(d.id))}>
-                      Mostrar imagens
-                    </button>
-                  </div>
-                )}
-                <HtmlBody html={d.body_html} remote={imagesOk.has(d.id)} />
-              </>
-            ) : (
-              <div className="body">{d.body_text}</div>
-            )}
+            <HtmlBody html={d.body_html} remote={imagesOk.has(d.id)} onContext={readerContext} />
+          </>
+        ) : (
+          <div className="body">{d.body_text}</div>
+        )}
       </>
     );
   }
 
-  return (
-    <div ref={appRef} className="app" data-reader={readerOpen || undefined} data-pane={pane === "right" ? undefined : pane}
-      data-full={full || undefined} data-page={settingsOpen ? "settings" : undefined} data-ready={prefsReady || undefined}
-      data-density={settings.density === "compact" ? "compact" : undefined} data-preview={settings.preview === "0" ? "0" : undefined}
-      style={layoutVars}>
-      <aside className="rail">
-        <div className="brand">Posta</div>
-        <button className="btn primary compose-btn" onClick={writeNew} aria-label="Escrever">
-          <NotePencil size={16} weight="bold" /> <span>Escrever</span>
+  const inList = !showDrafts && !showScheduled;
+  const folderTabs = (
+    <div className="folder-tabs mobile-only" role="group" aria-label="Pastas">
+      {navFolders.map((r) => {
+        const Icon = FOLDERS[r].icon;
+        return (
+          <button key={r} className="btn ghost small" onClick={() => openFolder(r)} aria-current={r === folder && inList ? "page" : undefined}>
+            <Icon size={14} weight="bold" /> {FOLDERS[r].label}
+          </button>
+        );
+      })}
+      {[...tree.map((n) => boxView(n.account, n.name)), ...categories.map((c) => catView(c.id))].map((v) => {
+        const { label, icon: Icon } = viewInfo(v, userFolders, categories);
+        return (
+          <button key={v} className="btn ghost small" onClick={() => openFolder(v)} aria-current={v === folder && inList ? "page" : undefined}>
+            <Icon size={14} weight="bold" /> {label}
+          </button>
+        );
+      })}
+      <button className="btn ghost small" onClick={openDrafts} aria-current={showDrafts && !showOutbox ? "page" : undefined}>
+        <FileText size={14} weight="bold" /> Rascunhos
+      </button>
+      <button className="btn ghost small" onClick={openScheduled} aria-current={showScheduled ? "page" : undefined}>
+        <Clock size={14} weight="bold" /> Agendados
+      </button>
+      {(net.outbox > 0 || showOutbox) && (
+        <button className="btn ghost small" onClick={openOutbox} aria-current={showOutbox ? "page" : undefined}>
+          <PaperPlaneTilt size={14} weight="bold" /> Caixa de saída
         </button>
-        <nav>
-          {navFolders.map((r) => {
-            const Icon = FOLDERS[r].icon;
-            return (
-              <button key={r} className="nav-item" title={FOLDERS[r].label} onClick={() => openFolder(r)}
-                aria-current={r === folder && !showDrafts && !showScheduled ? "page" : undefined}
-                {...(r === "starred" || r === "all" ? {} : dropProps(r, r, r))}>
-                <Icon size={16} weight="bold" />
-                <span>{FOLDERS[r].label}</span>
-                {!!unreadOf(r) && <span className="count">{unreadOf(r)}</span>}
-              </button>
-            );
-          })}
-          <button className="nav-item" title="Rascunhos" onClick={openDrafts} aria-current={showDrafts && !showOutbox ? "page" : undefined}>
-            <FileText size={16} weight="bold" />
-            <span>Rascunhos</span>
-            {drafts.length > 0 && <span className="count plain">{drafts.length}</span>}
-          </button>
-          <button className="nav-item" title="Agendados" onClick={openScheduled} aria-current={showScheduled ? "page" : undefined}>
-            <Clock size={16} weight="bold" />
-            <span>Agendados</span>
-            {scheduled.length > 0 && <span className="count plain">{scheduled.length}</span>}
-          </button>
-          {(net.outbox > 0 || showOutbox) && (
-            <button className="nav-item" title="Caixa de saída" onClick={openOutbox} aria-current={showOutbox ? "page" : undefined}>
-              <PaperPlaneTilt size={16} weight="bold" />
-              <span>Caixa de saída</span>
-              {net.outbox > 0 && <span className="count plain">{net.outbox}</span>}
-            </button>
-          )}
-        </nav>
-        <FolderTree nodes={tree} accounts={accounts ?? []} byAccount={(accounts?.length ?? 0) > 1 && !accountFilter}
-          categories={categories} folder={folder} inList={!showDrafts && !showScheduled} open={openFolder}
+      )}
+    </div>
+  );
+
+  const pickTab = (t: "focused" | "other") => changeSetting("inbox:tab", t);
+  const onTabKey = (e: React.KeyboardEvent) => {
+    if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+    e.preventDefault();
+    pickTab(tab === "focused" ? "other" : "focused");
+    requestAnimationFrame(() => document.querySelector<HTMLElement>(".focus-tabs [aria-selected=true]")?.focus());
+  };
+
+  return (
+    <AppShell shellRef={appRef} data-reader={readerOpen || undefined} data-pane={pane === "right" ? undefined : pane}
+      data-full={full || undefined} data-page={settingsOpen ? "settings" : undefined} data-ready={prefsReady || undefined}
+      data-density={density} data-preview={settings.preview === "0" ? "0" : undefined} style={layoutVars}>
+      <TopBar query={query} onQuery={setQuery} searchRef={searchRef} folderLabel={info.label} scope={scope}
+        canScopeAll={(accounts?.length ?? 0) > 1} onScope={setScope} onFilter={(token) => setQuery(addFilter(query, token))}
+        net={net} syncing={syncing} canSync={!!accounts?.length} onSync={() => void sync(true)}
+        onAddAccount={() => setDialog(true)} onSettings={() => setSettingsOpen(true)} />
+      <CommandBar cmds={cmds} />
+
+      <RouteLayout>
+        <Rail navFolders={navFolders} favorites={favorites} folder={folder} inList={inList} unread={(v) => (Object.hasOwn(FOLDERS, v) ? (unreadOf(v as Role | "starred" | "all") ?? 0) : 0)}
+          open={openFolder}
           drop={(key, view) => {
             const box = parseBox(view);
-            return box ? dropProps(key, view, { account: box.account, name: box.name, label: viewInfo(view, userFolders, categories).label }) : {};
+            if (box) return dropProps(key, view, { account: box.account, name: box.name, label: viewInfo(view, userFolders, categories).label });
+            return Object.hasOwn(FOLDERS, view) && view !== "starred" && view !== "all" ? dropProps(key, view, view as Role) : {};
           }}
-          onNew={(parent) => setFolderDialog({ mode: "create", account: parent?.account ?? accountFilter ?? undefined, parent: parent?.name })}
-          onRename={(node) => setFolderDialog({ mode: "rename", node })} onDelete={askDeleteFolder} />
-        <div className="rail-section">
-          <div className="rail-label">Contas</div>
-          {accounts && accounts.length > 1 && (
-            <button type="button" className="account account-btn" title="Todas as caixas juntas" aria-pressed={!accountFilter}
-              onClick={() => setAccountFilter(null)}>
-              <span className="avatar" aria-hidden>*</span>
-              <span className="account-name">Todas as contas</span>
-            </button>
-          )}
-          {accounts?.map((a) => accounts.length > 1 ? (
-            <button key={a.id} type="button" className="account account-btn" title={a.id} aria-pressed={accountFilter === a.id}
-              onClick={() => { setAccountFilter(accountFilter === a.id ? null : a.id); if (folder === "all") openFolder("inbox"); }}>
-              <span className="avatar" aria-hidden>{a.username[0]?.toUpperCase()}</span>
-              <span className="account-name">{a.username}</span>
-            </button>
-          ) : (
-            <div key={a.id} className="account" title={a.id}>
-              <span className="avatar" aria-hidden>{a.username[0]?.toUpperCase()}</span>
-              <span className="account-name">{a.username}</span>
-            </div>
-          ))}
-          <button className="btn ghost small" onClick={() => setDialog(true)}>
-            <Plus size={14} weight="bold" /> Adicionar conta
-          </button>
-        </div>
-        <div className="shortcuts" aria-label="Atalhos">
-          <span><kbd>j</kbd><kbd>k</kbd> navegar</span>
-          <span><kbd>/</kbd> buscar</span>
-          <span><kbd>r</kbd> responder</span>
-          <span><kbd>a</kbd> responder a todos</span>
-          <span><kbd>f</kbd> encaminhar</span>
-          <span><kbd>c</kbd> escrever</span>
-          <span><kbd>e</kbd> arquivar</span>
-          <span><kbd>#</kbd> excluir</span>
-          <span><kbd>s</kbd> estrela</span>
-          <span><kbd>u</kbd> não lida</span>
-        </div>
-        <button className="btn ghost small settings-btn" onClick={() => setSettingsOpen(true)} aria-label="Configurações">
-          <GearSix size={15} weight="bold" /> <span>Configurações</span>
-        </button>
-      </aside>
+          onContext={folderContext} userFolders={userFolders} categories={categories} tree={tree} accounts={accounts}
+          accountFilter={accountFilter} onAccountFilter={(id) => { setAccountFilter(id); if (id && folder === "all") openFolder("inbox"); }}
+          drafts={drafts.length} scheduled={scheduled.length} outbox={net.outbox} showDrafts={showDrafts} showScheduled={showScheduled} showOutbox={showOutbox}
+          openDrafts={openDrafts} openScheduled={openScheduled} openOutbox={openOutbox}
+          onNewFolder={(parent) => setFolderDialog({ mode: "create", account: parent?.account ?? accountFilter ?? undefined, parent: parent?.name })}
+          onRenameFolder={(node) => setFolderDialog({ mode: "rename", node })} onDeleteFolder={askDeleteFolder}
+          onAddAccount={() => setDialog(true)} />
 
-      <section className="list-pane">
-        <div className="toolbar">
-          <label className="search">
-            <MagnifyingGlass size={16} weight="bold" aria-hidden />
-            <input ref={searchRef} type="search" placeholder="Buscar" value={query}
-              onChange={(e) => setQuery(e.target.value)} aria-label="Buscar mensagens" />
-            {!query && <kbd>/</kbd>}
-          </label>
-          <span className="cat-picker" ref={filterRoot}>
-            <button type="button" className="icon-btn" aria-label="Filtros da busca" title="Filtros da busca" aria-haspopup="menu" aria-expanded={filterMenu}
-              onClick={() => setFilterMenu((o) => !o)}>
-              <FunnelSimple size={16} weight="bold" />
-            </button>
-            {filterMenu && (
-              <div className="cat-menu" role="menu" aria-label="Filtros da busca">
-                {SEARCH_FILTERS.map((f) => (
-                  <button key={f.token} type="button" role="menuitem" onClick={() => { setQuery(addFilter(query, f.token)); setFilterMenu(false); searchRef.current?.focus(); }}>
-                    <span>{f.label}</span><small>{f.token}</small>
-                  </button>
+        <PageLayout area="list" aria-label="Lista de mensagens">
+          {folderTabs}
+          <div className="list-head">
+            <h2 className="list-title">{showScheduled ? "Agendados" : showOutbox ? "Caixa de saída" : showDrafts ? "Rascunhos" : info.label}</h2>
+            {tabsOn && inList && (
+              <div className="focus-tabs" role="tablist" aria-label="Foco e Outros" onKeyDown={onTabKey}>
+                <button type="button" role="tab" id="tab-focused" aria-selected={tab === "focused"} tabIndex={tab === "focused" ? 0 : -1} onClick={() => pickTab("focused")}>
+                  Foco{tabUnread.focused > 0 && <span className="tab-n">{tabUnread.focused}</span>}
+                </button>
+                <button type="button" role="tab" id="tab-other" aria-selected={tab === "other"} tabIndex={tab === "other" ? 0 : -1} onClick={() => pickTab("other")}>
+                  Outros{tabUnread.other > 0 && <span className="tab-n">{tabUnread.other}</span>}
+                </button>
+              </div>
+            )}
+          </div>
+          {checkedList.length > 0 && (
+            <div className="bulk" role="toolbar" aria-label="Ações em lote">
+              <button className="icon-btn" onClick={() => setChecked(new Set())} aria-label="Limpar seleção" title="Limpar seleção (Esc)">
+                <X size={15} weight="bold" />
+              </button>
+              <span className="bulk-count">{checkedRows.length} {checkedRows.length === 1 ? "selecionada" : "selecionadas"}</span>
+              {checkedRows.length < rows.length && (
+                <button className="btn ghost small" onClick={() => setChecked(new Set(rows.map((r) => r.head.id)))}>Todas</button>
+              )}
+              <span className="bulk-actions">
+                <button className="icon-btn" onClick={() => archive(checkedList)} disabled={!checkedList.some(canArchive)}
+                  aria-label="Arquivar" title="Arquivar (E)"><Archive size={16} weight="bold" /></button>
+                <button className="icon-btn" onClick={() => remove(checkedList)} disabled={!checkedList.some(canTrash)}
+                  aria-label="Excluir" title="Excluir (Delete)"><Trash size={16} weight="bold" /></button>
+                <button className="icon-btn" onClick={() => markSeen(checkedList, true)}
+                  aria-label="Marcar como lida" title="Marcar como lida (Ctrl+Q)"><EnvelopeSimpleOpen size={16} weight="bold" /></button>
+                <button className="icon-btn" onClick={() => markSeen(checkedList, false)}
+                  aria-label="Marcar como não lida" title="Marcar como não lida (Ctrl+U)"><EnvelopeSimple size={16} weight="bold" /></button>
+                <button className="icon-btn" onClick={() => toggleStar(checkedList)}
+                  aria-label="Alternar estrela" title="Sinalizar (Insert)"><Star size={16} weight="bold" /></button>
+                <WhenMenu className="icon-btn" label="Adiar" onPick={(at) => snooze(checkedList, at)}><Clock size={16} weight="bold" /></WhenMenu>
+                <button className="icon-btn" onClick={() => togglePin(checkedList)}
+                  aria-label="Alternar fixar" title="Fixar no topo (P)"><PushPin size={16} weight="bold" /></button>
+                <CategoryPicker className="icon-btn" categories={categories} onPick={(id) => applyCategory(checkedList, id)}
+                  current={checkedList.every((m) => m.category === checkedList[0].category) ? checkedList[0].category ?? null : undefined} />
+              </span>
+            </div>
+          )}
+          {results && inList && (
+            <div className="result-meta">
+              <span>{plural(results.length, "resultado", "resultados")} para “{query.trim()}”{fromServer && " (com o servidor)"}</span>
+              {!fromServer && folder !== "starred" && !String(folder).startsWith("category") && (
+                <button type="button" className="btn small" onClick={searchServer} disabled={serverBusy}>{serverBusy ? "Buscando…" : "Buscar no servidor"}</button>
+              )}
+            </div>
+          )}
+
+          {showScheduled ? (
+            scheduled.length === 0 ? (
+              <div className="empty quiet"><p>Nenhuma mensagem agendada</p></div>
+            ) : (
+              <ul className="plain-list" aria-label="Agendados">
+                {scheduled.map((s) => (
+                  <li key={s.id} className="plain-row draft-row" tabIndex={0} onClick={() => editScheduled(s)}
+                    onKeyDown={(e) => { if (e.key === "Enter" && e.target === e.currentTarget) editScheduled(s); }}>
+                    <PaperPlaneTilt size={13} weight="bold" className="sched-icon" aria-hidden />
+                    <span className="from">{s.to.trim() || "(sem destinatário)"}</span>
+                    <time className="date" dateTime={new Date(s.send_at * 1000).toISOString()}>{whenLabel(s.send_at)}</time>
+                    <span className="subject">{s.subject || "(sem assunto)"}</span>
+                    <span className="snippet sched-status" data-failed={s.status === "failed" || undefined}>
+                      {s.status === "failed" ? `Falhou: ${s.error}` : s.status === "sending" ? "Enviando…" : "Aguardando a hora"}
+                      <button type="button" className="btn ghost small" onClick={(e) => { e.stopPropagation(); cancelScheduled(s); }}>Cancelar envio</button>
+                    </span>
+                  </li>
                 ))}
-              </div>
-            )}
-          </span>
-          <OfflineBadge status={net} />
-          <button className="icon-btn" onClick={() => sync(true)} aria-label="Sincronizar" data-busy={syncing || undefined}
-            disabled={!accounts?.length}>
-            <ArrowsClockwise size={16} weight="bold" className="sync-icon" />
-          </button>
-          <button className="icon-btn mobile-only" onClick={() => setDialog(true)} aria-label="Adicionar conta">
-            <Plus size={16} weight="bold" />
-          </button>
-          <button className="icon-btn mobile-only" onClick={() => setSettingsOpen(true)} aria-label="Configurações">
-            <GearSix size={16} weight="bold" />
-          </button>
-        </div>
-        <div className="folder-tabs mobile-only" role="group" aria-label="Pastas">
-          {navFolders.map((r) => {
-            const Icon = FOLDERS[r].icon;
-            return (
-              <button key={r} className="btn ghost small" onClick={() => openFolder(r)}
-                aria-current={r === folder && !showDrafts && !showScheduled ? "page" : undefined}>
-                <Icon size={14} weight="bold" /> {FOLDERS[r].label}
-              </button>
-            );
-          })}
-          {[...tree.map((n) => boxView(n.account, n.name)), ...categories.map((c) => catView(c.id))].map((v) => {
-            const { label, icon: Icon } = viewInfo(v, userFolders, categories);
-            return (
-              <button key={v} className="btn ghost small" onClick={() => openFolder(v)} aria-current={v === folder && !showDrafts && !showScheduled ? "page" : undefined}>
-                <Icon size={14} weight="bold" /> {label}
-              </button>
-            );
-          })}
-          <button className="btn ghost small" onClick={openDrafts} aria-current={showDrafts && !showOutbox ? "page" : undefined}>
-            <FileText size={14} weight="bold" /> Rascunhos
-          </button>
-          <button className="btn ghost small" onClick={openScheduled} aria-current={showScheduled ? "page" : undefined}>
-            <Clock size={14} weight="bold" /> Agendados
-          </button>
-          {(net.outbox > 0 || showOutbox) && (
-            <button className="btn ghost small" onClick={openOutbox} aria-current={showOutbox ? "page" : undefined}>
-              <PaperPlaneTilt size={14} weight="bold" /> Caixa de saída
-            </button>
-          )}
-        </div>
-        {checkedList.length > 0 && (
-          <div className="bulk" role="toolbar" aria-label="Ações em lote">
-            <button className="icon-btn" onClick={() => setChecked(new Set())} aria-label="Limpar seleção" title="Limpar seleção (Esc)">
-              <X size={15} weight="bold" />
-            </button>
-            <span className="bulk-count">{checkedRows.length} {checkedRows.length === 1 ? "selecionada" : "selecionadas"}</span>
-            {checkedRows.length < rows.length && (
-              <button className="btn ghost small" onClick={() => setChecked(new Set(rows.map((r) => r.head.id)))}>Todas</button>
-            )}
-            <span className="bulk-actions">
-              <button className="icon-btn" onClick={() => archive(checkedList)} disabled={!checkedList.some(canArchive)}
-                aria-label="Arquivar" title="Arquivar (e)"><Archive size={16} weight="bold" /></button>
-              <button className="icon-btn" onClick={() => remove(checkedList)} disabled={!checkedList.some(canTrash)}
-                aria-label="Excluir" title="Excluir (#)"><Trash size={16} weight="bold" /></button>
-              <button className="icon-btn" onClick={() => markSeen(checkedList, true)}
-                aria-label="Marcar como lida" title="Marcar como lida"><EnvelopeSimpleOpen size={16} weight="bold" /></button>
-              <button className="icon-btn" onClick={() => markSeen(checkedList, false)}
-                aria-label="Marcar como não lida" title="Marcar como não lida (u)"><EnvelopeSimple size={16} weight="bold" /></button>
-              <button className="icon-btn" onClick={() => toggleStar(checkedList)}
-                aria-label="Alternar estrela" title="Alternar estrela (s)"><Star size={16} weight="bold" /></button>
-              <WhenMenu className="icon-btn" label="Adiar" onPick={(at) => snooze(checkedList, at)}><Clock size={16} weight="bold" /></WhenMenu>
-              <button className="icon-btn" onClick={() => togglePin(checkedList)}
-                aria-label="Alternar fixar" title="Fixar no topo (p)"><PushPin size={16} weight="bold" /></button>
-              <CategoryPicker className="icon-btn" categories={categories} onPick={(id) => applyCategory(checkedList, id)}
-                current={checkedList.every((m) => m.category === checkedList[0].category) ? checkedList[0].category ?? null : undefined} />
-            </span>
-          </div>
-        )}
-        {results && !showDrafts && !showScheduled && (
-          <div className="result-meta">
-            <span>{plural(results.length, "resultado", "resultados")} para “{query.trim()}”{fromServer && " (com o servidor)"}</span>
-            {!fromServer && folder !== "starred" && !String(folder).startsWith("category") && (
-              <button type="button" className="btn small" onClick={searchServer} disabled={serverBusy}>{serverBusy ? "Buscando…" : "Buscar no servidor"}</button>
-            )}
-          </div>
-        )}
-
-        {showScheduled ? (
-          scheduled.length === 0 ? (
-            <div className="empty quiet"><p>Nenhuma mensagem agendada</p></div>
+              </ul>
+            )
+          ) : showOutbox ? (
+            <OutboxPane items={outbox} accounts={(accounts ?? []).map((a) => a.id)} online={net.online} onChange={refreshOutbox} />
+          ) : showDrafts ? (
+            draftsShown.length === 0 ? (
+              <div className="empty quiet"><p>Nenhum rascunho</p></div>
+            ) : (
+              <ul className="plain-list" aria-label="Rascunhos">
+                {draftsShown.map((d) => (
+                  <li key={d.id} className="plain-row draft-row" tabIndex={0} onClick={() => openDraft(d)}
+                    onKeyDown={(e) => { if (e.key === "Enter" && e.target === e.currentTarget) openDraft(d); }}>
+                    <span className="dot" aria-hidden />
+                    <span className="from">{d.to.trim() || "(sem destinatário)"}</span>
+                    <time className="date" dateTime={new Date(d.updated * 1000).toISOString()}>{shortDate(d.updated)}</time>
+                    <span className="subject">{d.subject || "(sem assunto)"}</span>
+                    <span className="snippet">{d.body.trim().replace(/\s+/g, " ").slice(0, 200)}</span>
+                  </li>
+                ))}
+              </ul>
+            )
+          ) : empty ? (
+            <div className="empty">
+              <EnvelopeSimple size={28} weight="duotone" />
+              <h2>Conecte sua primeira conta</h2>
+              <p>Gmail, Outlook ou qualquer servidor IMAP. Os emails ficam salvos neste aparelho para abrir na hora.</p>
+              <button className="btn primary" onClick={() => setDialog(true)}>Adicionar conta</button>
+            </div>
+          ) : results && results.length === 0 ? (
+            <div className="empty quiet"><p>Nada encontrado.</p></div>
+          ) : !results && visible.length === 0 ? (
+            <div className="empty quiet"><p>{loadingFolder ? "Carregando…" : tabsOn ? (tab === "focused" ? "Nada em Foco. Veja a aba Outros." : "Nada em Outros.") : info.empty}</p></div>
           ) : (
-            <ul className="list" role="listbox" aria-label="Agendados">
-              {scheduled.map((s) => (
-                <li key={s.id} role="option" aria-selected={false} className="row draft-row" onClick={() => editScheduled(s)}>
-                  <PaperPlaneTilt size={13} weight="bold" className="sched-icon" aria-hidden />
-                  <span className="from">{s.to.trim() || "(sem destinatário)"}</span>
-                  <time className="date" dateTime={new Date(s.send_at * 1000).toISOString()}>{whenLabel(s.send_at)}</time>
-                  <span className="subject">{s.subject || "(sem assunto)"}</span>
-                  <span className="snippet sched-status" data-failed={s.status === "failed" || undefined}>
-                    {s.status === "failed" ? `Falhou: ${s.error}` : s.status === "sending" ? "Enviando…" : "Aguardando a hora"}
-                    <button type="button" className="btn ghost small" onClick={(e) => { e.stopPropagation(); cancelScheduled(s); }}>Cancelar envio</button>
-                  </span>
-                </li>
-              ))}
-            </ul>
-          )
-        ) : showOutbox ? (
-          <OutboxPane items={outbox} accounts={(accounts ?? []).map((a) => a.id)} online={net.online} onChange={refreshOutbox} />
-        ) : showDrafts ? (
-          draftsShown.length === 0 ? (
-            <div className="empty quiet"><p>Nenhum rascunho</p></div>
+            <MessageList ref={listRef} rows={rows} grouped={grouped} density={density} selectedId={selectedId} checked={checked}
+              fresh={freshIds} dragIds={dragIds} popId={popId} showAcct={folder === "all"} acctLabel={acctLabel} categories={categories}
+              intro={intro} byDate={!results} label="Mensagens" canArchive={canArchive} canTrash={canTrash}
+              onOpen={(e, m) => { if (!justSwiped()) onRowClick(e, m); }} onCheck={toggleCheck} onStar={(row) => toggleStar(row.members)}
+              onContext={rowContext}
+              onDragStart={(e, row) => {
+                const ms = checked.has(row.head.id) ? checkedList : row.members;
+                dragging.current = ms;
+                e.dataTransfer.effectAllowed = "move";
+                e.dataTransfer.setData("text/plain", ms.map((x) => x.subject).join("\n"));
+                setDragIds(new Set(ms.map((x) => x.id)));
+              }}
+              onDragEnd={endDrag} onDouble={() => setFull(true)} onNearEnd={() => void loadMore()}
+              swipe={(row) => swipeProps(swipeAction, (dir) => swipeRow(row, dir))}
+              tools={{
+                archive: (row) => archive(withThread(row.members)),
+                remove: (row) => remove(withThread(row.members)),
+                toggleRead: (row) => void markSeen(withThread(row.members), row.members.some((x) => !x.seen)),
+                pin: (row) => void togglePin(withThread(row.members)),
+              }} />
+          )}
+        </PageLayout>
+
+        {!full && !settingsOpen && (
+          <>
+            <Resizer axis="x" edge="rail" label="Largura das pastas" value={railW} min={RAIL.min} max={() => RAIL.max}
+              onChange={(v) => previewSetting("w:rail", String(v))} onCommit={(v) => changeSetting("w:rail", String(v))}
+              onReset={() => changeSetting("w:rail", "")} />
+            {pane === "right" && (
+              <Resizer axis="x" edge="list" label="Largura da lista" value={listW} min={LIST.min} max={listMax}
+                onChange={(v) => previewSetting("w:list", String(v))} onCommit={(v) => changeSetting("w:list", String(v))}
+                onReset={() => changeSetting("w:list", "")} />
+            )}
+            {pane === "bottom" && (
+              <Resizer axis="y" edge="list" label="Altura da lista" value={listH} min={LIST_H.min} max={listHMax}
+                onChange={(v) => previewSetting("h:list", String(v))} onCommit={(v) => changeSetting("h:list", String(v))}
+                onReset={() => changeSetting("h:list", "")} />
+            )}
+          </>
+        )}
+
+        <PageLayout area="reader" as="main" aria-label="Leitura">
+          {detail && detail.id === selectedId ? (
+            <article className="message" data-instant={viaKeyboard || undefined}
+              onContextMenu={(e) => {
+                if ((e.target as Element).closest("a, button, input, textarea")) return;
+                e.preventDefault();
+                readerContext(e.clientX, e.clientY, window.getSelection()?.toString() ?? "");
+              }}>
+              <button className="btn ghost small back" onClick={() => (full ? setFull(false) : setReaderOpen(false))}>
+                <ArrowLeft size={14} weight="bold" /> {full ? "Voltar" : info.label}
+              </button>
+              <h1>{detail.subject || "(sem assunto)"}</h1>
+              {threaded && actionsBar}
+              {threaded ? (
+                <div className="thread">
+                  {thread.map((t) => {
+                    const d = t.id === detail.id ? detail : bodies[t.id];
+                    if (d && (t.id === detail.id || expanded.has(t.id))) {
+                      return <section key={t.id} className="thread-msg" data-current={t.id === detail.id || undefined}>{renderMessage(d, t.id !== detail.id)}</section>;
+                    }
+                    return (
+                      <button key={t.id} type="button" className="thread-fold" data-unread={!t.seen || undefined} aria-expanded="false"
+                        onClick={() => void toggleThreadMsg(t.id)}>
+                        <span className="avatar" aria-hidden>{(t.from_name || t.from_addr)[0]?.toUpperCase()}</span>
+                        <span className="fold-from">{t.from_name || t.from_addr}</span>
+                        <span className="fold-snip">{t.snippet}</span>
+                        <time className="fold-date">{shortDate(t.date)}</time>
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : renderMessage(detail, false)}
+            </article>
           ) : (
-            <ul className="list" role="listbox" aria-label="Rascunhos">
-              {draftsShown.map((d) => (
-                <li key={d.id} role="option" aria-selected={false} className="row draft-row" onClick={() => openDraft(d)}>
-                  <span className="dot" aria-hidden />
-                  <span className="from">{d.to.trim() || "(sem destinatário)"}</span>
-                  <time className="date" dateTime={new Date(d.updated * 1000).toISOString()}>{shortDate(d.updated)}</time>
-                  <span className="subject">{d.subject || "(sem assunto)"}</span>
-                  <span className="snippet">{d.body.trim().replace(/\s+/g, " ").slice(0, 200)}</span>
-                </li>
-              ))}
-            </ul>
-          )
-        ) : empty ? (
-          <div className="empty">
-            <EnvelopeSimple size={28} weight="duotone" />
-            <h2>Conecte sua primeira conta</h2>
-            <p>Gmail, Outlook ou qualquer servidor IMAP. Os emails ficam salvos neste aparelho para abrir na hora.</p>
-            <button className="btn primary" onClick={() => setDialog(true)}>Adicionar conta</button>
-          </div>
-        ) : results && results.length === 0 ? (
-          <div className="empty quiet"><p>Nada encontrado.</p></div>
-        ) : !results && visible.length === 0 ? (
-          <div className="empty quiet"><p>{loadingFolder ? "Carregando…" : info.empty}</p></div>
-        ) : (
-          <ul ref={listRef} className="list" role="listbox" aria-label="Mensagens" data-intro={intro || undefined}
-            data-selecting={checkedList.length > 0 || undefined} aria-multiselectable
-            onScroll={(e) => {
-              const el = e.currentTarget;
-              if (el.scrollHeight - el.scrollTop - el.clientHeight < 400) loadMore();
-            }}>
-            {rows.map((row, i) => {
-              const m = row.head;
-              const unread = row.members.some((x) => !x.seen);
-              const starred = row.members.some((x) => x.flagged);
-              const n = grouped ? Math.max(row.members.length, m.thread_count) : 1;
-              const open = row.members.some((x) => x.id === selectedId);
-              return (
-                <li key={m.id} role="option" aria-selected={open}
-                  className="row" data-unread={unread || undefined} data-fresh={freshIds.has(m.id) || undefined}
-                  data-checked={checked.has(m.id) || undefined} data-dragging={row.members.some((x) => dragIds.has(x.id)) || undefined}
-                  draggable
-                  onDragStart={(e) => {
-                    const ms = checked.has(m.id) ? checkedList : row.members;
-                    dragging.current = ms;
-                    e.dataTransfer.effectAllowed = "move";
-                    e.dataTransfer.setData("text/plain", ms.map((x) => x.subject).join("\n"));
-                    setDragIds(new Set(ms.map((x) => x.id)));
-                  }}
-                  onDragEnd={endDrag}
-                  style={{ "--i": Math.min(i, 12) } as React.CSSProperties}
-                  {...swipeProps(swipeAction, (dir) => swipeRow(row, dir))}
-                  onClick={(e) => { if (!justSwiped()) onRowClick(e, m); }} onDoubleClick={(e) => { if (!(e.target as Element).closest("button")) setFull(true); }}>
-                  <span className="dot" aria-hidden />
-                  <button type="button" className="check" role="checkbox" aria-checked={checked.has(m.id)}
-                    aria-label={`Selecionar ${n > 1 ? "conversa" : "mensagem"} de ${m.from_name || m.from_addr}`}
-                    onClick={(e) => { e.stopPropagation(); toggleCheck(m, e.shiftKey); }}>
-                    <Check size={11} weight="bold" />
-                  </button>
-                  <span className="from has-meta">
-                    <span className="from-name">{m.from_name || m.from_addr}</span>
-                    {n > 1 && <span className="thread-n" title={`${n} mensagens na conversa`}>{n}</span>}
-                  </span>
-                  <time className="date" dateTime={new Date(m.date * 1000).toISOString()}>{shortDate(m.date)}</time>
-                  <button type="button" className="star" data-on={starred || undefined} data-pop={popId === m.id || undefined}
-                    aria-pressed={starred} aria-label={starred ? "Tirar a estrela" : "Marcar com estrela"}
-                    onClick={(e) => { e.stopPropagation(); toggleStar(row.members); }}>
-                    <Star size={15} weight={starred ? "fill" : "bold"} />
-                  </button>
-                  <span className="subject">
-                    {folder === "all" && <span className="acct" title={m.account}>{acctLabel(m.account)}</span>}
-                    {m.pinned && <PushPin size={12} weight="fill" className="pin-mark" aria-label="Fixada" />}
-                    {categories.filter((c) => c.id === m.category).map((c) => <CategoryChip key={c.id} category={c} />)}
-                    {m.subject || "(sem assunto)"}
-                  </span>
-                  <span className="snippet">{m.snippet}</span>
-                </li>
-              );
-            })}
-          </ul>
-        )}
-      </section>
-
-      {!full && !settingsOpen && (
-        <>
-          <Resizer axis="x" edge="rail" label="Largura das pastas" value={railW} min={RAIL.min} max={() => RAIL.max}
-            onChange={(v) => previewSetting("w:rail", String(v))} onCommit={(v) => changeSetting("w:rail", String(v))}
-            onReset={() => changeSetting("w:rail", "")} />
-          {pane === "right" && (
-            <Resizer axis="x" edge="list" label="Largura da lista" value={listW} min={LIST.min} max={listMax}
-              onChange={(v) => previewSetting("w:list", String(v))} onCommit={(v) => changeSetting("w:list", String(v))}
-              onReset={() => changeSetting("w:list", "")} />
+            <div className="reader-empty">
+              <p>{messages.length ? "Selecione uma mensagem" : ""}</p>
+            </div>
           )}
-          {pane === "bottom" && (
-            <Resizer axis="y" edge="list" label="Altura da lista" value={listH} min={LIST_H.min} max={listHMax}
-              onChange={(v) => previewSetting("h:list", String(v))} onCommit={(v) => changeSetting("h:list", String(v))}
-              onReset={() => changeSetting("h:list", "")} />
-          )}
-        </>
-      )}
-
-      <main className="reader">
-        {detail && detail.id === selectedId ? (
-          <article key={detail.id} className="message" data-instant={viaKeyboard || undefined}>
-            <button className="btn ghost small back" onClick={() => (full ? setFull(false) : setReaderOpen(false))}>
-              <ArrowLeft size={14} weight="bold" /> {full ? "Voltar" : info.label}
-            </button>
-            <h1>{detail.subject || "(sem assunto)"}</h1>
-            {threaded && actionsBar}
-            {threaded ? (
-              <div className="thread">
-                {thread.map((t) => {
-                  const d = t.id === detail.id ? detail : bodies[t.id];
-                  if (d && (t.id === detail.id || expanded.has(t.id))) {
-                    return <section key={t.id} className="thread-msg" data-current={t.id === detail.id || undefined}>{renderMessage(d, t.id !== detail.id)}</section>;
-                  }
-                  return (
-                    <button key={t.id} type="button" className="thread-fold" data-unread={!t.seen || undefined} aria-expanded="false"
-                      onClick={() => void toggleThreadMsg(t.id)}>
-                      <span className="avatar" aria-hidden>{(t.from_name || t.from_addr)[0]?.toUpperCase()}</span>
-                      <span className="fold-from">{t.from_name || t.from_addr}</span>
-                      <span className="fold-snip">{t.snippet}</span>
-                      <time className="fold-date">{shortDate(t.date)}</time>
-                    </button>
-                  );
-                })}
-              </div>
-            ) : renderMessage(detail, false)}
-          </article>
-        ) : (
-          <div className="reader-empty">
-            <p>{messages.length ? "Selecione uma mensagem" : ""}</p>
-          </div>
-        )}
-        {confirmDelete && (
-          <div className="confirm scrim" onMouseDown={(e) => { if (e.target === e.currentTarget && !deleting) setConfirmDelete(null); }}>
-            <div className="confirm-card" role="alertdialog" aria-labelledby="delete-title">
-              <p id="delete-title">{confirmDelete.length === 1 ? "Excluir de vez?" : `Excluir ${confirmDelete.length} mensagens de vez?`}</p>
-              <span>Não dá para desfazer.</span>
-              <div className="confirm-actions">
-                <button type="button" className="btn" onClick={() => setConfirmDelete(null)} disabled={deleting} autoFocus>Cancelar</button>
-                <button type="button" className="btn danger" onClick={deleteForever} disabled={deleting}>Excluir</button>
+          {confirmDelete && (
+            <div className="confirm scrim" onMouseDown={(e) => { if (e.target === e.currentTarget && !deleting) setConfirmDelete(null); }}>
+              <div className="confirm-card" role="alertdialog" aria-labelledby="delete-title">
+                <p id="delete-title">{confirmDelete.length === 1 ? "Excluir de vez?" : `Excluir ${confirmDelete.length} mensagens de vez?`}</p>
+                <span>Não dá para desfazer.</span>
+                <div className="confirm-actions">
+                  <button type="button" className="btn" onClick={() => setConfirmDelete(null)} disabled={deleting} autoFocus>Cancelar</button>
+                  <button type="button" className="btn danger" onClick={deleteForever} disabled={deleting}>Excluir</button>
+                </div>
               </div>
             </div>
-          </div>
-        )}
-      </main>
+          )}
+        </PageLayout>
+      </RouteLayout>
 
       {dialog && (
         <AccountDialog
@@ -1696,13 +1823,18 @@ export default function App() {
       {update && (
         <UpdateDialog update={update} onLater={() => { skip(update.version); setUpdate(null); }} />
       )}
+      {menu && <ContextMenu menu={menu} onClose={() => setMenu(null)} />}
+      {contact && (
+        <ContactCard c={contact} onClose={() => setContact(null)} onNew={(addr) => writeNew(addr)}
+          onSearch={(addr) => { setQuery(`de:${addr}`); if (window.matchMedia("(max-width: 720px)").matches) setReaderOpen(false); }} />
+      )}
       {!compose && !dialog && !settingsOpen && !update && (
-        <button className="fab mobile-only" onClick={writeNew} aria-label="Escrever">
+        <button className="fab mobile-only" onClick={() => writeNew()} aria-label="Escrever">
           <NotePencil size={22} weight="bold" />
         </button>
       )}
       <Toaster />
-      <div className="version" aria-hidden>v{build.version} · {build.builtAt}</div>
-    </div>
+      <footer className="statusbar"><div className="version" aria-hidden>v{build.version} · {build.builtAt}</div></footer>
+    </AppShell>
   );
 }
