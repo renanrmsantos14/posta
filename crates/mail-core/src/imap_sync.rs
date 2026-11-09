@@ -134,7 +134,17 @@ fn partial_broken(acc: &ImapAccount) -> bool {
 
 pub(crate) type ImapSession = Session<imap::Connection>;
 
+/// A recusa veio da autenticação? (`NO [AUTHENTICATIONFAILED]`; erro de rede não conta.)
+pub(crate) fn is_imap_auth_error(e: &crate::Error) -> bool {
+    matches!(e, crate::Error::Imap(imap::Error::No(_)))
+}
+
 pub(crate) fn connect(acc: &ImapAccount) -> Result<ImapSession> {
+    // Contas OAuth: token recusado (revogado ou vencido antes do previsto) = renova e tenta uma vez de novo.
+    crate::oauth::with_fresh_token_retry(acc, is_imap_auth_error, connect_once)
+}
+
+fn connect_once(acc: &ImapAccount) -> Result<ImapSession> {
     let mode = match acc.security {
         Security::Tls => ConnectionMode::Tls,
         Security::StartTls => ConnectionMode::StartTls,

@@ -57,13 +57,13 @@ SMTP com servidor e porta sugeridos pelo domínio (465 = TLS, outras = STARTTLS)
 
 ## Entrar com Google e Microsoft
 
-"Adicionar conta" tem os botões **Entrar com Google** e **Entrar com Microsoft**: login no navegador do sistema (Authorization Code + PKCE, redirect em loopback), sem senha de app. O mesmo IMAP/SMTP, autenticado por XOAUTH2; o refresh token fica no cofre do sistema e o access token é renovado ao expirar. Os aplicativos OAuth precisam estar registrados e embutidos no build (`POSTA_GOOGLE_CLIENT_ID`, `POSTA_GOOGLE_CLIENT_SECRET`, `POSTA_MS_CLIENT_ID`); sem eles os botões ficam desabilitados. Passo a passo e secrets do release em [`docs/oauth.md`](docs/oauth.md). Contas antigas (senha) continuam iguais.
+"Adicionar conta" tem os botões **Entrar com Google** e **Entrar com Microsoft**: login no navegador do sistema (Authorization Code + PKCE, redirect em loopback), sem senha de app. O mesmo IMAP/SMTP, autenticado por XOAUTH2; o refresh token fica no cofre do sistema e o access token é renovado ao expirar. Os Client IDs não ficam no código: colados em Configurações › Contas › Avançado ou embutidos no build (`POSTA_GOOGLE_CLIENT_ID`, `POSTA_GOOGLE_CLIENT_SECRET`, `POSTA_MS_CLIENT_ID`); sem eles os botões ficam desabilitados. Se o provedor encerrar o acesso (ex.: Gmail em modo teste, 7 dias), o aviso traz o botão "Entrar de novo". Passo a passo e secrets do release em [`docs/oauth-setup.md`](docs/oauth-setup.md). Contas antigas (senha) continuam iguais.
 
 ## Próximos passos
 
 1. ~~Responder, escrever e enviar (SMTP).~~ Feito.
 2. Arquivar e excluir; pastas além da caixa de entrada.
 3. ~~IMAP IDLE para chegada instantânea.~~ Feito.
-4. ~~OAuth (Google e Microsoft).~~ Feito, sem Graph/Gmail API: IMAP/SMTP com XOAUTH2. Falta validar com contas reais (veja `docs/oauth.md`).
+4. ~~OAuth (Google e Microsoft).~~ Feito, sem Graph/Gmail API: IMAP/SMTP com XOAUTH2. Falta validar com contas reais (veja `docs/oauth-setup.md`).
 5. ~~Android: APK, senha no Keystore.~~ Feito. Falta sincronizar em segundo plano (WorkManager, 15 min) e login OAuth no Android; as notificações só chegam com o app aberto (sem serviço em segundo plano).
 6. ~~Emails em HTML, exibidos em iframe isolado.~~ Feito: sem scripts, imagens remotas só com "Mostrar imagens", links no navegador do sistema.

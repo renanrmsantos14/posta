@@ -7,6 +7,21 @@ import type { ScheduledItem } from "./productivity";
 export type Security = "tls" | "starttls" | "plaintext";
 export type Provider = "google" | "microsoft";
 
+/** Client IDs do login Google/Microsoft digitados nas configurações (valem mais que os embutidos no build). */
+export interface OauthConfig {
+  google_id: string;
+  google_secret: string;
+  microsoft_id: string;
+}
+export interface OauthConfigView extends OauthConfig {
+  built_in_google: boolean;
+  built_in_microsoft: boolean;
+}
+
+export const PROVIDER_LABEL: Record<Provider, string> = { google: "Google", microsoft: "Microsoft" };
+/** Provedor do login da conta, ou null quando ela entra com senha. */
+export const providerOf = (a: Pick<Account, "auth">): Provider | null => (a.auth && a.auth !== "password" ? a.auth : null);
+
 export interface SmtpServer {
   host: string;
   port: number;
@@ -247,6 +262,9 @@ export const api = isTauri
         invoke<Account>("add_imap_account", { account: { ...account, id: "" } }),
       oauthProviders: () => invoke<Provider[]>("oauth_providers"),
       oauthLogin: (provider: Provider) => invoke<Account>("oauth_login", { provider }),
+      oauthRelogin: (id: string) => invoke<void>("oauth_relogin", { id }),
+      oauthConfigGet: () => invoke<OauthConfigView>("oauth_config_get"),
+      oauthConfigSet: (config: OauthConfig) => invoke<void>("oauth_config_set", { config }),
       folders: () => invoke<Role[]>("list_folders"),
       sync: () => invoke<SyncResult>("sync_inbox"),
       syncFolder: (view: View, keep: number) => {

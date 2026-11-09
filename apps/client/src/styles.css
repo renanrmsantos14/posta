@@ -1196,3 +1196,7 @@ button.scope-chip { cursor: pointer; }
 
 /* Arquivo do sistema solto no compositor vira anexo. */
 .composer[data-fileover] { box-shadow: inset 0 0 0 2px var(--blue); transition: box-shadow 140ms ease-out; }
+
+.oauth-advanced { margin-top: 16px; display: flex; flex-direction: column; gap: 10px; }
+.oauth-advanced > summary { cursor: pointer; font-size: 13px; color: var(--muted); }
+.oauth-advanced > .settings-sub { margin: 0; }

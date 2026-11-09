@@ -1,14 +1,14 @@
 //! Ponte entre a UI e o mail-core. Leituras vêm do SQLite local; rede só em sync e flags.
 
-use mail_core::oauth::{self, Provider};
 use mail_core::rules::{self, Candidate};
 use mail_core::{search, vacation};
-use mail_core::{imap_sync, outbox, Delta, Hub, Kind, Page, send, AuthMode, Contact, DraftRecord, FlushReport, IdleEnd, ImapAccount, MessageDetail, MessageSummary, MsgFlag, OpKind, Outgoing, OutboxItem, ReplyRef, Role, SendReport, Store, UserFolder};
+use mail_core::{imap_sync, outbox, Delta, Hub, Kind, Page, send, Contact, DraftRecord, FlushReport, IdleEnd, ImapAccount, MessageDetail, MessageSummary, MsgFlag, OpKind, Outgoing, OutboxItem, ReplyRef, Role, SendReport, Store, UserFolder};
 use serde::{Deserialize, Serialize};
 use std::{collections::{HashMap, HashSet}, fs, path::PathBuf, sync::{atomic::{AtomicBool, Ordering}, Mutex}, time::{Duration, Instant}};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_notification::NotificationExt;
 
+mod oauth_app;
 mod secret;
 #[cfg(desktop)]
 mod tray;
@@ -91,32 +91,6 @@ impl AppState {
             None => secret::get(id).map_err(|e| format!("senha de {id} no cofre do sistema: {e}"))?,
         };
         Ok(acc)
-    }
-
-    /// Access token válido: o da memória se ainda não vence em 60 s; senão renova com o refresh token do cofre.
-    fn access_token(&self, id: &str, p: Provider) -> CmdResult<String> {
-        // O cache fica travado durante a renovação: envio e sync simultâneos não gastam o mesmo refresh token (a Microsoft o rotaciona).
-        let mut cache = self.tokens.lock().unwrap();
-        if let Some((t, exp)) = cache.get(id) {
-            if *exp > Instant::now() + Duration::from_secs(60) {
-                return Ok(t.clone());
-            }
-        }
-        let client = oauth_client(p).ok_or_else(|| "login OAuth não configurado nesta versão do Posta".to_string())?;
-        let key = refresh_key(id);
-        let refresh = secret::get(&key)
-            .map_err(|e| format!("refresh token de {id} no cofre do sistema: {e}"))?;
-        let t = oauth::refresh(p, &client, &refresh).map_err(|e| format!("{e}. Entre de novo nesta conta."))?;
-        // A Microsoft rotaciona o refresh token a cada uso.
-        if let Some(new) = &t.refresh_token {
-            secret::set(&key, new).map_err(|e| format!("não consegui guardar o refresh token: {e}"))?;
-        }
-        cache.insert(id.to_string(), (t.access_token.clone(), Instant::now() + t.expires_in));
-        Ok(t.access_token)
-    }
-
-    fn cache_token(&self, id: &str, t: &oauth::Tokens) {
-        self.tokens.lock().unwrap().insert(id.to_string(), (t.access_token.clone(), Instant::now() + t.expires_in));
     }
 
     /// Grava a conta na lista e tenta descobrir as pastas (falha não impede adicionar; o próximo sync tenta de novo).
@@ -394,83 +368,6 @@ async fn add_imap_account(app: AppHandle, mut account: ImapAccount) -> CmdResult
         account.id = format!("{}@{}", account.username, account.host);
         secret::set(&account.id, &account.password)
             .map_err(|e| format!("não consegui guardar a senha no cofre do sistema: {e}"))?;
-        st.save_account(&account)?;
-        Ok(account)
-    })
-    .await?;
-    watch_inbox(&handle, account.id.clone());
-    Ok(account)
-}
-
-#[cfg(not(target_os = "android"))]
-fn open_browser(url: &str) -> CmdResult<()> {
-    open::that(url).map_err(|e| format!("não consegui abrir o navegador: {e}"))
-}
-
-/// No Android o login OAuth (redirect em 127.0.0.1) ainda não foi validado; use senha de app por enquanto.
-#[cfg(target_os = "android")]
-fn open_browser(_url: &str) -> CmdResult<()> {
-    Err("o login com Google e Microsoft ainda não está disponível no Android; use a senha de app".to_string())
-}
-
-fn refresh_key(id: &str) -> String {
-    format!("{id}:oauth-refresh")
-}
-
-/// Aplicativo OAuth embutido no build (`POSTA_*` na compilação); sem ele o login do provedor fica desligado.
-fn oauth_client(p: Provider) -> Option<oauth::Client> {
-    let (id, secret) = match p {
-        Provider::Google => (option_env!("POSTA_GOOGLE_CLIENT_ID"), option_env!("POSTA_GOOGLE_CLIENT_SECRET")),
-        Provider::Microsoft => (option_env!("POSTA_MS_CLIENT_ID"), None),
-    };
-    let id = id.filter(|s| !s.is_empty())?;
-    Some(oauth::Client { id: id.to_string(), secret: secret.map(str::to_string) })
-}
-
-/// Provedores com login OAuth disponível neste build.
-#[tauri::command]
-fn oauth_providers() -> Vec<Provider> {
-    [Provider::Google, Provider::Microsoft].into_iter().filter(|p| oauth_client(*p).is_some()).collect()
-}
-
-/// Entra com Google/Microsoft no navegador do sistema e adiciona a conta (até 3 min de espera).
-#[tauri::command]
-async fn oauth_login(app: AppHandle, provider: Provider) -> CmdResult<ImapAccount> {
-    let handle = app.clone();
-    let account = blocking(app, move |st| {
-        let client = oauth_client(provider).ok_or_else(|| "login OAuth não configurado nesta versão do Posta".to_string())?;
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").map_err(err)?;
-        let redirect = provider.redirect_uri(listener.local_addr().map_err(err)?.port());
-        let (verifier, challenge) = oauth::pkce_pair();
-        let state = oauth::random_token();
-        let url = oauth::authorization_url(provider, &client.id, &redirect, &challenge, &state);
-        open_browser(&url)?;
-        let code = oauth::wait_for_code(&listener, &state, Duration::from_secs(180)).map_err(err)?;
-        let tokens = oauth::exchange_code(provider, &client, &code, &redirect, &verifier).map_err(err)?;
-        let email = tokens.email.clone().ok_or_else(|| "o provedor não informou o email da conta".to_string())?;
-        let refresh = tokens.refresh_token.clone().ok_or_else(|| "o provedor não devolveu refresh token".to_string())?;
-
-        let (smtp_host, smtp_port, tls) = provider.smtp();
-        let host = provider.imap_host().to_string();
-        let account = ImapAccount {
-            id: format!("{email}@{host}"),
-            host,
-            port: 993,
-            security: mail_core::Security::Tls,
-            username: email,
-            name: None,
-            smtp: Some(mail_core::SmtpServer {
-                host: smtp_host.into(),
-                port: smtp_port,
-                security: if tls { mail_core::Security::Tls } else { mail_core::Security::StartTls },
-            }),
-            auth: AuthMode::from(provider),
-            password: tokens.access_token.clone(),
-        };
-        imap_sync::check_login(&account).map_err(err)?;
-        secret::set(&refresh_key(&account.id), &refresh)
-            .map_err(|e| format!("não consegui guardar o refresh token no cofre do sistema: {e}"))?;
-        st.cache_token(&account.id, &tokens);
         st.save_account(&account)?;
         Ok(account)
     })
@@ -1022,7 +919,7 @@ async fn remove_account(app: AppHandle, id: String) -> CmdResult<()> {
         };
         secret::delete(&id).map_err(|e| format!("não consegui apagar a senha do cofre do sistema: {e}"))?;
         if acc.auth.provider().is_some() {
-            secret::delete(&refresh_key(&id)).map_err(|e| format!("não consegui apagar o refresh token do cofre do sistema: {e}"))?;
+            oauth_app::delete_refresh_token(&id)?;
         }
         accounts.retain(|a| a.id != id);
         st.save_accounts(&accounts)?;
@@ -1689,6 +1586,7 @@ pub fn run() {
             app.manage(AppState::new(dir, store));
             #[cfg(desktop)]
             tray::init(app.handle());
+            oauth_app::install_refresher(app.handle());
             let st = app.state::<AppState>();
             for acc in st.accounts().unwrap_or_default() {
                 watch_inbox(app.handle(), acc.id);
@@ -1719,8 +1617,11 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             add_imap_account,
-            oauth_providers,
-            oauth_login,
+            oauth_app::oauth_providers,
+            oauth_app::oauth_login,
+            oauth_app::oauth_relogin,
+            oauth_app::oauth_config_get,
+            oauth_app::oauth_config_set,
             list_accounts,
             sync_inbox,
             list_folders,

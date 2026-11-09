@@ -135,13 +135,13 @@ export function AccountDialog({ onClose, onAdded }: Props) {
             const available = providers?.includes(provider) ?? false;
             return (
               <button key={provider} type="button" className="btn wide" disabled={!available || busy}
-                title={available ? undefined : "Indisponível nesta versão: faltam as credenciais do app (docs/oauth.md)."}
+                title={available ? undefined : "Indisponível nesta versão: faltam os Client IDs: Configurações > Contas > Avançado (docs/oauth-setup.md)."}
                 onClick={() => signIn(provider)}>
                 {oauth === provider ? <><span className="spinner" aria-hidden />Aguardando o navegador…</> : <><Icon size={18} weight="bold" />{label}</>}
               </button>
             );
           })}
-          {missing && <p className="hint">Entrar com Google ou Microsoft ainda não está habilitado nesta versão (veja docs/oauth.md).</p>}
+          {missing && <p className="hint">Entrar com Google ou Microsoft ainda não está habilitado: informe os Client IDs em Configurações › Contas › Avançado (veja docs/oauth-setup.md).</p>}
           <p className="oauth-or"><span>ou use email e senha</span></p>
         </div>
 
