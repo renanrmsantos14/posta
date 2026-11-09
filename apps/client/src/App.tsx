@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowBendUpLeft, ArrowBendDoubleUpLeft, ArrowBendUpRight, ArrowsClockwise, Archive, CaretUp, Copy, FolderOpen, FolderSimple, NotePencil, Star, Tag, Trash, EnvelopeSimple, EnvelopeSimpleOpen, FloppyDisk, PaperPlaneTilt, FileText, Paperclip, Printer, PushPin, Clock, X, ArrowLeft, ArrowsIn, ArrowsOut, Tray } from "@phosphor-icons/react";
-import { HtmlBody, hasRemoteImages } from "./HtmlBody";
+import { ArrowBendUpLeft, ArrowBendDoubleUpLeft, ArrowBendUpRight, ArrowsClockwise, Archive, Copy, FolderOpen, FolderSimple, NotePencil, Star, Tag, Trash, EnvelopeSimple, EnvelopeSimpleOpen, FloppyDisk, PaperPlaneTilt, FileText, Printer, PushPin, Clock, X } from "@phosphor-icons/react";
 import { api, isTauri, type Account, type Attachment, type MessageDetail, type MessageSummary, type OutAttachment, type OutboxItem, type Role, type Settings, type StoredDraft, type UnreadCounts, type UserFolder, type View } from "./api";
 import { AccountDialog } from "./AccountDialog";
 import { CategoryPicker, parseCategories } from "./Categories";
@@ -14,7 +13,6 @@ import { justSwiped, swipeProps, type SwipeAction, type SwipeDir } from "./swipe
 import { escapeHtml, textToHtml } from "./richtext";
 import { Toaster, toast } from "./toast";
 import { FOLDERS, LOCAL_VIEWS, SHOWS_UNREAD, folderTree, viewInfo, withStarred, type Dest, type FolderNode } from "./folders";
-import { fmtSize } from "./format";
 import { Resizer } from "./Resizer";
 import { SettingsPage } from "./SettingsPage";
 import { UpdateDialog } from "./UpdateDialog";
@@ -25,6 +23,8 @@ import { TopBar, type SearchScope } from "./TopBar";
 import { CommandBar } from "./CommandBar";
 import { buildCommands } from "./commands";
 import { Rail } from "./Rail";
+import { MobileActions } from "./MobileActions";
+import { ReaderPane, splitAddrs } from "./ReaderPane";
 import { MessageList, type Density, type ListHandle, type ListRow } from "./MessageList";
 import { PAGE, useMessageList } from "./useMessageList";
 import { ContextMenu, type MenuItem, type MenuState } from "./ContextMenu";
@@ -82,7 +82,6 @@ const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one :
 type Row = ListRow;
 
 /** Separa "A <a@x>, B <b@x>" em endereços (vírgulas dentro de aspas não separam). */
-const splitAddrs = (v: string) => v.split(/,(?=(?:[^"]*"[^"]*")*[^"]*$)/).map((x) => x.trim()).filter(Boolean);
 
 export default function App() {
   const [accounts, setAccounts] = useState<Account[] | null>(null);
@@ -1391,123 +1390,15 @@ export default function App() {
     toggleStar, togglePin, moveItems, snoozeItems, categoryItems, saveEml,
   });
   /** Barra de ações do leitor: só no celular (no desktop quem cuida disso é a faixa de comandos). */
-  const actionsBar = (
-    <div className="actions mobile-actions">
-      <button className="btn" onClick={() => void act("reply")}>
-        <ArrowBendUpLeft size={15} weight="bold" /> Responder
-      </button>
-      <button className="btn icon-only" onClick={() => void act("replyAll")} aria-label="Responder a todos" title="Responder a todos">
-        <ArrowBendDoubleUpLeft size={15} weight="bold" />
-      </button>
-      <button className="btn icon-only" onClick={() => void act("forward")} aria-label="Encaminhar" title="Encaminhar">
-        <ArrowBendUpRight size={15} weight="bold" />
-      </button>
-      {current && canArchive(current) && (
-        <button className="btn icon-only" onClick={() => archive(withThread([current]))}
-          aria-label={archiveTo(current) === "inbox" ? "Mover para a entrada" : "Arquivar"} title={archiveTo(current) === "inbox" ? "Mover para a entrada" : "Arquivar"}>
-          {archiveTo(current) === "inbox" ? <Tray size={15} weight="bold" /> : <Archive size={15} weight="bold" />}
-        </button>
-      )}
-      <button className="btn icon-only" onClick={() => current && remove(withThread([current]))} disabled={!current || !canTrash(current)}
-        aria-label={current?.role === "trash" ? "Excluir de vez" : "Excluir"} title={current && !canTrash(current) ? "Esta conta não tem Lixeira" : "Excluir"}>
-        <Trash size={15} weight="bold" />
-      </button>
-      {current && (
-        <>
-          <button className="btn icon-only star-btn" data-on={current.flagged || undefined} data-pop={popId === current.id || undefined}
-            onClick={() => toggleStar(withThread([current]))} aria-pressed={current.flagged}
-            aria-label={current.flagged ? "Tirar a estrela" : "Marcar com estrela"} title="Estrela">
-            <Star size={15} weight={current.flagged ? "fill" : "bold"} />
-          </button>
-          <button className="btn icon-only" onClick={() => markSeen(withThread([current]), false)}
-            aria-label="Marcar como não lida" title="Marcar como não lida">
-            <EnvelopeSimple size={15} weight="bold" />
-          </button>
-          <CategoryPicker className="btn icon-only" categories={categories} current={current.category ?? null} onPick={(id) => applyCategory(withThread([current]), id)} />
-          <WhenMenu className="btn icon-only" label="Adiar" onPick={(at) => snooze(withThread([current]), at)}><Clock size={15} weight="bold" /></WhenMenu>
-          <button className="btn icon-only star-btn" data-on={current.pinned || undefined} onClick={() => togglePin(withThread([current]))}
-            aria-pressed={!!current.pinned} aria-label={current.pinned ? "Desafixar" : "Fixar no topo"} title="Fixar no topo">
-            <PushPin size={15} weight={current.pinned ? "fill" : "bold"} />
-          </button>
-        </>
-      )}
-    </div>
+  const mobileActions = (
+    <MobileActions current={current} categories={categories} canArchive={!!current && canArchive(current)} canTrash={!!current && canTrash(current)}
+      toInbox={!!current && archiveTo(current) === "inbox"} inTrash={current?.role === "trash"} popped={!!current && popId === current.id}
+      onReply={() => void act("reply")} onReplyAll={() => void act("replyAll")} onForward={() => void act("forward")}
+      onArchive={() => current && archive(withThread([current]))} onTrash={() => current && remove(withThread([current]))}
+      onStar={() => current && toggleStar(withThread([current]))} onUnread={() => current && markSeen(withThread([current]), false)}
+      onPin={() => current && togglePin(withThread([current]))} onCategory={(id) => current && applyCategory(withThread([current]), id)}
+      onSnooze={(at) => current && snooze(withThread([current]), at)} />
   );
-
-  const recipients = (label: string, v: string) => {
-    const list = splitAddrs(v);
-    if (!list.length) return null;
-    return (
-      <div className="meta-to">
-        <span className="meta-to-label">{label}</span>
-        {list.slice(0, 6).map((a) => {
-          const c = parseContact(a);
-          return <button key={a} type="button" className="contact-chip" title={c.addr} onClick={(e) => openContact(e, a)}>{c.name || c.addr}</button>;
-        })}
-        {list.length > 6 && <span className="meta-more">+{list.length - 6}</span>}
-      </div>
-    );
-  };
-
-  /** Cabeçalho, anexos e corpo de uma mensagem. Em conversa, as anteriores trazem "Recolher" no lugar de "Expandir". */
-  function renderMessage(d: MessageDetail, fold: boolean) {
-    const sender = d.from_name ? `${d.from_name} <${d.from_addr}>` : d.from_addr;
-    return (
-      <>
-        <div className="meta">
-          <span className="avatar large" aria-hidden>{(d.from_name || d.from_addr)[0]?.toUpperCase()}</span>
-          <div className="meta-id">
-            <div className="meta-from"><button type="button" className="contact-link" onClick={(e) => openContact(e, sender)}>{d.from_name || d.from_addr}</button></div>
-            {d.from_name && <div className="meta-addr">{d.from_addr}</div>}
-          </div>
-          <time className="meta-date">{fmtLong.format(new Date(d.date * 1000))}</time>
-          {fold ? (
-            <button type="button" className="icon-btn expand-btn" onClick={() => void toggleThreadMsg(d.id)}
-              aria-label="Recolher mensagem" title="Recolher">
-              <CaretUp size={15} weight="bold" />
-            </button>
-          ) : (
-            <button type="button" className="icon-btn expand-btn" onClick={() => setFull(!full)}
-              aria-label={full ? "Sair da tela cheia" : "Expandir mensagem"} title={full ? "Voltar (Esc)" : "Expandir (clique duplo na lista)"}>
-              {full ? <ArrowsIn size={15} weight="bold" /> : <ArrowsOut size={15} weight="bold" />}
-            </button>
-          )}
-        </div>
-        {recipients("Para", d.to_addrs)}
-        {recipients("Cc", d.cc_addrs)}
-        {!threaded && d.id === selectedId && actionsBar}
-        {d.attachments.length > 0 && (
-          <ul className="attachments" aria-label="Anexos">
-            {d.attachments.map((a) => (
-              <li key={a.index}>
-                <button type="button" className="chip attachment" disabled={savingAtt === `${d.id}:${a.index}`}
-                  title={`Salvar e abrir ${a.name}`} onClick={() => void saveAttachment(d.id, a)}>
-                  <Paperclip size={14} weight="bold" aria-hidden />
-                  <span className="chip-name">{a.name}</span>
-                  <span className="chip-size">{fmtSize(a.size)}</span>
-                </button>
-              </li>
-            ))}
-          </ul>
-        )}
-        {d.body_html ? (
-          <>
-            {!imagesOk.has(d.id) && hasRemoteImages(d.body_html) && (
-              <div className="img-banner" role="status">
-                <span>Imagens remotas bloqueadas para proteger sua privacidade.</span>
-                <button type="button" className="btn" onClick={() => setImagesOk((s) => new Set(s).add(d.id))}>
-                  Mostrar imagens
-                </button>
-              </div>
-            )}
-            <HtmlBody html={d.body_html} remote={imagesOk.has(d.id)} onContext={readerContext} />
-          </>
-        ) : (
-          <div className="body">{d.body_text}</div>
-        )}
-      </>
-    );
-  }
 
   const inList = !showDrafts && !showScheduled;
   const folderTabs = (
@@ -1720,44 +1611,11 @@ export default function App() {
           </>
         )}
 
-        <PageLayout area="reader" as="main" aria-label="Leitura">
-          {detail && detail.id === selectedId ? (
-            <article className="message" data-instant={viaKeyboard || undefined}
-              onContextMenu={(e) => {
-                if ((e.target as Element).closest("a, button, input, textarea")) return;
-                e.preventDefault();
-                readerContext(e.clientX, e.clientY, window.getSelection()?.toString() ?? "");
-              }}>
-              <button className="btn ghost small back" onClick={() => (full ? setFull(false) : setReaderOpen(false))}>
-                <ArrowLeft size={14} weight="bold" /> {full ? "Voltar" : info.label}
-              </button>
-              <h1>{detail.subject || "(sem assunto)"}</h1>
-              {threaded && actionsBar}
-              {threaded ? (
-                <div className="thread">
-                  {thread.map((t) => {
-                    const d = t.id === detail.id ? detail : bodies[t.id];
-                    if (d && (t.id === detail.id || expanded.has(t.id))) {
-                      return <section key={t.id} className="thread-msg" data-current={t.id === detail.id || undefined}>{renderMessage(d, t.id !== detail.id)}</section>;
-                    }
-                    return (
-                      <button key={t.id} type="button" className="thread-fold" data-unread={!t.seen || undefined} aria-expanded="false"
-                        onClick={() => void toggleThreadMsg(t.id)}>
-                        <span className="avatar" aria-hidden>{(t.from_name || t.from_addr)[0]?.toUpperCase()}</span>
-                        <span className="fold-from">{t.from_name || t.from_addr}</span>
-                        <span className="fold-snip">{t.snippet}</span>
-                        <time className="fold-date">{shortDate(t.date)}</time>
-                      </button>
-                    );
-                  })}
-                </div>
-              ) : renderMessage(detail, false)}
-            </article>
-          ) : (
-            <div className="reader-empty">
-              <p>{messages.length ? "Selecione uma mensagem" : ""}</p>
-            </div>
-          )}
+        <ReaderPane detail={detail && detail.id === selectedId ? detail : null} selectedId={selectedId} threaded={threaded} thread={thread} bodies={bodies}
+          expanded={expanded} full={full} viaKeyboard={viaKeyboard} folderLabel={info.label} hasMessages={messages.length > 0} imagesOk={imagesOk}
+          savingAtt={savingAtt} mobileActions={mobileActions} onFull={setFull} onBack={() => (full ? setFull(false) : setReaderOpen(false))}
+          onContact={openContact} onReaderContext={readerContext} onToggleThread={(id) => void toggleThreadMsg(id)}
+          onShowImages={(id) => setImagesOk((s) => new Set(s).add(id))} onSaveAttachment={(id, att) => void saveAttachment(id, att)}>
           {confirmDelete && (
             <div className="confirm scrim" onMouseDown={(e) => { if (e.target === e.currentTarget && !deleting) setConfirmDelete(null); }}>
               <div className="confirm-card" role="alertdialog" aria-labelledby="delete-title">
@@ -1770,7 +1628,7 @@ export default function App() {
               </div>
             </div>
           )}
-        </PageLayout>
+        </ReaderPane>
       </RouteLayout>
 
       {dialog && (
