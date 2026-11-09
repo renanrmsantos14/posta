@@ -1,5 +1,5 @@
 // Dados de exemplo para rodar a UI no navegador (pnpm dev), sem Tauri e sem rede.
-import type { Account, Contact, Draft, FlushReport, OutboxItem, QueueStatus, Provider, MessageDetail, MessageSummary, NewAccount, OutAttachment, Role, ScheduledEdit, SendReport, Settings, StoredDraft, SyncResult, UnreadCounts, UserFolder, View } from "./api";
+import type { Account, Contact, Draft, FlushReport, MailDelta, MessagePage, OutboxItem, QueueStatus, Provider, MessageDetail, MessageSummary, NewAccount, OutAttachment, Role, ScheduledEdit, SendReport, Settings, StoredDraft, SyncResult, UnreadCounts, UserFolder, View } from "./api";
 import { parseRules, type ScheduledItem } from "./productivity";
 import { parseBox, parseCat } from "./views";
 
@@ -25,7 +25,7 @@ let accounts: Account[] = [
 ];
 
 /** `thread_count` é calculado ao responder; `thread_id` 0 = mensagem sem fio. `box`: nome completo da pasta do usuário (então `role` é null). */
-type MockMessage = Omit<MessageDetail, "thread_count"> & { role: Role | null; box?: string; snoozeUntil?: number; woke?: boolean };
+type MockMessage = Omit<MessageDetail, "thread_count"> & { role: Role | null; box?: string; snoozeUntil?: number; woke?: boolean; noBody?: boolean };
 
 let messages: MockMessage[] = Array.from({ length: 60 }, (_, i) => {
   const [from_name, from_addr, subject, body, hoursAgo] = seed[i % seed.length];
@@ -153,14 +153,14 @@ const withCount = <T extends MockMessage>(m: T) => ({
   thread_count: m.thread_id ? messages.filter((x) => x.account === m.account && x.thread_id === m.thread_id).length : 1,
 });
 const summary = (m: MockMessage): MessageSummary => {
-  const { box: _x, snoozeUntil: _s, woke: _w, body_text: _b, body_html: _h, reply_addr: _r, attachments: _a, to_addrs: _t, cc_addrs: _c, ...s } = withCount(m);
+  const { box: _x, snoozeUntil: _s, woke: _w, noBody: _n, body_text: _b, body_html: _h, reply_addr: _r, attachments: _a, to_addrs: _t, cc_addrs: _c, ...s } = withCount(m);
   return s;
 };
 /** Pastas virtuais: "Com estrela" (fora de Lixeira e Spam), "Todas as caixas" (a Entrada de todas as contas), pastas do usuário e categorias. */
 const snoozed = (m: MockMessage) => (m.snoozeUntil ?? 0) > Math.floor(Date.now() / 1000);
 /** Ordem da lista: fixadas primeiro; depois a data (ou a hora em que a adiada voltou). */
 const topKey = (m: MockMessage) => Math.max(m.date, m.snoozeUntil ?? 0);
-const byTop = (a: MockMessage, b: MockMessage) => Number(!!b.pinned) - Number(!!a.pinned) || topKey(b) - topKey(a);
+const byTop = (a: MockMessage, b: MockMessage) => Number(!!b.pinned) - Number(!!a.pinned) || topKey(b) - topKey(a) || b.id - a.id;
 /** Adiadas que venceram voltam como não lidas. */
 const wake = () => {
   for (const m of messages) if (m.snoozeUntil && !snoozed(m) && !m.woke) { m.woke = true; m.seen = false; }
@@ -173,6 +173,24 @@ const inView = (m: MockMessage, view: View) => {
   if (cat) return m.category === cat && m.role !== "trash" && m.role !== "junk";
   return view === "starred" ? m.flagged && m.role !== "trash" && m.role !== "junk" : m.role === (view === "all" ? "inbox" : view);
 };
+/**
+ * Pasta ordenada para a paginação. Reordenar 50 mil mensagens a cada página custaria mais que o app inteiro, então guarda o
+ * resultado e só refaz quando a assinatura (quem está na pasta e quem está fixada) muda.
+ */
+let viewCache: { ref: MockMessage[]; folder: Role; sig: string; list: MockMessage[] } | null = null;
+function sortedView(folder: Role): MockMessage[] {
+  let n = 0, sum = 0, pins = 0, pinSum = 0;
+  for (const m of messages) {
+    if (!inView(m, folder)) continue;
+    n++; sum += m.id;
+    if (m.pinned) { pins++; pinSum += m.id; }
+  }
+  const sig = `${n}:${sum}:${pins}:${pinSum}`;
+  if (viewCache && viewCache.ref === messages && viewCache.folder === folder && viewCache.sig === sig) return viewCache.list;
+  const list = messages.filter((m) => inView(m, folder)).sort(byTop);
+  viewCache = { ref: messages, folder, sig, list };
+  return list;
+}
 /** Mesmo vocabulário do núcleo: de:, para:, assunto:, tem:anexo, é:não-lida, antes:, depois:; o resto é texto livre. */
 function matchFilters(m: MockMessage, query: string): boolean {
   const text: string[] = [];
@@ -245,11 +263,34 @@ let outbox: OutboxItem[] = [];
       subject: `${subject} #${i + 1}`, date: now - Math.round(i * (3 * 365 * 24 * 60 * 60 / Math.max(n, 1))),
       snippet: body.slice(0, 200), body_text: body, body_html: "", seen: i % 5 !== 0, flagged: i % 11 === 0,
       reply_addr: from_addr, attachments: [], to_addrs: "renan@exemplo.com", cc_addrs: "", role: "inbox", thread_id: 0,
+      noBody: i % 10 === 7,
     };
   });
   messages = [...base, ...gen];
   window.dispatchEvent(new Event("mock-changed"));
 };
+/** Chamadas de leitura da lista, para conferir no console/teste que a UI pagina e aplica delta em vez de recarregar tudo. */
+const calls = { listPage: 0, list: 0, summaries: 0 };
+(window as unknown as { __mockCalls: typeof calls }).__mockCalls = calls;
+/** Equivalente ao evento `mail-delta` do backend: a UI aplica por id em vez de recarregar. */
+const emitDelta = (d: Partial<MailDelta>) =>
+  window.dispatchEvent(new CustomEvent<MailDelta>("mock-delta", { detail: { account: accounts[0].id, mailbox: "INBOX", inserted: [], changed: [], removed: [], ...d } }));
+/** Chega `n` emails novos na Entrada (mais novos que tudo) e avisa por delta. Console: `__mockArrive(3)`. */
+const arrive = (n = 1): number[] => {
+  const top = Math.max(...messages.map((m) => m.id), 0);
+  const t = Math.floor(Date.now() / 1000);
+  const fresh: MockMessage[] = Array.from({ length: n }, (_, i) => ({
+    id: top + 1 + i, account: accounts[0].id, uid: top + 1 + i, from_name: "Marina Duarte", from_addr: "marina@lumenarquitetura.com.br",
+    subject: "Orçamento aprovado", date: t + i, snippet: "Tudo certo com o orçamento. Podemos assinar na segunda?",
+    body_text: "Tudo certo com o orçamento. Podemos assinar na segunda?\n\nMarina", body_html: "", seen: false, flagged: false,
+    reply_addr: "marina@lumenarquitetura.com.br", attachments: [], to_addrs: "renan@exemplo.com", cc_addrs: "", role: "inbox", thread_id: 0,
+  }));
+  messages = [...fresh, ...messages];
+  const ids = fresh.map((m) => m.id);
+  emitDelta({ inserted: ids });
+  return ids;
+};
+(window as unknown as { __mockArrive: (n?: number) => number[] }).__mockArrive = arrive;
 const queue = (n: number) => { if (offline) pendingOps += n; };
 let syncCount = 0;
 
@@ -398,21 +439,42 @@ export const mockApi = {
     if (offline) return { fetched: 0, total: 0, errors: [], skipped: false, offline: true };
     syncCount += 1;
     if (syncCount % 3 !== 2) return { fetched: 0, total: messages.length, errors: [], skipped: false, offline: false };
-    const id = messages.length + 1;
-    messages = [
-      {
-        id, account: accounts[0].id, uid: id, from_name: "Marina Duarte", from_addr: "marina@lumenarquitetura.com.br",
-        subject: "Orçamento aprovado", date: Math.floor(Date.now() / 1000),
-        snippet: "Tudo certo com o orçamento. Podemos assinar na segunda?", body_text: "Tudo certo com o orçamento. Podemos assinar na segunda?\n\nMarina", body_html: "", seen: false, flagged: false,
-        reply_addr: "marina@lumenarquitetura.com.br", attachments: [], to_addrs: "renan@exemplo.com", cc_addrs: "", role: "inbox", thread_id: 0,
-      },
-      ...messages,
-    ];
+    arrive(1);
     return { fetched: 1, total: messages.length, errors: [], skipped: false, offline: false };
   },
   async list(view: View, limit: number, offset: number): Promise<MessageSummary[]> {
+    calls.list++;
     wake();
     return messages.filter((m) => inView(m, view)).sort(byTop).slice(offset, offset + limit).map(summary);
+  },
+  /** Cursor opaco como o do backend: `fixada:chave:id` da última linha entregue. */
+  async listPage(folder: Role, cursor: string | null, limit: number): Promise<MessagePage> {
+    calls.listPage++;
+    wake();
+    const all = sortedView(folder);
+    let from = 0;
+    if (cursor) {
+      const [p, k, id] = cursor.split(":").map(Number);
+      if ([p, k, id].some(Number.isNaN)) throw "cursor inválido";
+      // Busca binária: a lista está ordenada por (fixada, chave, id) decrescentes.
+      let lo = 0, hi = all.length;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        const m = all[mid];
+        const after = Number(!!m.pinned) < p || (Number(!!m.pinned) === p && (topKey(m) < k || (topKey(m) === k && m.id < id)));
+        if (after) hi = mid; else lo = mid + 1;
+      }
+      from = lo;
+    }
+    const items = all.slice(from, from + limit);
+    const last = items[items.length - 1];
+    const next = last && from + limit < all.length ? `${Number(!!last.pinned)}:${topKey(last)}:${last.id}` : null;
+    return { items: items.map(summary), next };
+  },
+  async summaries(ids: number[]): Promise<MessageSummary[]> {
+    calls.summaries++;
+    const want = new Set(ids);
+    return messages.filter((m) => want.has(m.id) && !snoozed(m)).sort(byTop).map(summary);
   },
   async search(query: string, view: View): Promise<MessageSummary[]> {
     const terms = norm(query).split(/\s+/).filter(Boolean);
@@ -486,6 +548,10 @@ export const mockApi = {
   async open(id: number): Promise<MessageDetail | null> {
     const m = messages.find((x) => x.id === id);
     if (!m) return null;
+    if (m.noBody) {
+      if (offline) throw "Sem conexão: o corpo desta mensagem ainda não foi baixado.";
+      m.noBody = false;
+    }
     m.seen = true;
     return withCount(m);
   },

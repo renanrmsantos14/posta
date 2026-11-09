@@ -1,6 +1,6 @@
 // Painel de leitura: cabeçalho, destinatários (com cartão de contato), anexos, corpo (HtmlBody) e a conversa dobrável.
 import type { ReactNode } from "react";
-import { ArrowLeft, ArrowsIn, ArrowsOut, CaretUp, Paperclip } from "@phosphor-icons/react";
+import { ArrowLeft, ArrowsIn, ArrowsOut, CaretUp, Paperclip, WarningCircle, WifiSlash } from "@phosphor-icons/react";
 import { HtmlBody, hasRemoteImages } from "./HtmlBody";
 import { PageLayout } from "./layout/primitives";
 import { parseContact } from "./ContactCard";
@@ -13,6 +13,9 @@ export const splitAddrs = (v: string) => v.split(/,(?=(?:[^"]*"[^"]*")*[^"]*$)/)
 export interface ReaderPaneProps {
   /** Mensagem aberta (já filtrada pela seleção); null mostra o painel vazio. */
   detail: MessageDetail | null;
+  /** Motivo de a mensagem selecionada não ter aberto; mostra um estado vazio com "Tentar de novo". */
+  error: string | null;
+  onRetry: () => void;
   selectedId: number | null;
   threaded: boolean;
   thread: MessageSummary[];
@@ -146,6 +149,16 @@ export function ReaderPane(p: ReaderPaneProps) {
               </div>
             ) : <MessageView d={p.detail} fold={false} p={p} />}
           </article>
+        ) : p.error ? (
+          <div className="reader-empty reader-error" role="alert">
+            <button className="btn ghost small back" onClick={() => p.onBack()}>
+              <ArrowLeft size={14} weight="bold" /> {p.full ? "Voltar" : p.folderLabel}
+            </button>
+            {p.error.startsWith("Sem conexão") ? <WifiSlash size={32} weight="duotone" aria-hidden /> : <WarningCircle size={32} weight="duotone" aria-hidden />}
+            <h2>Não foi possível abrir a mensagem</h2>
+            <p>{p.error}</p>
+            <button type="button" className="btn" onClick={() => p.onRetry()} autoFocus>Tentar de novo</button>
+          </div>
         ) : (
           <div className="reader-empty">
             <p>{p.hasMessages ? "Selecione uma mensagem" : ""}</p>

@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowBendUpLeft, ArrowBendDoubleUpLeft, ArrowBendUpRight, ArrowsClockwise, Archive, Copy, FolderOpen, FolderSimple, NotePencil, Star, Tag, Trash, EnvelopeSimple, EnvelopeSimpleOpen, FloppyDisk, PaperPlaneTilt, Printer, PushPin, Clock } from "@phosphor-icons/react";
-import { api, isTauri, type Account, type Attachment, type MessageDetail, type MessageSummary, type OutAttachment, type OutboxItem, type Role, type Settings, type StoredDraft, type UnreadCounts, type UserFolder, type View } from "./api";
+import { api, isTauri, type Account, type Attachment, type MailDelta, type MessageDetail, type MessageSummary, type OutAttachment, type OutboxItem, type Role, type Settings, type StoredDraft, type UnreadCounts, type UserFolder, type View } from "./api";
 import { AccountDialog } from "./AccountDialog";
 import { parseCategories } from "./Categories";
 import { FolderDialog, type FolderDialogState } from "./FolderDialog";
 import { OutboxPane, useQueue } from "./Offline";
-import { boxView, catView, parseBox, parseCat } from "./views";
+import { boxView, catView, parseBox, parseCat, roleOf } from "./views";
 import { Composer, type ComposeInit } from "./Composer";
 import { aliasFor, aliasLines, addrOf } from "./aliases";
 import { justSwiped, swipeProps, type SwipeAction, type SwipeDir } from "./swipe";
@@ -43,6 +43,8 @@ const SYNC_EVERY_MS = 300_000;
 const KEEP = 1000;
 const KEEP_STEP = 500;
 const UNDO_MS = 4000;
+/** Depois de um `mail-delta`, o `mail-changed` que o acompanha não recarrega a lista por este tempo. */
+const DELTA_GRACE_MS = 2000;
 /** Quantos emails abertos ficam em memória para reabrir na hora. */
 const DETAIL_CACHE = 50;
 /** Larguras padrão e limites das colunas (px); o resto da janela fica com a leitura. */
@@ -88,6 +90,8 @@ export default function App() {
   const [query, setQuery] = useState("");
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [detail, setDetail] = useState<MessageDetail | null>(null);
+  /** Falha ao abrir a mensagem selecionada (ex.: sem rede e sem o corpo baixado): o leitor mostra o motivo e "Tentar de novo". */
+  const [openError, setOpenError] = useState<{ id: number; msg: string } | null>(null);
   /** Seleção por teclado troca o conteúdo sem animação. */
   const [viaKeyboard, setViaKeyboard] = useState(false);
   /** Mensagens cujas imagens remotas o usuário liberou (só nesta sessão). */
@@ -170,7 +174,7 @@ export default function App() {
   const refreshCounts = useCallback(() => {
     api.unreadCounts().then(setCounts).catch(() => {});
   }, []);
-  const { messages, setMessages, results, setResults, hasMore, freshIds, reload, loadPage, resetKnown } = useMessageList(folder, pendingMove, refreshCounts);
+  const { messages, setMessages, results, setResults, hasMore, freshIds, reload, loadPage, applyDelta, resetKnown } = useMessageList(folder, pendingMove, refreshCounts);
   /** Tamanho atual da lista, para os "Desfazer" recarregarem sem encolher a janela. */
   const listLen = useRef(0);
   listLen.current = messages.length;
@@ -405,6 +409,8 @@ export default function App() {
     api.folders().then((r) => setFolderList(withStarred(r))).catch(() => {});
     refreshScheduled();
     if (!LOCAL_VIEWS.includes(folderRef.current)) return;
+    // O `mail-delta` que vem junto já atualizou a lista por id: só recarrega tudo quando ele não veio (fallback).
+    if (Date.now() - lastDelta.current < DELTA_GRACE_MS) return void (fetched && toast(plural(fetched, "mensagem nova", "mensagens novas"), "success"));
     await reload(messages.length);
     if (fetched) toast(plural(fetched, "mensagem nova", "mensagens novas"), "success");
   };
@@ -414,6 +420,28 @@ export default function App() {
     let alive = true;
     import("@tauri-apps/api/event")
       .then(({ listen }) => listen<number>("mail-changed", (e) => { onMailChanged.current(e.payload).catch(() => {}); }))
+      .then((un) => (alive ? (off = un) : un()));
+    return () => { alive = false; off?.(); };
+  }, []);
+
+  // `mail-delta`: aplica inserções, mudanças e remoções por id (no navegador, o mock dispara `mock-delta`).
+  const lastDelta = useRef(0);
+  const onDelta = useRef((_d: MailDelta) => {});
+  onDelta.current = (d: MailDelta) => {
+    if (!roleOf(folderRef.current)) return;
+    lastDelta.current = Date.now();
+    applyDelta(d).catch(() => { lastDelta.current = 0; reload(listLen.current).catch(() => {}); });
+  };
+  useEffect(() => {
+    if (!isTauri) {
+      const on = (e: Event) => onDelta.current((e as CustomEvent<MailDelta>).detail);
+      window.addEventListener("mock-delta", on);
+      return () => window.removeEventListener("mock-delta", on);
+    }
+    let off: (() => void) | undefined;
+    let alive = true;
+    import("@tauri-apps/api/event")
+      .then(({ listen }) => listen<MailDelta>("mail-delta", (e) => onDelta.current(e.payload)))
       .then((un) => (alive ? (off = un) : un()));
     return () => { alive = false; off?.(); };
   }, []);
@@ -518,6 +546,7 @@ export default function App() {
     setSelectedId(id);
     selectedRef.current = id;
     setReaderOpen(true);
+    setOpenError(null);
     const hit = detailCache.current.get(id);
     let d: MessageDetail | null;
     if (hit) {
@@ -527,7 +556,12 @@ export default function App() {
       const sum = rowOf.get(id)?.members.find((m) => m.id === id);
       if (sum && !sum.seen) void markSeen([sum], true, false);
     } else {
-      d = await api.open(id);
+      try {
+        d = await api.open(id);
+      } catch (e) {
+        if (selectedRef.current === id) { setDetail(null); setOpenError({ id, msg: String(e) }); }
+        return;
+      }
       if (selectedRef.current !== id) return;
       setDetail(d);
       if (d) { remember(d); markLocalSeen(id); }
@@ -1552,7 +1586,8 @@ export default function App() {
           </>
         )}
 
-        <ReaderPane detail={detail && detail.id === selectedId ? detail : null} selectedId={selectedId} threaded={threaded} thread={thread} bodies={bodies}
+        <ReaderPane detail={detail && detail.id === selectedId ? detail : null} error={openError && openError.id === selectedId ? openError.msg : null}
+          onRetry={() => selectedId !== null && void select(selectedId)} selectedId={selectedId} threaded={threaded} thread={thread} bodies={bodies}
           expanded={expanded} full={full} viaKeyboard={viaKeyboard} folderLabel={info.label} hasMessages={messages.length > 0} imagesOk={imagesOk}
           savingAtt={savingAtt} mobileActions={mobileActions} onFull={setFull} onBack={() => (full ? setFull(false) : setReaderOpen(false))}
           onContact={openContact} onReaderContext={readerContext} onToggleThread={(id) => void toggleThreadMsg(id)}

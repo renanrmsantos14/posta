@@ -367,6 +367,10 @@ kbd {
 /* ---------- Leitura ---------- */
 .reader { min-width: 0; overflow-y: auto; background: var(--surface); }
 .reader-empty { display: grid; place-items: center; height: 100%; color: var(--faint); }
+.reader-error { position: relative; align-content: center; justify-items: center; gap: 8px; padding: 32px; text-align: center; color: var(--muted); }
+.reader-error h2 { margin: 4px 0 0; font-size: 15px; font-weight: 600; color: var(--text); }
+.reader-error p { margin: 0 0 8px; max-width: 360px; line-height: 1.45; }
+.reader-error .back { justify-self: start; align-self: start; position: absolute; top: 16px; left: 16px; }
 .message {
   max-width: 720px;
   margin: 0 auto;

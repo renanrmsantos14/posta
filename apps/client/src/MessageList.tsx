@@ -149,7 +149,16 @@ export const MessageList = forwardRef<ListHandle, Props>(function MessageList(p,
     if (el && el.scrollTop > Math.max(0, total - el.clientHeight)) { el.scrollTop = Math.max(0, total - el.clientHeight); setScroll(el.scrollTop); }
   }, [total]);
 
+  // Poucas linhas para a altura da janela (aba Foco filtrando, exclusões): sem rolagem não há evento, então pede a próxima página.
+  useEffect(() => {
+    const el = box.current;
+    if (el && total - el.clientHeight < 600) p.onNearEnd();
+  }, [total, height]);
+
   const zeroId = focusId ?? p.selectedId ?? (items.find((i) => i.kind === "row") as Extract<Item, { kind: "row" }> | undefined)?.row.head.id ?? null;
+
+  // Sem a linha de foco renderizada (rolou para longe), a própria lista precisa ser alcançável pelo teclado.
+  const zeroVisible = visible.some((it) => it.kind === "row" && it.row.head.id === zeroId);
 
   const hoverItem = hover !== null ? byId.get(hover) : undefined;
   const selecting = p.checked.size > 0;
@@ -164,7 +173,7 @@ export const MessageList = forwardRef<ListHandle, Props>(function MessageList(p,
         else if (!t.closest(".row-tools")) setHover(null);
       }}
       onPointerLeave={() => setHover(null)}>
-    <div ref={box} className="list" role="listbox" aria-label={p.label} aria-multiselectable data-density={p.density}
+    <div ref={box} className="list" role="listbox" aria-label={p.label} aria-multiselectable tabIndex={zeroVisible ? undefined : 0} data-density={p.density}
       data-intro={p.intro || undefined} data-selecting={selecting || undefined}
       onScroll={onScroll}>
       <div className="list-spacer" style={{ height: total }} role="presentation">
