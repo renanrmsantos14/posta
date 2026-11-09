@@ -7,8 +7,10 @@ use serde::{Deserialize, Serialize};
 use std::{collections::{HashMap, HashSet}, fs, path::PathBuf, sync::{atomic::{AtomicBool, Ordering}, Mutex}, time::{Duration, Instant}};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_notification::NotificationExt;
+use open_target::OpenTarget;
 
 mod oauth_app;
+mod open_target;
 mod secret;
 #[cfg(desktop)]
 mod tray;
@@ -34,6 +36,8 @@ struct AppState {
     hub: Hub,
     /// Contas com pré-busca de corpos em andamento.
     prefetching: Mutex<HashSet<String>>,
+    /// Destino do último clique numa notificação, até a UI buscar (`take_pending_open`).
+    pending_open: Mutex<Option<OpenTarget>>,
 }
 
 impl AppState {
@@ -49,6 +53,7 @@ impl AppState {
             flushing: Mutex::new(()),
             hub: Hub::new(),
             prefetching: Mutex::new(HashSet::new()),
+            pending_open: Mutex::new(None),
         }
     }
 }
@@ -279,13 +284,15 @@ fn notify_new(app: &AppHandle, st: &AppState, account: &str, fetched: usize) {
     let Ok(new) = store.newest_unseen(account, "INBOX", fetched.min(50) as u32) else { return };
     let n = app.notification();
     if new.len() > 3 {
-        n.builder().title("Posta").body(format!("{} mensagens novas em {account}", new.len())).show().ok();
+        let target = OpenTarget::folder(account, "inbox");
+        n.builder().title("Posta").body(format!("{} mensagens novas em {account}", new.len())).extra(open_target::EXTRA, target).show().ok();
         return;
     }
     for m in new {
         let who = if m.from_name.is_empty() { m.from_addr } else { m.from_name };
         let subject = if m.subject.is_empty() { "(sem assunto)".to_string() } else { m.subject };
-        n.builder().title(who).body(subject).show().ok();
+        let target = OpenTarget::message(account, "inbox", m.id);
+        n.builder().title(who).body(subject).extra(open_target::EXTRA, target).show().ok();
     }
 }
 
@@ -1474,6 +1481,7 @@ pub fn run() {
             app.manage(AppState::new(dir, store));
             #[cfg(desktop)]
             tray::init(app.handle());
+            open_target::init(app.handle());
             oauth_app::install_refresher(app.handle());
             let st = app.state::<AppState>();
             for acc in st.accounts().unwrap_or_default() {
@@ -1554,6 +1562,7 @@ pub fn run() {
             get_settings,
             set_setting,
             set_focused,
+            open_target::take_pending_open,
             queue_status,
             flush_queue,
             list_outbox,
