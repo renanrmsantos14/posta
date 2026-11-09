@@ -1150,3 +1150,7 @@ button.scope-chip { cursor: pointer; }
   .top-menu { position: fixed; left: 8px; right: 8px; top: 56px; width: auto; }
   .searchbox .search kbd { display: none; }
 }
+
+.oauth-advanced { margin-top: 16px; display: flex; flex-direction: column; gap: 10px; }
+.oauth-advanced > summary { cursor: pointer; font-size: 13px; color: var(--muted); }
+.oauth-advanced > .settings-sub { margin: 0; }

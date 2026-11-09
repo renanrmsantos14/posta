@@ -1,13 +1,14 @@
 // Configurações em página inteira: menu de seções à esquerda; voltar (botão ou Esc) devolve a caixa de entrada.
 import { useEffect, useState } from "react";
 import { AirplaneTilt, ArrowLeft, ArrowsClockwise, Bell, ChatTeardropText, FunnelSimple, Gauge, Keyboard, PencilSimple, Plus, Tag, Trash, UserCircle, Layout, Desktop, WifiSlash, X } from "@phosphor-icons/react";
-import { api, type Account, type Settings } from "./api";
+import { api, providerOf, PROVIDER_LABEL, type Account, type Settings } from "./api";
+import { OauthAdvanced } from "./OauthSettings";
 import { AccountEditDialog } from "./AccountEditDialog";
 import { RulesSection, TemplatesSection, VacationSection } from "./ProductivitySettings";
 import { MAX_CATEGORIES, PALETTE, parseCategories } from "./Categories";
 import { autoCheck, checkUpdate, setAutoCheck, type Update } from "./updater";
 import { aliasLines } from "./aliases";
-import { toast } from "./toast";
+import { reauthenticate, toast } from "./toast";
 import build from "./version.json";
 
 interface Props {
@@ -188,13 +189,16 @@ export function SettingsPage({ accounts, settings, onSetting, onRemoveAccount, o
                 <div key={a.id} className="settings-row">
                   <div className="settings-account">
                     <div className="settings-strong">{a.name ? `${a.name} · ${a.username}` : a.username}</div>
-                    <div className="settings-sub">{a.host}</div>
+                    <div className="settings-sub">{providerOf(a) ? `Conta ${PROVIDER_LABEL[providerOf(a)!]} · ` : ""}{a.host}</div>
                     <label className="settings-sub alias-field">Remetentes alternativos (um por linha: <code>Nome &lt;endereço&gt;</code> ou só o endereço)
                       <textarea className="signature-input" rows={Math.max(2, aliasLines(settings[`aliases:${a.id}`]).length + 1)} aria-label={`Remetentes alternativos de ${a.username}`}
                         placeholder="reservas@exemplo.com" value={settings[`aliases:${a.id}`] ?? ""}
                         onChange={(e) => onSetting(`aliases:${a.id}`, e.target.value)} />
                     </label>
                   </div>
+                  {providerOf(a) && (
+                    <button type="button" className="btn" onClick={() => reauthenticate(a.id)}>Entrar de novo</button>
+                  )}
                   <button type="button" className="btn" onClick={() => setEditing(a)}>
                     <PencilSimple size={15} weight="bold" /> Editar
                   </button>
@@ -206,6 +210,7 @@ export function SettingsPage({ accounts, settings, onSetting, onRemoveAccount, o
               <div className="settings-row">
                 <button type="button" className="btn" onClick={onAddAccount}><Plus size={15} weight="bold" /> Adicionar conta</button>
               </div>
+              <OauthAdvanced />
             </section>
           )}
 
