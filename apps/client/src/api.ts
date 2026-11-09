@@ -22,6 +22,18 @@ export interface Account {
   auth?: "password" | Provider;
 }
 
+/** Servidores detectados pelo email (tabela, ISPDB, MX ou palpite). */
+export interface Detected {
+  /** "Gmail"; vazio quando foi só um palpite. */
+  provider: string;
+  source: "tabela" | "ispdb" | "mx" | "palpite";
+  imap: SmtpServer;
+  smtp: SmtpServer;
+  /** Login a usar: email inteiro ou só a parte local. */
+  username: string;
+  hint: { text: string; url: string | null } | null;
+}
+
 export interface NewAccount extends Omit<Account, "id"> {
   password: string;
 }
@@ -128,6 +140,7 @@ export const api = isTauri
       listAccounts: () => invoke<Account[]>("list_accounts"),
       addAccount: (account: NewAccount) =>
         invoke<Account>("add_imap_account", { account: { ...account, id: "" } }),
+      detectServers: (email: string) => invoke<Detected>("detect_servers", { email }),
       oauthProviders: () => invoke<Provider[]>("oauth_providers"),
       oauthLogin: (provider: Provider) => invoke<Account>("oauth_login", { provider }),
       folders: () => invoke<Role[]>("list_folders"),

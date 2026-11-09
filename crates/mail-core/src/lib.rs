@@ -1,6 +1,7 @@
 //! Núcleo do Posta: sincronização de email e cópia local pesquisável.
 
 pub mod attachments;
+pub mod autoconfig;
 pub mod folders;
 pub mod imap_sync;
 pub mod oauth;

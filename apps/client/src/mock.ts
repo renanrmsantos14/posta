@@ -1,5 +1,5 @@
 // Dados de exemplo para rodar a UI no navegador (pnpm dev), sem Tauri e sem rede.
-import type { Account, Draft, Provider, MessageDetail, MessageSummary, NewAccount, OutAttachment, Role, SendReport, Settings, StoredDraft, SyncResult, UnreadCounts, View } from "./api";
+import type { Account, Detected, Draft, Provider, MessageDetail, MessageSummary, NewAccount, OutAttachment, SmtpServer, Role, SendReport, Settings, StoredDraft, SyncResult, UnreadCounts, View } from "./api";
 
 const now = Math.floor(Date.now() / 1000);
 const H = 3600;
@@ -123,6 +123,19 @@ export const mockApi = {
     const acc = { id: `${a.username}@${a.host}`, host: a.host, port: a.port, security: a.security, username: a.username, smtp: a.smtp };
     accounts = [...accounts.filter((x) => x.id !== acc.id), acc];
     return acc;
+  },
+  async detectServers(email: string): Promise<Detected> {
+    await wait(600);
+    const d = email.split("@")[1]?.toLowerCase() ?? "";
+    if (!d.includes(".")) throw "Email inválido.";
+    const tls = (host: string, port: number): SmtpServer => ({ host, port, security: port === 993 || port === 465 ? "tls" : "starttls" });
+    if (d === "gmail.com" || d === "googlemail.com")
+      return { provider: "Gmail", source: "tabela", imap: tls("imap.gmail.com", 993), smtp: tls("smtp.gmail.com", 465), username: email,
+        hint: { text: "O Gmail exige uma senha de app (precisa da verificação em duas etapas). Crie uma e cole aqui.", url: "https://myaccount.google.com/apppasswords" } };
+    if (/^(outlook|hotmail|live|msn)\./.test(d))
+      return { provider: "Outlook / Hotmail", source: "tabela", imap: tls("outlook.office365.com", 993), smtp: tls("smtp-mail.outlook.com", 587), username: email,
+        hint: { text: "Contas pessoais da Microsoft costumam exigir senha de app (ou use Entrar com Microsoft).", url: "https://account.live.com/proofs/AppPassword" } };
+    return { provider: "", source: "palpite", imap: tls(`imap.${d}`, 993), smtp: tls(`smtp.${d}`, 465), username: email, hint: null };
   },
   async oauthProviders(): Promise<Provider[]> {
     return ["google", "microsoft"];

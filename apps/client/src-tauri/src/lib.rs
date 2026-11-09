@@ -1,7 +1,7 @@
 //! Ponte entre a UI e o mail-core. Leituras vêm do SQLite local; rede só em sync e flags.
 
 use mail_core::oauth::{self, Provider};
-use mail_core::{imap_sync, send, AuthMode, DraftRecord, IdleEnd, ImapAccount, MessageDetail, MessageSummary, MsgFlag, Outgoing, ReplyRef, Role, SendReport, Store};
+use mail_core::{autoconfig, imap_sync, send, AuthMode, DraftRecord, IdleEnd, ImapAccount, MessageDetail, MessageSummary, MsgFlag, Outgoing, ReplyRef, Role, SendReport, Store};
 use serde::{Deserialize, Serialize};
 use std::{collections::{HashMap, HashSet}, fs, path::PathBuf, sync::{atomic::{AtomicBool, Ordering}, Mutex}, time::{Duration, Instant}};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -230,11 +230,29 @@ async fn blocking<T: Send + 'static>(
         .map_err(err)?
 }
 
+/// Servidores prováveis para o email digitado (tabela, ISPDB, MX, palpite).
+#[tauri::command]
+async fn detect_servers(email: String) -> CmdResult<autoconfig::Detected> {
+    tauri::async_runtime::spawn_blocking(move || autoconfig::detect(&email).ok_or_else(|| "Email inválido.".to_string()))
+        .await
+        .map_err(err)?
+}
+
+/// Login IMAP + autenticação SMTP sem enviar nada; o erro já vem em pt-BR.
+#[tauri::command]
+async fn test_connection(account: ImapAccount) -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(move || autoconfig::test_connection(&account))
+        .await
+        .map_err(err)?
+}
+
 #[tauri::command]
 async fn add_imap_account(app: AppHandle, mut account: ImapAccount) -> CmdResult<ImapAccount> {
     let handle = app.clone();
     let account = blocking(app, move |st| {
-        imap_sync::check_login(&account).map_err(err)?;
+        if account.auth == AuthMode::Password {
+            autoconfig::test_connection(&account)?;
+        }
         account.id = format!("{}@{}", account.username, account.host);
         secret::set(&account.id, &account.password)
             .map_err(|e| format!("não consegui guardar a senha no cofre do sistema: {e}"))?;
@@ -771,6 +789,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             add_imap_account,
+            detect_servers,
+            test_connection,
             oauth_providers,
             oauth_login,
             list_accounts,
