@@ -235,6 +235,21 @@ let outbox: OutboxItem[] = [];
   offline = v;
   window.dispatchEvent(new Event(v ? "offline" : "online"));
 };
+// Teste de carga: `__mockMany(50000)` recria a Entrada com n mensagens (datas espalhadas por ~3 anos) e avisa a UI.
+(window as unknown as { __mockMany: (n: number) => void }).__mockMany = (n) => {
+  const base = messages.filter((m) => m.id >= 1000);
+  const gen: MockMessage[] = Array.from({ length: n }, (_, i) => {
+    const [from_name, from_addr, subject, body] = seed[i % seed.length];
+    return {
+      id: 10_000 + i, account: accounts[0].id, uid: 10_000 + i, from_name, from_addr,
+      subject: `${subject} #${i + 1}`, date: now - Math.round(i * (3 * 365 * 24 * 60 * 60 / Math.max(n, 1))),
+      snippet: body.slice(0, 200), body_text: body, body_html: "", seen: i % 5 !== 0, flagged: i % 11 === 0,
+      reply_addr: from_addr, attachments: [], to_addrs: "renan@exemplo.com", cc_addrs: "", role: "inbox", thread_id: 0,
+    };
+  });
+  messages = [...base, ...gen];
+  window.dispatchEvent(new Event("mock-changed"));
+};
 const queue = (n: number) => { if (offline) pendingOps += n; };
 let syncCount = 0;
 
