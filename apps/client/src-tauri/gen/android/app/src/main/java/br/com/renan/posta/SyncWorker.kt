@@ -24,7 +24,8 @@ import java.util.concurrent.TimeUnit
  * (`nativeSync`, em src-tauri/src/android_sync.rs) e avisa das mensagens novas. Veja docs/android.md.
  */
 class SyncWorker(context: Context, params: WorkerParameters) : Worker(context, params) {
-  private external fun nativeSync(context: Context, dir: String): String
+  private external fun nativeInit(context: Context): String
+  private external fun nativeSync(dir: String): String
 
   override fun doWork(): Result {
     // Com o app aberto o IDLE já mantém tudo em dia e notifica.
@@ -34,7 +35,14 @@ class SyncWorker(context: Context, params: WorkerParameters) : Worker(context, p
       // Mesma pasta que o Tauri usa como app_data_dir (identificador do app).
       val dir = File(applicationContext.dataDir, "br.com.renan.posta")
       if (!File(dir, "accounts.json").exists()) return Result.success()
-      nativeSync(applicationContext, dir.absolutePath)
+      // O ndk-context é global e único: registrar aqui enquanto a Activity (tao) registra o dela derruba o processo.
+      // O mesmo lock cobre o onCreate da Activity; o núcleo registra, cria o cofre e solta o contexto na hora.
+      val init = synchronized(CONTEXT_LOCK) { nativeInit(applicationContext) }
+      if (init.startsWith("ERRO")) {
+        Log.w(TAG, init)
+        return Result.retry()
+      }
+      nativeSync(dir.absolutePath)
     } catch (e: Throwable) {
       Log.w(TAG, "falha ao chamar o núcleo Rust", e)
       return Result.retry()
@@ -86,6 +94,9 @@ class SyncWorker(context: Context, params: WorkerParameters) : Worker(context, p
     private const val CHANNEL = "posta_novas"
     private const val NOTIFICATION_ID = 4101
     private const val UNIQUE = "posta-sync"
+
+    /** Serializa o registro do ndk-context entre o Worker e o onCreate da Activity (ver MainActivity). */
+    val CONTEXT_LOCK = Any()
 
     /** MainActivity marca em onStart/onStop; o Worker roda no mesmo processo quando o app está aberto. */
     @Volatile var appVisible = false

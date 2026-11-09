@@ -30,8 +30,8 @@ mod imp {
     use keyring_core::Entry;
     use std::sync::OnceLock;
 
-    /// O Tauri já inicializa o `ndk-context`; falta só registrar o cofre na primeira chamada.
-    fn entry(id: &str) -> Result<Entry, String> {
+    /// Registra o cofre uma vez. Precisa do `ndk-context` só aqui: o Store guarda a JavaVM e o contexto.
+    pub fn init() -> Result<(), String> {
         static READY: OnceLock<Result<(), String>> = OnceLock::new();
         READY
             .get_or_init(|| {
@@ -39,7 +39,11 @@ mod imp {
                 keyring_core::set_default_store(store);
                 Ok(())
             })
-            .clone()?;
+            .clone()
+    }
+
+    fn entry(id: &str) -> Result<Entry, String> {
+        init()?;
         Entry::new(SERVICE, id).map_err(|e| e.to_string())
     }
 
@@ -59,4 +63,6 @@ mod imp {
     }
 }
 
+#[cfg(target_os = "android")]
+pub use imp::init;
 pub use imp::{delete, get, set};
