@@ -628,7 +628,7 @@ impl Store {
 
     fn has_column(&self, table: &str, col: &str) -> Result<bool> {
         Ok(self.conn.query_row(
-            "SELECT COUNT(*) > 0 FROM pragma_table_info(?1) WHERE name = ?2",
+            "SELECT COUNT(*) > 0 FROM pragma_table_xinfo(?1) WHERE name = ?2",
             params![table, col],
             |r| r.get(0),
         )?)
@@ -1717,6 +1717,18 @@ mod tests {
             cc_addrs: String::new(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn reabrir_banco_com_coluna_gerada_nao_falha() {
+        let path = std::env::temp_dir().join(format!("posta-reopen-{}.sqlite", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let s = Store::open(&path).unwrap();
+        // Revisão anterior força o migrate() a rodar de novo sobre a coluna gerada visible_date.
+        s.conn.pragma_update(None, "application_id", SCHEMA_REV - 1).unwrap();
+        drop(s);
+        Store::open(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
