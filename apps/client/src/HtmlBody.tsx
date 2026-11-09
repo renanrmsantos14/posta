@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { isTauri } from "./api";
+import { toast } from "./toast";
 
 // Sem scripts, sem formulários, sem fontes externas; imagens só data:/cid: até o usuário liberar a rede.
 // O srcdoc herda a CSP do app (tauri.conf.json), que por isso também precisa permitir https:/http: em img-src.
@@ -49,6 +50,7 @@ export function HtmlBody({ html, remote }: { html: string; remote: boolean }) {
     const frame = ref.current;
     if (!frame) return;
     let observer: ResizeObserver | undefined;
+    const wired = new WeakSet<Document>();
     const attach = () => {
       const doc = frame.contentDocument;
       if (!doc?.documentElement || !doc.body) return;
@@ -58,12 +60,16 @@ export function HtmlBody({ html, remote }: { html: string; remote: boolean }) {
       observer.observe(doc.documentElement);
       observer.observe(doc.body);
       fit();
+      if (wired.has(doc)) return;
+      wired.add(doc);
       doc.addEventListener("click", (e) => {
-        const a = (e.target as Element | null)?.closest?.("a[href]");
+        const a = (e.target as Element | null)?.closest?.("a[href], area[href]") as HTMLAnchorElement | null;
         if (!a) return;
         e.preventDefault();
-        const href = a.getAttribute("href") ?? "";
-        if (/^(https?:|mailto:)/i.test(href)) void openExternal(href);
+        // `.href` já vem sem espaços/quebras de linha que newsletters deixam no atributo.
+        const href = a.href.trim();
+        if (!/^(https?:|mailto:|tel:)/i.test(href)) return;
+        openExternal(href).catch((err) => toast(`Não foi possível abrir o link: ${String(err)}`, "error"));
       });
     };
     frame.addEventListener("load", attach);
