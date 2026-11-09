@@ -256,12 +256,12 @@ kbd {
 /* Lista virtualizada: só as linhas visíveis existem; cada uma tem altura fixa por densidade (ROW_H em MessageList). */
 .list-wrap { position: relative; display: flex; flex: 1; flex-direction: column; min-height: 0; }
 .list { position: relative; flex: 1; min-height: 0; overflow-y: auto; margin: 0; padding: 0; font-size: var(--fs-list); }
-.list-spacer { position: relative; width: 100%; }
+.list-spacer { position: relative; width: 100%; contain: layout style; }
 .group-h {
   position: absolute; left: 0; right: 0; display: flex; align-items: flex-end; padding: 0 14px 4px;
   font: 600 12px/1 var(--sans); letter-spacing: 0.02em; color: var(--muted); background: var(--surface);
 }
-.list-spacer > .row { position: absolute; left: 0; right: 0; overflow: hidden; align-content: center; row-gap: 0; border-radius: 0; padding: 7px 12px; line-height: 1.3; }
+.list-spacer > .row { position: absolute; left: 0; right: 0; overflow: hidden; contain: strict; align-content: center; row-gap: 0; border-radius: 0; padding: 7px 12px; line-height: 1.3; }
 .list-spacer > .row .date { line-height: 1.3; align-self: center; }
 .list-spacer > .row .thread-n { align-self: center; }
 .list-spacer > .row[aria-selected="true"] { box-shadow: inset 3px 0 0 var(--blue); }
@@ -703,6 +703,7 @@ kbd {
 .confirm-card span { color: var(--muted); margin-top: -6px; }
 
 /* ---------- Painéis: colunas redimensionáveis, leitura embaixo ou desligada, tela cheia ---------- */
+.resizers { display: contents; }
 .resizer { display: none; position: absolute; z-index: 5; touch-action: none; outline: 0; }
 .resizer::after { content: ""; position: absolute; background: var(--blue); opacity: 0; transition: opacity 150ms ease; }
 .resizer:hover::after, .resizer:focus-visible::after, .resizer[data-dragging]::after { opacity: 0.45; }

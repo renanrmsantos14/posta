@@ -51,7 +51,7 @@ export function CommandBar({ cmds }: { cmds: Cmd[] }) {
   };
 
   return (
-    <div className="cmdbar-host">
+    <div className="cmdbar-host" role="region" aria-label="Barra de comandos">
       <div ref={bar} className="cmdbar" role="toolbar" aria-label="Comandos">
         {cmds.map((c, i) => (
           <span key={c.id} className="cmd-slot" data-cmd={c.id} data-pri={c.pri}>

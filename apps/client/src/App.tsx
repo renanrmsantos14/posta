@@ -1537,7 +1537,7 @@ export default function App() {
         </PageLayout>
 
         {!full && !settingsOpen && (
-          <>
+          <div className="resizers" role="region" aria-label="Redimensionar painéis">
             <Resizer axis="x" edge="rail" label="Largura das pastas" value={railW} min={RAIL.min} max={() => RAIL.max}
               onChange={(v) => previewSetting("w:rail", String(v))} onCommit={(v) => changeSetting("w:rail", String(v))}
               onReset={() => changeSetting("w:rail", "")} />
@@ -1551,7 +1551,7 @@ export default function App() {
                 onChange={(v) => previewSetting("h:list", String(v))} onCommit={(v) => changeSetting("h:list", String(v))}
                 onReset={() => changeSetting("h:list", "")} />
             )}
-          </>
+          </div>
         )}
 
         <ReaderPane detail={detail && detail.id === selectedId ? detail : null} error={openError && openError.id === selectedId ? openError.msg : null}
