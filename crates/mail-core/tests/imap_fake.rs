@@ -14,6 +14,7 @@ struct Msg {
     seen: bool,
     modseq: u64,
     raw: Vec<u8>,
+    deleted: bool,
 }
 
 struct Server {
@@ -22,6 +23,8 @@ struct Server {
     modseq: u64,
     next_uid: u32,
     msgs: Vec<Msg>,
+    /// Demais pastas (criadas ao primeiro uso); a INBOX fica em `msgs`.
+    others: std::collections::HashMap<String, Vec<Msg>>,
     /// Comandos recebidos (já sem a tag), para conferir o que o cliente pediu.
     log: Vec<String>,
     /// Derruba a conexão, sem responder, quando chegar um comando que comece com isto (uma vez).
@@ -48,7 +51,7 @@ impl Server {
         let uid = self.next_uid;
         self.next_uid += 1;
         self.modseq += 1;
-        self.msgs.push(Msg { uid, seen: false, modseq: self.modseq, raw: mail(uid, extra) });
+        self.msgs.push(Msg { uid, seen: false, modseq: self.modseq, raw: mail(uid, extra), deleted: false });
         uid
     }
     fn set_seen(&mut self, uid: u32) {
@@ -61,6 +64,9 @@ impl Server {
     fn remove(&mut self, uid: u32) {
         self.modseq += 1;
         self.msgs.retain(|x| x.uid != uid);
+    }
+    fn boxm(&mut self, name: &str) -> &mut Vec<Msg> {
+        if name == "INBOX" { &mut self.msgs } else { self.others.entry(name.to_string()).or_default() }
     }
     fn cond(&self) -> bool {
         self.caps.contains("CONDSTORE") || self.caps.contains("QRESYNC")
@@ -76,6 +82,7 @@ fn start(caps: &str) -> (ImapAccount, Shared, Arc<AtomicUsize>) {
         modseq: 10,
         next_uid: 1,
         msgs: Vec::new(),
+        others: Default::default(),
         log: Vec::new(),
         drop_on: None,
         no_space: false,
@@ -129,6 +136,7 @@ fn serve(conn: TcpStream, srv: Shared) {
     let mut input = BufReader::new(conn.try_clone().unwrap());
     out.write_all(b"* OK fake ready\r\n").unwrap();
     let mut line = String::new();
+    let mut sel = String::from("INBOX");
     loop {
         line.clear();
         if input.read_line(&mut line).unwrap_or(0) == 0 {
@@ -146,12 +154,30 @@ fn serve(conn: TcpStream, srv: Shared) {
         }
         let mut resp = String::new();
         let mut bin: Vec<u8> = Vec::new();
+        if up == "IDLE" {
+            drop(s);
+            out.write_all(b"+ idling\r\n").unwrap();
+            let mut done = String::new();
+            loop {
+                done.clear();
+                if input.read_line(&mut done).unwrap_or(0) == 0 {
+                    return;
+                }
+                if done.trim().eq_ignore_ascii_case("DONE") {
+                    break;
+                }
+            }
+            out.write_all(format!("{tag} OK idle done\r\n").as_bytes()).unwrap();
+            continue;
+        }
         if up == "CAPABILITY" {
             resp += &format!("* CAPABILITY IMAP4rev1 {}\r\n", s.caps);
         } else if up.starts_with("ENABLE") {
             resp += &format!("* ENABLED {}\r\n", &cmd[7..]);
         } else if up.starts_with("SELECT") {
-            resp += &format!("* FLAGS (\\Seen \\Flagged)\r\n* {} EXISTS\r\n* 0 RECENT\r\n", s.msgs.len());
+            sel = cmd[7..].trim().trim_matches('"').to_string();
+            let n = s.boxm(&sel).len();
+            resp += &format!("* FLAGS (\\Seen \\Flagged)\r\n* {n} EXISTS\r\n* 0 RECENT\r\n");
             resp += &format!("* OK [UIDVALIDITY {}] ok\r\n* OK [UIDNEXT {}] ok\r\n", s.validity, s.next_uid);
             if s.cond() {
                 resp += &format!("* OK [HIGHESTMODSEQ {}] ok\r\n", s.modseq);
@@ -160,7 +186,7 @@ fn serve(conn: TcpStream, srv: Shared) {
             let rest = &cmd["UID FETCH ".len()..];
             let (set, query) = rest.split_once(' ').unwrap();
             let changed_since: Option<u64> = query.split("CHANGEDSINCE ").nth(1).and_then(|x| x.split([' ', ')']).next()?.parse().ok());
-            let mut list = select(set, &s.msgs);
+            let mut list = select(set, s.boxm(&sel));
             if let Some(m) = changed_since {
                 list.retain(|x| x.modseq > m);
                 if query.contains("VANISHED") {
@@ -184,7 +210,11 @@ fn serve(conn: TcpStream, srv: Shared) {
                         m.raw.len()
                     );
                 }
-                let body: Option<(String, Vec<u8>)> = if query.contains("BODY.PEEK[]<0.8192>") {
+                let body: Option<(String, Vec<u8>)> = if query.contains("HEADER.FIELDS (MESSAGE-ID)") {
+                    let text = String::from_utf8_lossy(&m.raw).to_string();
+                    let line = text.lines().find(|l| l.starts_with("Message-ID:")).unwrap_or("").to_string();
+                    Some(("BODY[HEADER.FIELDS (MESSAGE-ID)]".into(), format!("{line}\r\n\r\n").into_bytes()))
+                } else if query.contains("BODY.PEEK[]<0.8192>") {
                     Some(("BODY[]<0>".into(), m.raw[..m.raw.len().min(8192)].to_vec()))
                 } else if query.contains("BODY.PEEK[]") {
                     Some(("BODY[]".into(), m.raw.clone()))
@@ -201,6 +231,31 @@ fn serve(conn: TcpStream, srv: Shared) {
                     None => bin.extend(format!("* {} FETCH ({item})\r\n", i + 1).as_bytes()),
                 }
             }
+        } else if up.starts_with("UID SEARCH") {
+            let id = cmd.split('"').nth(1).unwrap_or("");
+            let hits: Vec<String> = s
+                .boxm(&sel)
+                .iter()
+                .filter(|m| String::from_utf8_lossy(&m.raw).contains(&format!("Message-ID: <{id}>")))
+                .map(|m| m.uid.to_string())
+                .collect();
+            resp += &format!("* SEARCH {}\r\n", hits.join(" "));
+        } else if up.starts_with("UID MOVE") || up.starts_with("UID COPY") {
+            let mut parts = cmd.splitn(4, ' ');
+            let (set, dest) = (parts.nth(2).unwrap().to_string(), parts.next().unwrap().trim_matches('"').to_string());
+            let moved = select(&set, s.boxm(&sel));
+            s.boxm(&dest).extend(moved.iter().cloned());
+            if up.starts_with("UID MOVE") {
+                let uids: Vec<u32> = moved.iter().map(|m| m.uid).collect();
+                s.boxm(&sel).retain(|m| !uids.contains(&m.uid));
+            }
+        } else if up.starts_with("UID STORE") && up.contains("\\DELETED") {
+            let set = cmd.split(' ').nth(2).unwrap().to_string();
+            let uids: Vec<u32> = select(&set, s.boxm(&sel)).iter().map(|m| m.uid).collect();
+            s.boxm(&sel).iter_mut().filter(|m| uids.contains(&m.uid)).for_each(|m| m.deleted = true);
+        } else if up.starts_with("UID EXPUNGE") || up == "EXPUNGE" {
+            let only: Option<Vec<u32>> = cmd.split(' ').nth(2).map(|set| select(set, s.boxm(&sel)).iter().map(|m| m.uid).collect());
+            s.boxm(&sel).retain(|m| !(m.deleted && only.as_ref().is_none_or(|o| o.contains(&m.uid))));
         } else if up == "LOGOUT" {
             out.write_all(format!("* BYE bye\r\n{tag} OK logout\r\n").as_bytes()).ok();
             return;
@@ -360,9 +415,9 @@ fn mensagem_grande_vem_sem_corpo_e_o_corpo_e_baixado_sob_demanda() {
     assert!(!imap_sync::load_body(&hub, &acc, &mut store, grande.summary.id).unwrap());
     assert_eq!(cmds(&srv).len(), n);
 
-    // A sessão persistente foi reaproveitada: uma conexão só para tudo isso.
-    assert_eq!(count.load(Ordering::SeqCst), 1);
-    assert!(hub.is_open(&acc.id, Kind::Cmd));
+    // Sessões persistentes reaproveitadas: uma de comandos (sync) e uma de leitura (corpo), cada uma aberta uma vez.
+    assert_eq!(count.load(Ordering::SeqCst), 2);
+    assert!(hub.is_open(&acc.id, Kind::Cmd) && hub.is_open(&acc.id, Kind::Read));
 }
 
 #[test]
@@ -510,4 +565,125 @@ fn fila_offline_aplica_pela_sessao_do_hub() {
     outbox::apply_op_via(&hub, &acc, "INBOX", &[1], OpKind::Seen, "").unwrap();
     assert_eq!(count.load(Ordering::SeqCst), 1);
     assert!(cmds(&srv).iter().any(|c| c.starts_with("UID STORE 1")));
+}
+
+#[test]
+fn abrir_corpo_nao_espera_o_sync_que_segura_a_sessao_de_comandos() {
+    use std::time::{Duration, Instant};
+    let (acc, srv, _) = start("IDLE");
+    srv.lock().unwrap().add(600);
+    let mut store = Store::open_in_memory().unwrap();
+    let hub = Hub::new();
+    let r = hub.with(&acc, Kind::Cmd, |l| imap_sync::sync_on(l, &acc, &mut store, "INBOX", None)).unwrap();
+    let id = r.delta.inserted[0];
+    assert!(!store.get(id).unwrap().unwrap().body_loaded);
+
+    // Um sync longo segura a sessão Cmd por 1,5 s.
+    let (busy, release) = std::sync::mpsc::channel::<()>();
+    std::thread::scope(|sc| {
+        sc.spawn(|| {
+            hub.with(&acc, Kind::Cmd, |_| {
+                busy.send(()).ok();
+                std::thread::sleep(Duration::from_millis(1500));
+                Ok(())
+            })
+            .unwrap();
+        });
+        release.recv().unwrap();
+        // Ler pelo corpo sob demanda usa a sessão Read: não espera.
+        let t = Instant::now();
+        assert!(imap_sync::load_body(&hub, &acc, &mut store, id).unwrap());
+        let lido = t.elapsed();
+        assert!(lido < Duration::from_millis(700), "corpo esperou o sync: {lido:?}");
+        assert!(store.get(id).unwrap().unwrap().body_loaded);
+        // Controle: na mesma sessão Cmd o pedido ficaria preso até o sync soltar.
+        let t = Instant::now();
+        hub.with(&acc, Kind::Cmd, |l| imap_sync::fetch_raw_on(l, "INBOX", 1)).unwrap();
+        assert!(t.elapsed() > Duration::from_millis(500), "o controle deveria esperar");
+    });
+    assert!(hub.is_open(&acc.id, Kind::Read));
+}
+
+#[test]
+fn drop_account_encerra_o_idle_e_as_sessoes() {
+    use std::time::{Duration, Instant};
+    let (acc, srv, _) = start("IDLE");
+    srv.lock().unwrap().add(0);
+    let hub = Hub::new();
+    hub.with(&acc, Kind::Cmd, |l| imap_sync::fetch_raw_on(l, "INBOX", 1)).unwrap();
+    hub.with(&acc, Kind::Read, |l| imap_sync::fetch_raw_on(l, "INBOX", 1)).unwrap();
+    std::thread::scope(|sc| {
+        let idle = sc.spawn(|| hub.idle(&acc, "INBOX", Duration::from_secs(60)));
+        while !cmds(&srv).iter().any(|c| c.eq_ignore_ascii_case("IDLE")) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let t = Instant::now();
+        hub.drop_account(&acc.id);
+        let end = idle.join().unwrap().unwrap();
+        assert_eq!(end, mail_core::IdleEnd::Cancelled);
+        assert!(t.elapsed() < Duration::from_secs(5), "IDLE demorou a encerrar: {:?}", t.elapsed());
+    });
+    for k in [Kind::Cmd, Kind::Read, Kind::Idle] {
+        assert!(!hub.is_open(&acc.id, k), "{k:?} continua aberta");
+    }
+    // Uma sessão de IDLE, uma de comandos e uma de leitura: as três fizeram LOGOUT.
+    let log = cmds(&srv);
+    assert_eq!(log.iter().filter(|c| c.eq_ignore_ascii_case("LOGOUT")).count(), 3, "{log:?}");
+    // A conta pode voltar (senha trocada): o IDLE seguinte abre sessão nova e espera normalmente.
+    std::thread::scope(|sc| {
+        let idle = sc.spawn(|| hub.idle(&acc, "INBOX", Duration::from_millis(2500)));
+        assert_eq!(idle.join().unwrap().unwrap(), mail_core::IdleEnd::TimedOut);
+    });
+}
+
+fn count_in(srv: &Shared, name: &str) -> usize {
+    srv.lock().unwrap().boxm(name).len()
+}
+
+#[test]
+fn mover_repetido_com_move_e_idempotente() {
+    let (acc, srv, _) = start("IDLE MOVE UIDPLUS");
+    srv.lock().unwrap().add(0);
+    srv.lock().unwrap().add(0);
+    let hub = Hub::new();
+    mail_core::outbox::apply_op_via(&hub, &acc, "INBOX", &[1], mail_core::OpKind::Move, "Archive").unwrap();
+    // Repetição depois de uma queda: o UID 1 já não está na origem, o que conta como sucesso.
+    mail_core::outbox::apply_op_via(&hub, &acc, "INBOX", &[1], mail_core::OpKind::Move, "Archive").unwrap();
+    assert_eq!((count_in(&srv, "INBOX"), count_in(&srv, "Archive")), (1, 1));
+    // Lote com um já movido e um pendente.
+    mail_core::outbox::apply_op_via(&hub, &acc, "INBOX", &[1, 2], mail_core::OpKind::Move, "Archive").unwrap();
+    assert_eq!((count_in(&srv, "INBOX"), count_in(&srv, "Archive")), (0, 2));
+}
+
+#[test]
+fn mover_sem_move_nao_duplica_quando_a_copia_ja_foi_feita() {
+    let (acc, srv, _) = start("IDLE UIDPLUS");
+    srv.lock().unwrap().add(0);
+    // Tentativa anterior copiou para Archive mas caiu antes do EXPUNGE: está nas duas pastas.
+    let copy = srv.lock().unwrap().msgs[0].clone();
+    srv.lock().unwrap().boxm("Archive").push(copy);
+    let hub = Hub::new();
+    mail_core::outbox::apply_op_via(&hub, &acc, "INBOX", &[1], mail_core::OpKind::Move, "Archive").unwrap();
+    assert_eq!((count_in(&srv, "INBOX"), count_in(&srv, "Archive")), (0, 1));
+    let log = cmds(&srv);
+    assert!(!log.iter().any(|c| c.starts_with("UID COPY")), "copiou de novo: {log:?}");
+    // Repetir é sucesso e continua sem duplicar.
+    mail_core::outbox::apply_op_via(&hub, &acc, "INBOX", &[1], mail_core::OpKind::Move, "Archive").unwrap();
+    assert_eq!(count_in(&srv, "Archive"), 1);
+
+    // Caminho normal (nada no destino ainda): copia uma vez e remove da origem.
+    srv.lock().unwrap().add(0);
+    mail_core::outbox::apply_op_via(&hub, &acc, "INBOX", &[2], mail_core::OpKind::Move, "Archive").unwrap();
+    assert_eq!((count_in(&srv, "INBOX"), count_in(&srv, "Archive")), (0, 2));
+}
+
+#[test]
+fn excluir_de_vez_repetido_e_sucesso() {
+    let (acc, srv, _) = start("IDLE UIDPLUS");
+    srv.lock().unwrap().add(0);
+    srv.lock().unwrap().add(0);
+    let hub = Hub::new();
+    mail_core::outbox::apply_op_via(&hub, &acc, "INBOX", &[1], mail_core::OpKind::Delete, "").unwrap();
+    mail_core::outbox::apply_op_via(&hub, &acc, "INBOX", &[1], mail_core::OpKind::Delete, "").unwrap();
+    assert_eq!(count_in(&srv, "INBOX"), 1);
 }

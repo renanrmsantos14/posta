@@ -5,7 +5,7 @@ use mail_parser::{MessageParser, PartKind};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashSet};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use imap::types::UnsolicitedResponse;
 use imap_proto::NameAttribute;
@@ -157,7 +157,12 @@ pub enum IdleEnd {
     TimedOut,
     /// O servidor não anuncia IDLE: quem chama deve fazer polling.
     Unsupported,
+    /// A conta foi descartada (`Hub::drop_account`) durante a espera.
+    Cancelled,
 }
+
+/// De quanto em quanto tempo `idle_until` confere o cancelamento.
+pub const IDLE_SLICE: Duration = Duration::from_secs(2);
 
 /// Bloqueia até o servidor avisar de mudança em `mailbox` ou até `timeout`. Abre e fecha a própria conexão.
 pub fn idle_wait(acc: &ImapAccount, mailbox: &str, timeout: Duration) -> Result<IdleEnd> {
@@ -169,15 +174,36 @@ pub fn idle_wait(acc: &ImapAccount, mailbox: &str, timeout: Duration) -> Result<
 
 /// IDLE numa sessão já aberta (a conexão fica selecionada em `mailbox` ao voltar, pronta para `sync_on`).
 pub fn idle_on(live: &mut Live, mailbox: &str, timeout: Duration) -> Result<IdleEnd> {
+    idle_sliced(live, mailbox, timeout, timeout, &|| false)
+}
+
+/// IDLE em fatias de `IDLE_SLICE` (refaz só o IDLE, sem novo SELECT) para conferir `cancelled`.
+/// Avisos que chegam entre uma fatia e outra contam como `Changed`.
+pub fn idle_until(live: &mut Live, mailbox: &str, timeout: Duration, cancelled: &dyn Fn() -> bool) -> Result<IdleEnd> {
+    idle_sliced(live, mailbox, timeout, IDLE_SLICE, cancelled)
+}
+
+/// Núcleo de `idle_on`/`idle_until`: `slice` é o tempo máximo de cada IDLE antes de conferir `cancelled`
+/// (`idle_on` passa o prazo inteiro, evitando refazer IDLE/DONE a cada 2 s numa espera de ~29 min).
+fn idle_sliced(live: &mut Live, mailbox: &str, timeout: Duration, slice: Duration, cancelled: &dyn Fn() -> bool) -> Result<IdleEnd> {
     if !live.idle {
         return Ok(IdleEnd::Unsupported);
     }
     live.s.select(mailbox)?;
-    let outcome = live.s.idle().timeout(timeout).keepalive(false).wait_while(imap::extensions::idle::stop_on_any)?;
-    Ok(match outcome {
-        imap::extensions::idle::WaitOutcome::MailboxChanged => IdleEnd::Changed,
-        imap::extensions::idle::WaitOutcome::TimedOut => IdleEnd::TimedOut,
-    })
+    let deadline = Instant::now() + timeout;
+    loop {
+        if cancelled() {
+            return Ok(IdleEnd::Cancelled);
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Ok(IdleEnd::TimedOut);
+        }
+        let outcome = live.s.idle().timeout(left.min(slice)).keepalive(false).wait_while(imap::extensions::idle::stop_on_any)?;
+        if matches!(outcome, imap::extensions::idle::WaitOutcome::MailboxChanged) || live.s.take_all_unsolicited().len() > 0 {
+            return Ok(IdleEnd::Changed);
+        }
+    }
 }
 
 fn parse(uid: u32, raw: &[u8], seen: bool, flagged: bool, fallback_date: i64, own_addr: &str) -> NewMessage {
@@ -475,7 +501,7 @@ pub fn load_body_on(live: &mut Live, acc: &ImapAccount, store: &mut Store, id: i
 
 /// Como `load_body_on`, na sessão persistente da conta.
 pub fn load_body(hub: &Hub, acc: &ImapAccount, store: &mut Store, id: i64) -> Result<bool> {
-    hub.with(acc, Kind::Cmd, |live| load_body_on(live, acc, store, id))
+    hub.with(acc, Kind::Read, |live| load_body_on(live, acc, store, id))
 }
 
 /// Baixa em segundo plano o corpo das `limit` mensagens mais recentes da pasta que ainda não o têm,
@@ -634,21 +660,65 @@ pub fn move_messages(acc: &ImapAccount, from: &str, uids: &[u32], to: &str) -> R
     Live::once(acc, |l| move_messages_on(l, from, uids, to))
 }
 
-/// `move_messages` numa sessão já aberta.
+/// UIDs de `uids` que ainda existem na pasta selecionada, cada um com o Message-ID (se tiver).
+fn present(s: &mut ImapSession, uids: &[u32]) -> Result<Vec<(u32, Option<String>)>> {
+    let fetched = s.uid_fetch(uid_set(uids), "(UID BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])")?;
+    let mut found: Vec<(u32, Option<String>)> = fetched
+        .iter()
+        .filter_map(|f| {
+            let id = f.header().and_then(|h| MessageParser::default().parse(h)?.message_id().map(str::to_string));
+            Some((f.uid?, id))
+        })
+        .filter(|(u, _)| uids.contains(u))
+        .collect();
+    found.sort_unstable_by_key(|(u, _)| *u);
+    found.dedup_by_key(|(u, _)| *u);
+    Ok(found)
+}
+
+/// `move_messages` numa sessão já aberta. Idempotente: repetir depois de uma queda de rede não duplica nem falha.
+/// UID que não está mais na origem conta como já movido; sem MOVE, o que já existe no destino (mesmo Message-ID)
+/// não é copiado de novo, só removido da origem.
 pub fn move_messages_on(live: &mut Live, from: &str, uids: &[u32], to: &str) -> Result<()> {
     if uids.is_empty() {
         return Ok(());
     }
     let (has_move, uidplus) = (live.has_move, live.uidplus);
     live.s.select(from)?;
-    let set = uid_set(uids);
-    if has_move {
-        live.s.uid_mv(&set, to)?;
-    } else {
-        live.s.uid_copy(&set, to)?;
-        live.s.uid_store(&set, "+FLAGS.SILENT (\\Deleted)")?;
-        if uidplus { live.s.uid_expunge(&set)?; } else { live.s.expunge()?; }
+    let here = present(&mut live.s, uids)?;
+    if here.is_empty() {
+        return Ok(());
     }
+    let left: Vec<u32> = here.iter().map(|(u, _)| *u).collect();
+    let set = uid_set(&left);
+    if has_move {
+        return match live.s.uid_mv(&set, to) {
+            Ok(_) => Ok(()),
+            // O servidor recusou (ex.: UID inexistente por corrida): se nada sobrou na origem, a mensagem já foi.
+            Err(e) => match present(&mut live.s, &left) {
+                Ok(rest) if rest.is_empty() => Ok(()),
+                _ => Err(e.into()),
+            },
+        };
+    }
+    // Sem MOVE: a cópia pode ter ido numa tentativa anterior que caiu antes do EXPUNGE.
+    let mut to_copy: Vec<u32> = Vec::new();
+    live.s.select(to)?;
+    for (uid, id) in &here {
+        let known = match id {
+            Some(id) => !live.s.uid_search(format!("HEADER Message-ID \"{}\"", id.replace(['\\', '"'], "")))?.is_empty(),
+            None => false,
+        };
+        if !known {
+            to_copy.push(*uid);
+        }
+    }
+    live.s.select(from)?;
+    if !to_copy.is_empty() {
+        live.s.uid_copy(uid_set(&to_copy), to)?;
+    }
+    live.s.uid_store(&set, "+FLAGS.SILENT (\\Deleted)")?;
+    if uidplus { live.s.uid_expunge(&set)?; } else { live.s.expunge()?; }
     Ok(())
 }
 
@@ -661,14 +731,18 @@ pub fn delete_forever_many(acc: &ImapAccount, mailbox: &str, uids: &[u32]) -> Re
     Live::once(acc, |l| delete_forever_on(l, mailbox, uids))
 }
 
-/// `delete_forever_many` numa sessão já aberta.
+/// `delete_forever_many` numa sessão já aberta. Idempotente: UID que já não existe conta como apagado.
 pub fn delete_forever_on(live: &mut Live, mailbox: &str, uids: &[u32]) -> Result<()> {
     if uids.is_empty() {
         return Ok(());
     }
     let uidplus = live.uidplus;
     live.s.select(mailbox)?;
-    let set = uid_set(uids);
+    let left: Vec<u32> = present(&mut live.s, uids)?.into_iter().map(|(u, _)| u).collect();
+    if left.is_empty() {
+        return Ok(());
+    }
+    let set = uid_set(&left);
     live.s.uid_store(&set, "+FLAGS.SILENT (\\Deleted)")?;
     if uidplus { live.s.uid_expunge(&set)?; } else { live.s.expunge()?; }
     Ok(())

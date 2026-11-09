@@ -1,7 +1,7 @@
 // Lista de mensagens virtualizada: só as linhas visíveis existem no DOM (50 mil linhas rolam sem engasgar).
 // Linhas têm altura fixa por densidade; cabeçalhos de data entram na mesma lista plana. A linha (role=option) não contém
 // botões: o clique em caixa/estrela é delegado por `data-act`, e as ações do mouse ficam numa barra flutuante irmã.
-import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { forwardRef, memo, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Archive, Check, EnvelopeSimple, EnvelopeSimpleOpen, PushPin, Star, Trash } from "@phosphor-icons/react";
 import type { Category, MessageSummary } from "./api";
 import { CategoryChip } from "./Categories";
@@ -56,6 +56,83 @@ interface Props {
 
 const groupOf = (r: ListRow) => (r.head.pinned ? "Fixadas" : dateGroup(r.head.date));
 
+interface RowProps {
+  item: Extract<Item, { kind: "row" }>;
+  rowH: number;
+  /** Sempre o `Props` mais recente: os handlers leem daqui, então a linha não precisa re-renderizar por causa deles. */
+  live: React.RefObject<Props>;
+  setFocusId: (id: number) => void;
+  grouped: boolean;
+  tab0: boolean;
+  open: boolean;
+  fresh: boolean;
+  checked: boolean;
+  dragging: boolean;
+  pop: boolean;
+  /** Rótulo da conta (visão "todas as contas") ou null. */
+  acct: string | null;
+  category: Category | undefined;
+}
+
+/** Uma linha. Memoizada: ao rolar, as linhas que continuam na janela não são recriadas (só entram as novas). */
+const RowView = memo(function RowView({ item: it, rowH, live, setFocusId, grouped, tab0, open, fresh, checked, dragging, pop, acct, category }: RowProps) {
+  const { row } = it;
+  const m = row.head;
+  const unread = row.members.some((x) => !x.seen);
+  const starred = row.members.some((x) => x.flagged);
+  const n = grouped ? Math.max(row.members.length, m.thread_count) : 1;
+  // Os gestos de arrastar-para-o-lado leem a ação atual na hora do evento (ela depende da configuração).
+  const swipe = useMemo(() => {
+    const via = (k: string) => (e: unknown) => (live.current!.swipe(row)[k] as (e: unknown) => void)(e);
+    return { onPointerDown: via("onPointerDown"), onPointerMove: via("onPointerMove"), onPointerUp: via("onPointerUp"), onPointerCancel: via("onPointerCancel") };
+  }, [live, row]);
+  return (
+    <div id={`opt-${m.id}`} data-rid={m.id} role="option" aria-selected={open} tabIndex={tab0 ? 0 : -1}
+      className="row" style={{ top: it.top, height: rowH, "--i": Math.min(it.index, 12) } as React.CSSProperties}
+      data-unread={unread || undefined} data-fresh={fresh || undefined} data-checked={checked || undefined}
+      data-dragging={dragging || undefined}
+      draggable
+      onDragStart={(e) => live.current!.onDragStart(e, row)} onDragEnd={() => live.current!.onDragEnd()}
+      onFocus={() => setFocusId(m.id)}
+      onContextMenu={(e) => { e.preventDefault(); live.current!.onContext(e.clientX, e.clientY, row); }}
+      onKeyDown={(e) => {
+        if (e.key === " " && !e.ctrlKey && !e.metaKey) { e.preventDefault(); live.current!.onCheck(m, e.shiftKey); }
+        else if (e.key === "ContextMenu" || (e.key === "F10" && e.shiftKey)) {
+          e.preventDefault();
+          const r = e.currentTarget.getBoundingClientRect();
+          live.current!.onContext(r.left + 48, r.top + r.height / 2, row);
+        }
+      }}
+      {...swipe}
+      onClick={(e) => {
+        const act = (e.target as Element).closest<HTMLElement>("[data-act]")?.dataset.act;
+        if (act === "check") { e.stopPropagation(); live.current!.onCheck(m, e.shiftKey); }
+        else if (act === "star") { e.stopPropagation(); live.current!.onStar(row); }
+        else live.current!.onOpen(e, m);
+      }}
+      onDoubleClick={() => live.current!.onDouble()}>
+      <span className="dot" aria-hidden />
+      <span className="check" data-act="check" aria-hidden><Check size={11} weight="bold" /></span>
+      <span className="from has-meta">
+        <span className="sr">{unread ? "Não lida. " : ""}{starred ? "Com estrela. " : ""}{m.pinned ? "Fixada. " : ""}</span>
+        <span className="from-name">{m.from_name || m.from_addr}</span>
+        {n > 1 && <span className="thread-n" title={`${n} mensagens na conversa`}>{n}</span>}
+      </span>
+      <time className="date" dateTime={new Date(m.date * 1000).toISOString()}>{shortDate(m.date)}</time>
+      <span className="star" data-act="star" data-on={starred || undefined} data-pop={pop || undefined} aria-hidden>
+        <Star size={15} weight={starred ? "fill" : "bold"} />
+      </span>
+      <span className="subject">
+        {acct !== null && <span className="acct" title={m.account}>{acct}</span>}
+        {m.pinned && <PushPin size={12} weight="fill" className="pin-mark" aria-hidden />}
+        {category && <CategoryChip category={category} />}
+        {m.subject || "(sem assunto)"}
+      </span>
+      <span className="snippet">{m.snippet}</span>
+    </div>
+  );
+});
+
 export const MessageList = forwardRef<ListHandle, Props>(function MessageList(p, ref) {
   const box = useRef<HTMLDivElement>(null);
   const [scroll, setScroll] = useState(0);
@@ -63,6 +140,8 @@ export const MessageList = forwardRef<ListHandle, Props>(function MessageList(p,
   const [focusId, setFocusId] = useState<number | null>(null);
   const [hover, setHover] = useState<number | null>(null);
   const rowH = ROW_H[p.density];
+  const live = useRef(p);
+  live.current = p;
 
   // Lista plana (cabeçalho + linhas) com a posição de cada item; recalculada só quando linhas ou densidade mudam.
   const { items, total } = useMemo(() => {
@@ -182,55 +261,12 @@ export const MessageList = forwardRef<ListHandle, Props>(function MessageList(p,
             return <div key={it.key} className="group-h" role="presentation" style={{ top: it.top, height: HEAD_H }}>{it.label}</div>;
           }
           const { row } = it;
-          const m = row.head;
-          const unread = row.members.some((x) => !x.seen);
-          const starred = row.members.some((x) => x.flagged);
-          const n = p.grouped ? Math.max(row.members.length, m.thread_count) : 1;
-          const open = row.members.some((x) => x.id === p.selectedId);
+          const id = row.head.id;
           return (
-            <div key={it.key} id={`opt-${m.id}`} data-rid={m.id} role="option" aria-selected={open} tabIndex={zeroId === m.id ? 0 : -1}
-              className="row" style={{ top: it.top, height: rowH, "--i": Math.min(it.index, 12) } as React.CSSProperties}
-              data-unread={unread || undefined} data-fresh={p.fresh.has(m.id) || undefined} data-checked={p.checked.has(m.id) || undefined}
-              data-dragging={row.members.some((x) => p.dragIds.has(x.id)) || undefined}
-              draggable
-              onDragStart={(e) => p.onDragStart(e, row)} onDragEnd={p.onDragEnd}
-              onFocus={() => setFocusId(m.id)}
-              onContextMenu={(e) => { e.preventDefault(); p.onContext(e.clientX, e.clientY, row); }}
-              onKeyDown={(e) => {
-                if (e.key === " " && !e.ctrlKey && !e.metaKey) { e.preventDefault(); p.onCheck(m, e.shiftKey); }
-                else if (e.key === "ContextMenu" || (e.key === "F10" && e.shiftKey)) {
-                  e.preventDefault();
-                  const r = e.currentTarget.getBoundingClientRect();
-                  p.onContext(r.left + 48, r.top + r.height / 2, row);
-                }
-              }}
-              {...p.swipe(row)}
-              onClick={(e) => {
-                const act = (e.target as Element).closest<HTMLElement>("[data-act]")?.dataset.act;
-                if (act === "check") { e.stopPropagation(); p.onCheck(m, e.shiftKey); }
-                else if (act === "star") { e.stopPropagation(); p.onStar(row); }
-                else p.onOpen(e, m);
-              }}
-              onDoubleClick={() => p.onDouble()}>
-              <span className="dot" aria-hidden />
-              <span className="check" data-act="check" aria-hidden><Check size={11} weight="bold" /></span>
-              <span className="from has-meta">
-                <span className="sr">{unread ? "Não lida. " : ""}{starred ? "Com estrela. " : ""}{m.pinned ? "Fixada. " : ""}</span>
-                <span className="from-name">{m.from_name || m.from_addr}</span>
-                {n > 1 && <span className="thread-n" title={`${n} mensagens na conversa`}>{n}</span>}
-              </span>
-              <time className="date" dateTime={new Date(m.date * 1000).toISOString()}>{shortDate(m.date)}</time>
-              <span className="star" data-act="star" data-on={starred || undefined} data-pop={p.popId === m.id || undefined} aria-hidden>
-                <Star size={15} weight={starred ? "fill" : "bold"} />
-              </span>
-              <span className="subject">
-                {p.showAcct && <span className="acct" title={m.account}>{p.acctLabel(m.account)}</span>}
-                {m.pinned && <PushPin size={12} weight="fill" className="pin-mark" aria-hidden />}
-                {p.categories.filter((c) => c.id === m.category).map((c) => <CategoryChip key={c.id} category={c} />)}
-                {m.subject || "(sem assunto)"}
-              </span>
-              <span className="snippet">{m.snippet}</span>
-            </div>
+            <RowView key={it.key} item={it} rowH={rowH} live={live} setFocusId={setFocusId} grouped={p.grouped}
+              tab0={zeroId === id} open={row.members.some((x) => x.id === p.selectedId)} fresh={p.fresh.has(id)} checked={p.checked.has(id)}
+              dragging={row.members.some((x) => p.dragIds.has(x.id))} pop={p.popId === id}
+              acct={p.showAcct ? p.acctLabel(row.head.account) : null} category={p.categories.find((c) => c.id === row.head.category)} />
           );
         })}
       </div>

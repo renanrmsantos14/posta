@@ -6,6 +6,9 @@ use lettre::message::{header, Attachment, Mailbox, Mailboxes, MultiPart, SingleP
 use lettre::transport::smtp::authentication::{Credentials, Mechanism};
 use lettre::{Message, SmtpTransport, Transport};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
+use std::sync::{LazyLock, Mutex};
 
 use crate::folders::{pick, Role};
 use crate::imap_sync::{connect, AuthMode, ImapAccount, ImapSession, Security};
@@ -198,6 +201,55 @@ fn transport(acc: &ImapAccount) -> Result<SmtpTransport> {
     .build())
 }
 
+/// Um transporte (com pool de conexões do lettre) por conta. Dura enquanto servidor, usuário e senha/token forem os mesmos.
+static POOLS: LazyLock<Mutex<HashMap<String, (u64, SmtpTransport)>>> = LazyLock::new(Default::default);
+
+fn fingerprint(acc: &ImapAccount) -> u64 {
+    let s = acc.smtp();
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (&s.host, s.port, format!("{:?}", s.security), &acc.username, &acc.password, format!("{:?}", acc.auth)).hash(&mut h);
+    h.finish()
+}
+
+fn pooled(acc: &ImapAccount) -> Result<SmtpTransport> {
+    let key = fingerprint(acc);
+    let mut pools = POOLS.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some((k, t)) = pools.get(&acc.id) {
+        if *k == key {
+            return Ok(t.clone());
+        }
+    }
+    let t = transport(acc)?;
+    pools.insert(acc.id.clone(), (key, t.clone()));
+    Ok(t)
+}
+
+/// Descarta o pool da conta (conta removida): fecha as conexões ociosas.
+pub fn forget(account_id: &str) {
+    if let Some((_, t)) = POOLS.lock().unwrap_or_else(|p| p.into_inner()).remove(account_id) {
+        t.shutdown();
+    }
+}
+
+/// A conexão em si morreu (reset, EOF, ociosa demais): não é recusa do servidor, TLS, prazo nem erro de uso.
+fn connection_died(e: &lettre::transport::smtp::Error) -> bool {
+    !(e.is_permanent() || e.is_transient() || e.is_client() || e.is_response() || e.is_tls() || e.is_timeout())
+}
+
+/// Entrega a mensagem pela conexão guardada da conta. Se a conexão reaproveitada tiver caído (servidor encerra
+/// conexões ociosas), descarta o pool, reconecta e tenta mais uma vez.
+pub fn deliver(acc: &ImapAccount, msg: &Message) -> Result<()> {
+    match pooled(acc)?.send(msg) {
+        Ok(_) => Ok(()),
+        Err(e) if connection_died(&e) => {
+            forget(&acc.id);
+            pooled(acc)?.send(msg)?;
+            Ok(())
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
 /// Testa o login no servidor SMTP (usado ao editar a conta, antes de salvar).
 pub fn check_smtp(acc: &ImapAccount) -> Result<()> {
     if transport(acc)?.test_connection()? {
@@ -249,7 +301,7 @@ pub fn send_auto(acc: &ImapAccount, out: &Outgoing, reply: Option<&ReplyRef>) ->
 fn send_with(acc: &ImapAccount, out: &Outgoing, reply: Option<&ReplyRef>, auto: bool) -> Result<SendReport> {
     let msg = build_with(acc, out, reply, auto)?;
     let raw = msg.formatted();
-    transport(acc)?.send(&msg)?;
+    deliver(acc, &msg)?;
     Ok(match after_send(acc, &raw, reply) {
         Ok(saved_to_sent) => SendReport { saved_to_sent, warning: None, queued: false },
         Err(e) => SendReport {

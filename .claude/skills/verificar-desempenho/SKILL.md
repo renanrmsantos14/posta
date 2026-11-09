@@ -10,7 +10,7 @@ description: Verifica o desempenho do backend do Posta (store SQLite, sync IMAP 
 3. Bench completo com servidor (opcional): `scripts/test-imap.sh` sobe o GreenMail; depois `PERF_N=50000 cargo test --release -p mail-core --test perf_bench -- --nocapture`. `PERF_FAKE` exige servidor na porta 3145.
 4. Se mexeu em `apps/client/src-tauri`: cargo check do crate `posta` no Docker (ver `verificar-mail-core`, passo 3) e `git checkout -- apps/client/src-tauri/gen/schemas`.
 5. Metas (50 mil mensagens, build release):
-   - inserção de 50k: ~10 s (hoje ~10,2 s; FTS com `prefix='2'`);
+   - inserção de 50k: < 10 s (hoje ~6 a 8 s; FTS com `prefix=2`, automerge 16, checkpoint no fim da sync);
    - primeira página da lista: < 1 ms;
    - `unread_counts`: < 5 ms;
    - busca: < 40 ms;
