@@ -692,3 +692,4 @@ kbd {
 .chip.attachment:active { transform: scale(0.97); }
 .chip.attachment:disabled { opacity: 0.6; cursor: progress; }
 @media (max-width: 760px) { .attach-bar { padding-left: 16px; padding-right: 16px; } }
+.attach-total[data-over] { color: var(--danger, #c0392b); font-weight: 600; }

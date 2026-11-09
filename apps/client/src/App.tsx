@@ -92,6 +92,7 @@ export default function App() {
   const [serverTotal, setServerTotal] = useState<number | null>(null);
   const [loadingFolder, setLoadingFolder] = useState(true);
   const [counts, setCounts] = useState<UnreadCounts>({});
+  const [totalUnread, setTotalUnread] = useState(0);
   /** Seleção múltipla (checkbox / Shift+clique). */
   const [checked, setChecked] = useState<Set<number>>(new Set());
   const anchor = useRef<number | null>(null);
@@ -126,14 +127,24 @@ export default function App() {
   const canArchive = (m: MessageSummary) => m.role !== "archive" && folderList.includes(archiveTo(m));
   const canTrash = (m: MessageSummary) => m.role === "trash" || folderList.includes("trash");
 
+  /** Os contadores seguem a conta escolhida; o título da janela sempre soma todas. */
+  const filterRef = useRef(accountFilter);
+  filterRef.current = accountFilter;
   const refreshCounts = useCallback(() => {
-    api.unreadCounts().then(setCounts).catch(() => {});
+    const account = filterRef.current;
+    api.unreadCounts(account).then((c) => {
+      if (filterRef.current !== account) return;
+      setCounts(c);
+      if (!account) setTotalUnread(c.inbox ?? 0);
+    }).catch(() => {});
+    if (account) api.unreadCounts().then((c) => setTotalUnread(c.inbox ?? 0)).catch(() => {});
   }, []);
+  useEffect(() => { refreshCounts(); }, [accountFilter, refreshCounts]);
   /** Ajusta o contador na hora; `refreshCounts` confere com o banco depois. */
   const bumpCounts = (ms: MessageSummary[], delta: number) =>
     setCounts((c) => {
       const next = { ...c };
-      for (const m of ms) if (m.role) next[m.role] = Math.max(0, (next[m.role] ?? 0) + delta);
+      for (const m of ms) if (m.role && (!accountFilter || m.account === accountFilter)) next[m.role] = Math.max(0, (next[m.role] ?? 0) + delta);
       return next;
     });
 
@@ -219,12 +230,12 @@ export default function App() {
 
   // Contagem de não lidas no título da janela.
   useEffect(() => {
-    const inboxUnread = counts.inbox ?? 0;
+    const inboxUnread = totalUnread;
     const title = inboxUnread > 0 ? `(${inboxUnread}) Posta` : "Posta";
     document.title = title;
     if (!isTauri) return;
     import("@tauri-apps/api/window").then(({ getCurrentWindow }) => getCurrentWindow().setTitle(title)).catch(() => {});
-  }, [counts.inbox]);
+  }, [totalUnread]);
 
   // Carga da pasta: o banco local responde na hora; fora da Caixa de entrada, o servidor vem depois.
   useEffect(() => {
@@ -364,7 +375,7 @@ export default function App() {
   function openDraft(d: StoredDraft) {
     if (!accounts?.length) return;
     const account = accounts.some((a) => a.id === d.account) ? d.account : accounts[0].id;
-    openComposer({ title: d.reply_to !== null ? "Responder" : "Nova mensagem", draftId: d.id, account, reply_to: d.reply_to, to: d.to, cc: d.cc, bcc: d.bcc, subject: d.subject, body: d.body });
+    openComposer({ title: d.reply_to !== null ? "Responder" : "Nova mensagem", draftId: d.id, account, reply_to: d.reply_to, to: d.to, cc: d.cc, bcc: d.bcc, subject: d.subject, body: d.body, attachments: d.attachments });
   }
 
   function openDrafts() {
@@ -434,25 +445,33 @@ export default function App() {
     openComposer({ title: "Encaminhar", account, reply_to: null, to: "", subject, body: forwardBody(detail), attachments });
   }
 
-  // O painel fecha na hora; o envio espera o "Desfazer" expirar. Se falhar, o rascunho volta intacto.
+  // O painel fecha na hora; o envio espera o "Desfazer" expirar (Configurações: desligado, 5 ou 10 s).
+  // Se falhar, o rascunho volta intacto.
   function send(d: ComposeInit) {
     setCompose(null);
+    const secs = Number(settings.undo_send ?? "5");
+    const deliver = async () => {
+      const { title: _t, restored: _r, draftId, ...draft } = d;
+      try {
+        const r = await api.send(draft);
+        // Enviada: o rascunho cumpriu o papel. Se o envio falhar ou for desfeito, ele continua salvo.
+        if (draftId) api.deleteDraft(draftId).then(refreshDrafts).catch(() => {});
+        toast("Mensagem enviada", "success");
+        if (r.warning) toast(r.warning, "info");
+      } catch (e) {
+        toast(`Não foi enviada: ${e}`, "error");
+        openComposer({ ...d, restored: true });
+      }
+    };
+    if (!(secs > 0)) {
+      toast("Enviando…", "sending", { duration: 1500 });
+      void deliver();
+      return;
+    }
     toast("Enviando…", "sending", {
+      duration: secs * 1000,
       action: { label: "Desfazer", onClick: () => openComposer({ ...d, restored: true }) },
-      onClose: async (reason) => {
-        if (reason === "action") return;
-        const { title: _t, restored: _r, draftId, ...draft } = d;
-        try {
-          const r = await api.send(draft);
-          // Enviada: o rascunho cumpriu o papel. Se o envio falhar ou for desfeito, ele continua salvo.
-          if (draftId) api.deleteDraft(draftId).then(refreshDrafts).catch(() => {});
-          toast("Mensagem enviada", "success");
-          if (r.warning) toast(r.warning, "info");
-        } catch (e) {
-          toast(`Não foi enviada: ${e}`, "error");
-          openComposer({ ...d, restored: true });
-        }
-      },
+      onClose: (reason) => { if (reason !== "action") void deliver(); },
     });
   }
 
@@ -1027,7 +1046,7 @@ export default function App() {
         />
       )}
       {compose && accounts && (
-        <Composer key={composeKey} init={compose} accounts={accounts} onSend={send} onDiscard={() => setCompose(null)} />
+        <Composer key={composeKey} init={compose} accounts={accounts} signatureOf={(id) => settings[`signature:${id}`]?.trim() ?? ""} onSend={send} onDiscard={() => setCompose(null)} />
       )}
       {settingsOpen && (
         <SettingsDialog accounts={accounts ?? []} settings={settings} onSetting={changeSetting} onRemoveAccount={removeAccount}

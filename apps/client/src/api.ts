@@ -94,11 +94,12 @@ export interface StoredDraft {
   bcc?: string;
   subject: string;
   body: string;
+  attachments?: OutAttachment[];
   /** Unix, em segundos. */
   updated: number;
 }
 
-/** Configurações: `signature:<id da conta>` e `notify` ("0" desliga as notificações). */
+/** Configurações: `signature:<id da conta>`, `notify` ("0" desliga as notificações) e `undo_send` (segundos: "0", "5" ou "10"; padrão 5). */
 export type Settings = Record<string, string>;
 
 export interface SendReport {
@@ -146,7 +147,7 @@ export const api = isTauri
       deleteForeverMany: (ids: number[]) => invoke<void>("delete_forever_many", { ids }),
       setSeen: (ids: number[], seen: boolean) => invoke<void>("set_seen_many", { ids, seen }),
       setFlagged: (ids: number[], flagged: boolean) => invoke<void>("set_flagged_many", { ids, flagged }),
-      unreadCounts: () => invoke<UnreadCounts>("unread_counts"),
+      unreadCounts: (account?: string | null) => invoke<UnreadCounts>("unread_counts", { account: account ?? null }),
       open: (id: number) => invoke<MessageDetail | null>("open_message", { id }),
       saveAttachment: (id: number, index: number, open: boolean) =>
         invoke<string>("save_attachment", { id, index, open }),
