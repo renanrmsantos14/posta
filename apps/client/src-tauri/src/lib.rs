@@ -1,7 +1,7 @@
 //! Ponte entre a UI e o mail-core. Leituras vêm do SQLite local; rede só em sync e flags.
 
 use mail_core::oauth::{self, Provider};
-use mail_core::{imap_sync, send, AuthMode, DraftRecord, IdleEnd, ImapAccount, MessageDetail, MessageSummary, MsgFlag, Outgoing, ReplyRef, Role, SendReport, Store};
+use mail_core::{imap_sync, send, AuthMode, DraftRecord, IdleEnd, ImapAccount, MessageDetail, MessageSummary, MsgFlag, Outgoing, ReplyRef, Role, SendReport, Store, UserFolder};
 use serde::{Deserialize, Serialize};
 use std::{collections::{HashMap, HashSet}, fs, path::PathBuf, sync::{atomic::{AtomicBool, Ordering}, Mutex}, time::{Duration, Instant}};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -302,6 +302,7 @@ async fn oauth_login(app: AppHandle, provider: Provider) -> CmdResult<ImapAccoun
             port: 993,
             security: mail_core::Security::Tls,
             username: email,
+            name: None,
             smtp: Some(mail_core::SmtpServer {
                 host: smtp_host.into(),
                 port: smtp_port,
@@ -351,6 +352,8 @@ async fn sync_inbox(app: AppHandle) -> CmdResult<SyncResult> {
                 if let Err(e) = st.ensure_folders(&mut store, &a) {
                     result.errors.push(format!("{}: pastas: {e}", acc.id));
                 }
+                // Pastas criadas em outro cliente aparecem aqui; falha não atrapalha o sync da Entrada.
+                refresh_user_folders(st, &a).ok();
                 imap_sync::sync_mailbox(&a, &mut store, "INBOX", None).map_err(err)
             });
             match r {
@@ -706,6 +709,181 @@ async fn remove_account(app: AppHandle, id: String) -> CmdResult<()> {
     .await
 }
 
+/// Relê as pastas do usuário no servidor e grava a lista local da conta; devolve o separador da hierarquia.
+fn refresh_user_folders(st: &AppState, acc: &ImapAccount) -> CmdResult<String> {
+    let (names, delimiter) = imap_sync::list_user_folders(acc).map_err(err)?;
+    let delimiter = delimiter.unwrap_or_default();
+    st.store.lock().unwrap().set_user_folders(&acc.id, &names, &delimiter).map_err(err)?;
+    Ok(delimiter)
+}
+
+fn all_user_folders(st: &AppState) -> CmdResult<Vec<UserFolder>> {
+    st.store.lock().unwrap().user_folders().map_err(err)
+}
+
+/// Pastas criadas pelo usuário, de todas as contas (cópia local; o sync as atualiza).
+#[tauri::command]
+fn list_user_folders(state: State<'_, AppState>) -> CmdResult<Vec<UserFolder>> {
+    all_user_folders(&state)
+}
+
+/// Cria a pasta (ou subpasta, com `parent`) no servidor e devolve a lista atualizada.
+#[tauri::command]
+async fn create_folder(app: AppHandle, account: String, parent: Option<String>, name: String) -> CmdResult<Vec<UserFolder>> {
+    blocking(app, move |st| {
+        let acc = st.account_with_password(&account)?;
+        imap_sync::create_folder(&acc, parent.as_deref(), &name).map_err(err)?;
+        refresh_user_folders(st, &acc)?;
+        all_user_folders(st)
+    })
+    .await
+}
+
+/// Renomeia no servidor e, depois do OK, no banco local (subpastas e mensagens vão junto).
+#[tauri::command]
+async fn rename_folder(app: AppHandle, account: String, folder: String, name: String) -> CmdResult<Vec<UserFolder>> {
+    blocking(app, move |st| {
+        // Um sync no meio regravaria mensagens com o nome antigo.
+        let _guard = st.syncing.lock().unwrap_or_else(|p| p.into_inner());
+        let acc = st.account_with_password(&account)?;
+        let delimiter = refresh_user_folders(st, &acc)?;
+        let new = imap_sync::rename_folder(&acc, &folder, &name).map_err(err)?;
+        st.store.lock().unwrap().rename_box(&account, &folder, &new, &delimiter).map_err(err)?;
+        refresh_user_folders(st, &acc)?;
+        all_user_folders(st)
+    })
+    .await
+}
+
+/// Quantas mensagens a pasta e as subpastas têm no servidor (para confirmar a exclusão).
+#[tauri::command]
+async fn count_folder(app: AppHandle, account: String, folder: String) -> CmdResult<u32> {
+    blocking(app, move |st| {
+        let acc = st.account_with_password(&account)?;
+        imap_sync::count_messages(&acc, &folder).map_err(err)
+    })
+    .await
+}
+
+/// Exclui a pasta e as subpastas no servidor; o banco local só apaga o que o servidor confirmou.
+#[tauri::command]
+async fn delete_folder(app: AppHandle, account: String, folder: String) -> CmdResult<Vec<UserFolder>> {
+    blocking(app, move |st| {
+        let _guard = st.syncing.lock().unwrap_or_else(|p| p.into_inner());
+        let acc = st.account_with_password(&account)?;
+        let gone = imap_sync::delete_folder(&acc, &folder).map_err(err)?;
+        st.store.lock().unwrap().drop_boxes(&account, &gone).map_err(err)?;
+        refresh_user_folders(st, &acc)?;
+        all_user_folders(st)
+    })
+    .await
+}
+
+/// Sincroniza uma pasta do usuário (as mais recentes, como `sync_folder`).
+#[tauri::command]
+async fn sync_user_folder(app: AppHandle, account: String, folder: String, keep: usize) -> CmdResult<SyncResult> {
+    blocking(app, move |st| {
+        let Ok(_guard) = st.syncing.try_lock() else {
+            return Ok(SyncResult { skipped: true, ..Default::default() });
+        };
+        let mut store = Store::open(st.db_path()).map_err(err)?;
+        let acc = st.account_with_password(&account)?;
+        let r = imap_sync::sync_mailbox(&acc, &mut store, &folder, Some(keep)).map_err(err)?;
+        Ok(SyncResult { fetched: r.fetched, total: r.total, ..Default::default() })
+    })
+    .await
+}
+
+#[tauri::command]
+fn list_user_folder(state: State<'_, AppState>, account: String, folder: String, limit: u32, offset: u32) -> CmdResult<Vec<MessageSummary>> {
+    state.store.lock().unwrap().list_box(&account, &folder, limit, offset).map_err(err)
+}
+
+#[tauri::command]
+fn search_user_folder(state: State<'_, AppState>, account: String, folder: String, query: String) -> CmdResult<Vec<MessageSummary>> {
+    state.store.lock().unwrap().search_box(&account, &folder, &query, 200).map_err(err)
+}
+
+/// Move para uma pasta do usuário. Só mensagens da mesma conta da pasta; devolve quantas foram movidas.
+#[tauri::command]
+async fn move_to_folder(app: AppHandle, ids: Vec<i64>, account: String, folder: String) -> CmdResult<usize> {
+    blocking(app, move |st| {
+        let mut moved = 0;
+        for ((acc_id, mailbox), items) in st.locate_groups(&ids)? {
+            if acc_id != account || mailbox == folder {
+                continue;
+            }
+            let acc = st.account_with_password(&acc_id)?;
+            let uids: Vec<u32> = items.iter().map(|(_, u)| *u).collect();
+            imap_sync::move_messages(&acc, &mailbox, &uids, &folder).map_err(err)?;
+            let store = st.store.lock().unwrap();
+            for (id, _) in &items {
+                store.remove(*id).map_err(err)?;
+            }
+            moved += items.len();
+        }
+        Ok(moved)
+    })
+    .await
+}
+
+/// Aplica (ou tira, com `None`) a categoria colorida. Só local.
+#[tauri::command]
+fn set_category(state: State<'_, AppState>, ids: Vec<i64>, category: Option<String>) -> CmdResult<()> {
+    state.store.lock().unwrap().set_category(&ids, category.as_deref()).map_err(err)
+}
+
+#[tauri::command]
+fn list_category(state: State<'_, AppState>, category: String, limit: u32, offset: u32) -> CmdResult<Vec<MessageSummary>> {
+    state.store.lock().unwrap().list_category(&category, limit, offset).map_err(err)
+}
+
+#[tauri::command]
+fn search_category(state: State<'_, AppState>, category: String, query: String) -> CmdResult<Vec<MessageSummary>> {
+    state.store.lock().unwrap().search_category(&category, &query, 200).map_err(err)
+}
+
+/// Edita a conta: nome, senha (só se vier uma nova), servidores e portas. IMAP e SMTP são testados antes de gravar;
+/// com falha nada muda. O usuário e o id ficam. Contas OAuth só trocam o nome (o login é do provedor).
+#[tauri::command]
+async fn update_account(app: AppHandle, account: ImapAccount, password: Option<String>) -> CmdResult<ImapAccount> {
+    blocking(app, move |st| {
+        let mut all = st.accounts()?;
+        let slot = all.iter_mut().find(|a| a.id == account.id).ok_or_else(|| format!("conta {} não encontrada", account.id))?;
+        let name = account.name.as_deref().map(str::trim).filter(|n| !n.is_empty()).map(str::to_string);
+        if slot.auth.provider().is_some() {
+            slot.name = name;
+        } else {
+            let new_password = password.filter(|p| !p.is_empty());
+            let mut next = ImapAccount {
+                id: slot.id.clone(),
+                username: slot.username.clone(),
+                auth: slot.auth,
+                name,
+                host: account.host.trim().to_string(),
+                port: account.port,
+                security: account.security,
+                smtp: account.smtp,
+                password: String::new(),
+            };
+            next.password = match &new_password {
+                Some(p) => p.clone(),
+                None => secret::get(&next.id).map_err(|e| format!("senha de {} no cofre do sistema: {e}", next.id))?,
+            };
+            imap_sync::check_login(&next).map_err(err)?;
+            send::check_smtp(&next).map_err(err)?;
+            if let Some(p) = &new_password {
+                secret::set(&next.id, p).map_err(|e| format!("não consegui guardar a senha no cofre do sistema: {e}"))?;
+            }
+            *slot = next;
+        }
+        let saved = slot.clone();
+        st.save_accounts(&all)?;
+        Ok(saved)
+    })
+    .await
+}
+
 #[tauri::command]
 fn save_draft(state: State<'_, AppState>, draft: DraftRecord) -> CmdResult<()> {
     state.store.lock().unwrap().save_draft(&draft).map_err(err)
@@ -793,6 +971,19 @@ pub fn run() {
             forward_attachments,
             send_message,
             remove_account,
+            list_user_folders,
+            create_folder,
+            rename_folder,
+            count_folder,
+            delete_folder,
+            sync_user_folder,
+            list_user_folder,
+            search_user_folder,
+            move_to_folder,
+            set_category,
+            list_category,
+            search_category,
+            update_account,
             save_draft,
             list_drafts,
             delete_draft,

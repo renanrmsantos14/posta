@@ -75,10 +75,9 @@ fn attachment_part(a: &OutAttachment, data: Vec<u8>) -> Result<SinglePart> {
 
 /// Monta a mensagem. Em resposta, In-Reply-To e References mantêm a conversa agrupada.
 pub fn build(acc: &ImapAccount, out: &Outgoing, reply: Option<&ReplyRef>) -> Result<Message> {
-    let from: Mailbox = acc
-        .username
-        .parse()
-        .map_err(|_| Error::Invalid(format!("remetente inválido: {}", acc.username)))?;
+    let addr: lettre::Address =
+        acc.username.parse().map_err(|_| Error::Invalid(format!("remetente inválido: {}", acc.username)))?;
+    let from = Mailbox::new(acc.name.clone().filter(|n| !n.trim().is_empty()), addr);
     let mut b = Message::builder().from(from).subject(out.subject.trim()).message_id(None);
     b = b.mailbox(header::To::from(recipients(&out.to)?));
     if let Some(r) = reply.filter(|r| !r.message_id.is_empty()) {
@@ -131,6 +130,15 @@ fn transport(acc: &ImapAccount) -> Result<SmtpTransport> {
         _ => builder.authentication(vec![Mechanism::Xoauth2]),
     }
     .build())
+}
+
+/// Testa o login no servidor SMTP (usado ao editar a conta, antes de salvar).
+pub fn check_smtp(acc: &ImapAccount) -> Result<()> {
+    if transport(acc)?.test_connection()? {
+        Ok(())
+    } else {
+        Err(Error::Invalid("o servidor SMTP recusou a conexão".into()))
+    }
 }
 
 /// O Gmail já guarda no Enviados o que passa pelo SMTP; copiar duplicaria.
@@ -187,6 +195,7 @@ mod tests {
             port: 993,
             security: Security::Tls,
             username: "eu@exemplo.com".into(),
+            name: None,
             smtp: None,
             auth: AuthMode::Password,
             password: String::new(),

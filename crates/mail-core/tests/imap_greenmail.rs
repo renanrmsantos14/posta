@@ -18,6 +18,7 @@ fn account(tag: &str) -> Option<ImapAccount> {
         port: port.parse().ok()?,
         security: Security::Plaintext,
         username: user.clone(),
+        name: None,
         smtp: std::env::var("POSTA_SMTP_TEST").ok().and_then(|p| {
             Some(SmtpServer { host: host.into(), port: p.parse().ok()?, security: Security::Plaintext })
         }),
@@ -391,4 +392,46 @@ fn move_e_exclui_varias_de_uma_vez() {
     imap_sync::delete_forever_many(&acc, &archive, &alvo).unwrap();
     imap_sync::sync_mailbox(&acc, &mut store, &archive, Some(1000)).unwrap();
     assert!(store.list_folder(Role::Archive, 10, 0).unwrap().is_empty());
+}
+
+#[test]
+fn cria_renomeia_e_exclui_pastas_com_subpastas() {
+    let Some(acc) = account("pastas") else { return };
+    let obra = imap_sync::create_folder(&acc, None, "Obra").unwrap();
+    let fase = imap_sync::create_folder(&acc, Some(&obra), "Fase 1").unwrap();
+    assert!(imap_sync::create_folder(&acc, None, "obra").is_err(), "nome repetido");
+    assert!(imap_sync::create_folder(&acc, None, "a/b").is_err(), "nome inválido");
+
+    let (names, delimiter) = imap_sync::list_user_folders(&acc).unwrap();
+    assert!(names.contains(&obra) && names.contains(&fase), "{names:?}");
+    assert!(delimiter.is_some());
+
+    // Move uma mensagem para a pasta nova, como no arrastar da lista.
+    let mut s = session(&acc);
+    s.append("INBOX", &raw(1, "Planta")).finish().unwrap();
+    s.logout().ok();
+    let mut store = Store::open_in_memory().unwrap();
+    imap_sync::sync_mailbox(&acc, &mut store, "INBOX", None).unwrap();
+    let uid = store.list("INBOX", 10, 0).unwrap()[0].uid;
+    imap_sync::move_messages(&acc, "INBOX", &[uid], &fase).unwrap();
+    assert_eq!(imap_sync::count_messages(&acc, &obra).unwrap(), 1, "conta as subpastas");
+
+    // Renomear leva a subpasta junto e preserva a mensagem.
+    let novo = imap_sync::rename_folder(&acc, &obra, "Projeto").unwrap();
+    let (names, _) = imap_sync::list_user_folders(&acc).unwrap();
+    let filha = names.iter().find(|n| n.ends_with("Fase 1")).unwrap().clone();
+    assert!(names.contains(&novo) && !names.contains(&obra) && filha.starts_with(&novo), "{names:?}");
+    assert_eq!(imap_sync::count_messages(&acc, &novo).unwrap(), 1);
+
+    // Pastas do sistema ficam como estão.
+    let archive = imap_sync::discover_folders(&acc).unwrap().into_iter().find(|f| f.role == Role::Archive).unwrap().name;
+    assert!(imap_sync::rename_folder(&acc, "INBOX", "Outra").is_err());
+    assert!(imap_sync::delete_folder(&acc, "INBOX").is_err());
+    assert!(imap_sync::delete_folder(&acc, &archive).is_err());
+
+    // Excluir leva as subpastas.
+    let gone = imap_sync::delete_folder(&acc, &novo).unwrap();
+    assert_eq!(gone, [filha, novo]);
+    let (names, _) = imap_sync::list_user_folders(&acc).unwrap();
+    assert!(!names.iter().any(|n| n.contains("Projeto")), "{names:?}");
 }

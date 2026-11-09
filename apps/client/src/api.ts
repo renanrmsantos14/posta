@@ -1,6 +1,7 @@
 // Contrato com o núcleo Rust. No navegador (sem Tauri) usa dados de exemplo para desenvolver a UI.
 import { invoke } from "@tauri-apps/api/core";
 import { mockApi } from "./mock";
+import { parseBox, parseCat } from "./views";
 
 export type Security = "tls" | "starttls" | "plaintext";
 export type Provider = "google" | "microsoft";
@@ -17,6 +18,8 @@ export interface Account {
   port: number;
   security: Security;
   username: string;
+  /** Nome de exibição no From dos envios. */
+  name?: string | null;
   smtp?: SmtpServer | null;
   /** Ausente em contas antigas = senha. */
   auth?: "password" | Provider;
@@ -41,6 +44,8 @@ export interface MessageSummary {
   flagged: boolean;
   /** Papel da pasta onde a mensagem está. */
   role: Role | null;
+  /** Id da categoria colorida (local), se houver. */
+  category?: string | null;
 }
 
 export interface Attachment {
@@ -108,7 +113,21 @@ export interface SendReport {
 
 export type Role = "inbox" | "sent" | "archive" | "trash" | "junk";
 /** O que a barra lateral mostra: pastas reais e a pasta virtual "Com estrela". */
-export type View = Role | "starred";
+export type View = Role | "starred" | `box:${string}` | `cat:${string}`;
+
+/** Pasta criada pelo usuário; `name` é o nome completo no servidor. */
+export interface UserFolder {
+  account: string;
+  name: string;
+  delimiter: string;
+}
+
+/** Categoria colorida; `color` é uma chave da paleta (ver Categories.tsx). */
+export interface Category {
+  id: string;
+  name: string;
+  color: string;
+}
 /** Não lidas por pasta. */
 export type UnreadCounts = Partial<Record<Role, number>>;
 
@@ -131,15 +150,38 @@ export const api = isTauri
       oauthLogin: (provider: Provider) => invoke<Account>("oauth_login", { provider }),
       folders: () => invoke<Role[]>("list_folders"),
       sync: () => invoke<SyncResult>("sync_inbox"),
-      syncFolder: (role: Role, keep: number) => invoke<SyncResult>("sync_folder", { role, keep }),
-      list: (view: View, limit: number, offset: number) =>
-        view === "starred"
+      syncFolder: (view: View, keep: number) => {
+        const box = parseBox(view);
+        return box
+          ? invoke<SyncResult>("sync_user_folder", { account: box.account, folder: box.name, keep })
+          : invoke<SyncResult>("sync_folder", { role: view, keep });
+      },
+      list: (view: View, limit: number, offset: number) => {
+        const box = parseBox(view);
+        const cat = parseCat(view);
+        if (box) return invoke<MessageSummary[]>("list_user_folder", { account: box.account, folder: box.name, limit, offset });
+        if (cat) return invoke<MessageSummary[]>("list_category", { category: cat, limit, offset });
+        return view === "starred"
           ? invoke<MessageSummary[]>("list_starred", { limit, offset })
-          : invoke<MessageSummary[]>("list_messages", { role: view, limit, offset }),
-      search: (query: string, view: View) =>
-        view === "starred"
+          : invoke<MessageSummary[]>("list_messages", { role: view, limit, offset });
+      },
+      search: (query: string, view: View) => {
+        const box = parseBox(view);
+        const cat = parseCat(view);
+        if (box) return invoke<MessageSummary[]>("search_user_folder", { account: box.account, folder: box.name, query });
+        if (cat) return invoke<MessageSummary[]>("search_category", { category: cat, query });
+        return view === "starred"
           ? invoke<MessageSummary[]>("search_starred", { query })
-          : invoke<MessageSummary[]>("search_messages", { query, role: view }),
+          : invoke<MessageSummary[]>("search_messages", { query, role: view });
+      },
+      userFolders: () => invoke<UserFolder[]>("list_user_folders"),
+      createFolder: (account: string, parent: string | null, name: string) => invoke<UserFolder[]>("create_folder", { account, parent, name }),
+      renameFolder: (account: string, folder: string, name: string) => invoke<UserFolder[]>("rename_folder", { account, folder, name }),
+      deleteFolder: (account: string, folder: string) => invoke<UserFolder[]>("delete_folder", { account, folder }),
+      countFolder: (account: string, folder: string) => invoke<number>("count_folder", { account, folder }),
+      moveToFolder: (ids: number[], account: string, folder: string) => invoke<number>("move_to_folder", { ids, account, folder }),
+      setCategory: (ids: number[], category: string | null) => invoke<void>("set_category", { ids, category }),
+      updateAccount: (account: Account, password: string | null) => invoke<Account>("update_account", { account, password }),
       move: (id: number, role: Role) => invoke<void>("move_message", { id, role }),
       moveMany: (ids: number[], role: Role) => invoke<void>("move_messages", { ids, role }),
       deleteForever: (id: number) => invoke<void>("delete_forever", { id }),
