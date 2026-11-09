@@ -21,6 +21,8 @@ tauri-plugin-notification = "2"
 
 [target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
 tauri-plugin-updater = "2.14.1"
+# Arrastar mensagens e anexos para fora da janela (arrasto nativo do sistema, arquivos reais).
+tauri-plugin-drag = "2"
 tauri-plugin-autostart = "2"
 # Bandeja do sistema (ícone, menu e contagem de não lidas).
 tauri = { version = "2.12", features = ["tray-icon"] }
