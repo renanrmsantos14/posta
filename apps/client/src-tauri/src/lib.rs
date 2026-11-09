@@ -3,7 +3,7 @@
 use mail_core::oauth::{self, Provider};
 use mail_core::rules::{self, Candidate};
 use mail_core::{search, vacation};
-use mail_core::{imap_sync, outbox, send, AuthMode, Contact, DraftRecord, FlushReport, IdleEnd, ImapAccount, MessageDetail, MessageSummary, MsgFlag, OpKind, Outgoing, OutboxItem, ReplyRef, Role, SendReport, Store, UserFolder};
+use mail_core::{imap_sync, outbox, Delta, Hub, Kind, Page, send, AuthMode, Contact, DraftRecord, FlushReport, IdleEnd, ImapAccount, MessageDetail, MessageSummary, MsgFlag, OpKind, Outgoing, OutboxItem, ReplyRef, Role, SendReport, Store, UserFolder};
 use serde::{Deserialize, Serialize};
 use std::{collections::{HashMap, HashSet}, fs, path::PathBuf, sync::{atomic::{AtomicBool, Ordering}, Mutex}, time::{Duration, Instant}};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -30,6 +30,10 @@ struct AppState {
     tray: AtomicBool,
     /// Só um `flush` da fila offline por vez.
     flushing: Mutex<()>,
+    /// Sessões IMAP persistentes por conta (comandos e IDLE), reaproveitadas entre operações.
+    hub: Hub,
+    /// Contas com pré-busca de corpos em andamento.
+    prefetching: Mutex<HashSet<String>>,
 }
 
 impl AppState {
@@ -43,6 +47,8 @@ impl AppState {
             focused: AtomicBool::new(true),
             tray: AtomicBool::new(false),
             flushing: Mutex::new(()),
+            hub: Hub::new(),
+            prefetching: Mutex::new(HashSet::new()),
         }
     }
 }
@@ -119,6 +125,8 @@ impl AppState {
         all.retain(|a| a.id != account.id);
         all.push(account.clone());
         self.save_accounts(&all)?;
+        // Senha ou servidor podem ter mudado: a sessão guardada não vale mais.
+        self.hub.drop_account(&account.id);
         if let Ok(f) = imap_sync::discover_folders(account) {
             self.store.lock().unwrap().set_folders(&account.id, &f).ok();
         }
@@ -185,7 +193,7 @@ fn flush_pending(st: &AppState) -> FlushReport {
     let Ok(_guard) = st.flushing.try_lock() else { return FlushReport::default() };
     let Ok(store) = Store::open(st.db_path()) else { return FlushReport::default() };
     let accounts = st.accounts().unwrap_or_default();
-    outbox::flush(&store, &mut |id| {
+    outbox::flush_via(&st.hub, &store, &mut |id| {
         if accounts.iter().any(|a| a.id == id) {
             st.account_with_password(id).map(Some).map_err(mail_core::Error::Invalid)
         } else {
@@ -205,7 +213,7 @@ fn run_op(st: &AppState, account: &str, mailbox: &str, uids: &[u32], kind: OpKin
     if pending()? == 0 {
         let done = st
             .account_with_password(account)
-            .and_then(|a| outbox::apply_op(&a, mailbox, uids, kind, arg).map_err(err));
+            .and_then(|a| outbox::apply_op_via(&st.hub, &a, mailbox, uids, kind, arg).map_err(err));
         match done {
             Ok(()) => return Ok(true),
             Err(e) if reachable(st, account) => return Err(e),
@@ -219,7 +227,62 @@ fn run_op(st: &AppState, account: &str, mailbox: &str, uids: &[u32], kind: OpKin
     Ok(false)
 }
 
+/// Sincroniza uma pasta pela sessão persistente da conta (reconecta com backoff se a rede cair).
+fn sync_via_hub(st: &AppState, store: &mut Store, acc: &ImapAccount, mailbox: &str, keep: Option<usize>) -> CmdResult<mail_core::SyncReport> {
+    let report = st.hub.with(acc, Kind::Cmd, |live| imap_sync::sync_on(live, acc, store, mailbox, keep)).map_err(err)?;
+    // Sincronização grande: devolve o WAL ao arquivo principal para as leituras não ficarem lentas.
+    if report.fetched >= 500 {
+        store.checkpoint();
+    }
+    Ok(report)
+}
+
+/// Evento incremental para a UI: ids inseridos, alterados e removidos. `mail-changed` continua sendo emitido.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct DeltaEvent<'a> {
+    account: &'a str,
+    mailbox: &'a str,
+    #[serde(flatten)]
+    delta: &'a Delta,
+}
+
+fn emit_delta(app: &AppHandle, account: &str, mailbox: &str, delta: &Delta) {
+    if !(delta.inserted.is_empty() && delta.changed.is_empty() && delta.removed.is_empty()) {
+        app.emit("mail-delta", DeltaEvent { account, mailbox, delta }).ok();
+    }
+}
+
+/// Quantos corpos recentes a pré-busca mantém no cache.
+const PREFETCH_BODIES: u32 = 200;
+
+/// Baixa em segundo plano os corpos das mensagens recentes da Entrada, para abrirem sem rede. Uma por conta por vez.
+fn prefetch_inbox(app: &AppHandle, id: &str) {
+    let st = app.state::<AppState>();
+    if !st.prefetching.lock().unwrap().insert(id.to_string()) {
+        return;
+    }
+    let (app, id) = (app.clone(), id.to_string());
+    std::thread::spawn(move || {
+        let st = app.state::<AppState>();
+        let r = (|| -> CmdResult<Vec<i64>> {
+            let acc = st.account_with_password(&id)?;
+            let mut store = Store::open(st.db_path()).map_err(err)?;
+            st.hub.with(&acc, Kind::Cmd, |live| imap_sync::prefetch_bodies_on(live, &acc, &mut store, "INBOX", PREFETCH_BODIES)).map_err(err)
+        })();
+        st.prefetching.lock().unwrap().remove(&id);
+        match r {
+            Ok(ids) if !ids.is_empty() => {
+                app.emit("mail-delta", DeltaEvent { account: &id, mailbox: "INBOX", delta: &Delta { changed: ids, ..Default::default() } }).ok();
+            }
+            Ok(_) => {}
+            Err(e) => eprintln!("pré-busca de {id}: {e}"),
+        }
+    });
+}
+
 /// Sincroniza a INBOX de uma conta, respeitando `syncing`, e devolve quantas mensagens vieram.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
 fn sync_account_inbox(st: &AppState, id: &str) -> CmdResult<usize> {
     let acc = st.account_with_password(id)?;
     let _guard = st.syncing.lock().unwrap_or_else(|p| p.into_inner());
@@ -257,7 +320,9 @@ fn notify_new(app: &AppHandle, st: &AppState, account: &str, fetched: usize) {
 fn idle_cycle(app: &AppHandle, id: &str) -> CmdResult<()> {
     let st = app.state::<AppState>();
     let acc = st.account_with_password(id)?;
-    let changed = match imap_sync::idle_wait(&acc, "INBOX", IDLE_RENEW).map_err(err)? {
+    // IDLE numa sessão própria; ao acordar, sincroniza na sessão de comandos (já aberta) sem novo login.
+    let end = st.hub.with(&acc, Kind::Idle, |live| imap_sync::idle_on(live, "INBOX", IDLE_RENEW)).map_err(err)?;
+    let changed = match end {
         IdleEnd::Changed => true,
         IdleEnd::TimedOut => false,
         IdleEnd::Unsupported => {
@@ -265,13 +330,21 @@ fn idle_cycle(app: &AppHandle, id: &str) -> CmdResult<()> {
             true
         }
     };
-    let fetched = sync_account_inbox(&st, id)?;
+    let (fetched, delta) = {
+        let _guard = st.syncing.lock().unwrap_or_else(|p| p.into_inner());
+        let mut store = Store::open(st.db_path()).map_err(err)?;
+        st.ensure_folders(&mut store, &acc)?;
+        let r = sync_inbox_hooked(&st, &mut store, &acc)?;
+        (r.fetched, r.delta)
+    };
+    emit_delta(app, id, "INBOX", &delta);
     notify_new(app, &st, id, fetched);
     #[cfg(desktop)]
     tray::refresh(app);
     if changed || fetched > 0 {
         app.emit("mail-changed", fetched).ok();
     }
+    prefetch_inbox(app, id);
     Ok(())
 }
 
@@ -444,6 +517,7 @@ async fn sync_inbox(app: AppHandle) -> CmdResult<SyncResult> {
                 Ok(r) => {
                     result.fetched += r.fetched;
                     result.total += r.total;
+                    emit_delta(&handle, &acc.id, "INBOX", &r.delta);
                     notify_new(&handle, st, &acc.id, r.fetched);
                 }
                 Err(_) if !reachable(st, &acc.id) => result.offline = true,
@@ -474,6 +548,7 @@ fn list_folders(state: State<'_, AppState>) -> CmdResult<Vec<Role>> {
 
 #[tauri::command]
 async fn sync_folder(app: AppHandle, role: Role, keep: usize) -> CmdResult<SyncResult> {
+    let handle = app.clone();
     blocking(app, move |st| {
         let Ok(_guard) = st.syncing.try_lock() else {
             return Ok(SyncResult { skipped: true, ..Default::default() });
@@ -484,11 +559,12 @@ async fn sync_folder(app: AppHandle, role: Role, keep: usize) -> CmdResult<SyncR
             let Some(name) = store.folder_name(&acc.id, role).map_err(err)? else { continue };
             match st
                 .account_with_password(&acc.id)
-                .and_then(|a| imap_sync::sync_mailbox(&a, &mut store, &name, Some(keep)).map_err(err))
+                .and_then(|a| sync_via_hub(st, &mut store, &a, &name, Some(keep)))
             {
                 Ok(r) => {
                     result.fetched += r.fetched;
                     result.total += r.total;
+                    emit_delta(&handle, &acc.id, &name, &r.delta);
                 }
                 Err(_) if !reachable(st, &acc.id) => result.offline = true,
                 Err(e) => result.errors.push(format!("{}: {e}", acc.id)),
@@ -502,6 +578,12 @@ async fn sync_folder(app: AppHandle, role: Role, keep: usize) -> CmdResult<SyncR
 #[tauri::command]
 fn list_messages(state: State<'_, AppState>, role: Role, limit: u32, offset: u32) -> CmdResult<Vec<MessageSummary>> {
     state.store.lock().unwrap().list_folder(role, limit, offset).map_err(err)
+}
+
+/// Página por cursor (custo O(limit), estável com chegada de mensagens). `cursor` vem do `next` da página anterior.
+#[tauri::command]
+fn list_messages_page(state: State<'_, AppState>, folder: Role, cursor: Option<String>, limit: u32) -> CmdResult<Page> {
+    state.store.lock().unwrap().list_folder_page(folder, cursor.as_deref(), limit).map_err(err)
 }
 
 /// Pasta virtual "Com estrela": todas as contas, fora Lixeira e Spam.
@@ -649,15 +731,40 @@ async fn delete_forever(app: AppHandle, id: i64) -> CmdResult<()> {
     .await
 }
 
+/// Baixa o corpo de uma mensagem que está só com cabeçalho no cache e devolve o detalhe completo.
+async fn load_body_now(app: &AppHandle, id: i64) -> CmdResult<MessageDetail> {
+    let handle = app.clone();
+    let done = tauri::async_runtime::spawn_blocking(move || -> CmdResult<Option<MessageDetail>> {
+        let st = handle.state::<AppState>();
+        let loc = st.locate(id)?;
+        let acc = st.account_with_password(&loc.account)?;
+        let mut store = Store::open(st.db_path()).map_err(err)?;
+        match imap_sync::load_body(&st.hub, &acc, &mut store, id) {
+            Ok(_) => st.store.lock().unwrap().get(id).map_err(err),
+            Err(_) if !reachable(&st, &loc.account) => Err("Sem conexão: o corpo desta mensagem ainda não foi baixado.".to_string()),
+            Err(e) => Err(format!("Não consegui baixar o corpo da mensagem: {e}")),
+        }
+    })
+    .await
+    .map_err(err)??;
+    match done {
+        Some(d) if d.body_loaded => Ok(d),
+        _ => Err("A mensagem não está mais no servidor e o corpo não foi baixado.".to_string()),
+    }
+}
+
 /// Abre a mensagem e, se estava não lida, marca como lida aqui e no servidor.
 #[tauri::command]
 async fn open_message(app: AppHandle, id: i64) -> CmdResult<Option<MessageDetail>> {
     let st = app.state::<AppState>();
+    let cached = st.store.lock().unwrap().get(id).map_err(err)?;
+    let Some(cached) = cached else { return Ok(None) };
+    // Só cabeçalho no cache: baixa o corpo agora, pela sessão persistente. Sem corpo e sem como baixar,
+    // o erro é explícito (a mensagem continua não lida) em vez de abrir uma tela vazia.
+    let cached = if cached.body_loaded { cached } else { load_body_now(&app, id).await? };
     let (mut detail, loc) = {
         let store = st.store.lock().unwrap();
-        let Some(mut d) = store.get(id).map_err(err)? else {
-            return Ok(None);
-        };
+        let mut d = cached;
         let was_seen = d.summary.seen;
         if !was_seen {
             store.set_seen(id, true).map_err(err)?;
@@ -673,8 +780,12 @@ async fn open_message(app: AppHandle, id: i64) -> CmdResult<Option<MessageDetail
     let own = acc.as_ref().ok().filter(|a| detail.reply_addr.eq_ignore_ascii_case(&a.username)).cloned();
     if let Some(own) = own {
         let mailbox = mailbox.clone();
-        let to = tauri::async_runtime::spawn_blocking(move || imap_sync::fetch_to(&own, &mailbox, uid))
-            .await
+        let loader = app.clone();
+        let to = tauri::async_runtime::spawn_blocking(move || {
+            let hub = &loader.state::<AppState>().hub;
+            hub.with(&own, Kind::Cmd, |l| imap_sync::fetch_to_on(l, &mailbox, uid))
+        })
+        .await
             .map_err(err)?;
         match to {
             Ok(Some(to)) => {
@@ -720,7 +831,7 @@ fn fetch_raw_online(st: &AppState, id: i64) -> CmdResult<Vec<u8>> {
     let loc = st.locate(id)?;
     let fetched = st
         .account_with_password(&loc.account)
-        .and_then(|a| imap_sync::fetch_raw(&a, &loc.mailbox, loc.uid).map_err(err));
+        .and_then(|a| st.hub.with(&a, Kind::Cmd, |l| imap_sync::fetch_raw_on(l, &loc.mailbox, loc.uid)).map_err(err));
     match fetched {
         Ok(raw) => raw.ok_or_else(|| "mensagem não encontrada no servidor".to_string()),
         Err(_) if !reachable(st, &loc.account) => Err("Sem conexão: o anexo ainda não foi baixado.".to_string()),
@@ -763,7 +874,9 @@ async fn save_eml(app: AppHandle, id: i64) -> CmdResult<String> {
         let subject = st.store.lock().unwrap().get(id).map_err(err)?.map(|d| d.summary.subject).unwrap_or_default();
         let loc = st.locate(id)?;
         let acc = st.account_with_password(&loc.account)?;
-        let raw = imap_sync::fetch_raw(&acc, &loc.mailbox, loc.uid)
+        let raw = st
+            .hub
+            .with(&acc, Kind::Cmd, |l| imap_sync::fetch_raw_on(l, &loc.mailbox, loc.uid))
             .map_err(err)?
             .ok_or_else(|| "mensagem não encontrada no servidor".to_string())?;
         let title: String = subject.trim().chars().take(80).collect();
@@ -838,6 +951,7 @@ async fn remove_account(app: AppHandle, id: String) -> CmdResult<()> {
         accounts.retain(|a| a.id != id);
         st.save_accounts(&accounts)?;
         st.tokens.lock().unwrap().remove(&id);
+        st.hub.drop_account(&id);
         st.store.lock().unwrap().remove_account(&id).map_err(err)
     })
     .await
@@ -916,13 +1030,17 @@ async fn delete_folder(app: AppHandle, account: String, folder: String) -> CmdRe
 /// Sincroniza uma pasta do usuário (as mais recentes, como `sync_folder`).
 #[tauri::command]
 async fn sync_user_folder(app: AppHandle, account: String, folder: String, keep: usize) -> CmdResult<SyncResult> {
+    let handle = app.clone();
     blocking(app, move |st| {
         let Ok(_guard) = st.syncing.try_lock() else {
             return Ok(SyncResult { skipped: true, ..Default::default() });
         };
         let mut store = Store::open(st.db_path()).map_err(err)?;
-        match st.account_with_password(&account).and_then(|a| imap_sync::sync_mailbox(&a, &mut store, &folder, Some(keep)).map_err(err)) {
-            Ok(r) => Ok(SyncResult { fetched: r.fetched, total: r.total, ..Default::default() }),
+        match st.account_with_password(&account).and_then(|a| sync_via_hub(st, &mut store, &a, &folder, Some(keep))) {
+            Ok(r) => {
+                emit_delta(&handle, &account, &folder, &r.delta);
+                Ok(SyncResult { fetched: r.fetched, total: r.total, ..Default::default() })
+            }
             Err(_) if !reachable(st, &account) => Ok(SyncResult { offline: true, ..Default::default() }),
             Err(e) => Err(e),
         }
@@ -1155,7 +1273,7 @@ fn setting_of(st: &AppState, key: &str) -> Option<String> {
 /// Sincroniza a Entrada e, se chegou algo, roda o que depende de mensagem nova: férias e regras.
 fn sync_inbox_hooked(st: &AppState, store: &mut Store, acc: &ImapAccount) -> CmdResult<mail_core::SyncReport> {
     let mark = store.max_id().map_err(err)?;
-    let report = imap_sync::sync_mailbox(acc, store, "INBOX", Some(offline_keep(st))).map_err(err)?;
+    let report = sync_via_hub(st, store, acc, "INBOX", Some(offline_keep(st)))?;
     if report.fetched > 0 {
         let new = st.store.lock().unwrap().inbox_after(&acc.id, mark).map_err(err)?;
         auto_reply(st, acc, &new);
@@ -1179,7 +1297,7 @@ fn auto_reply(st: &AppState, acc: &ImapAccount, new: &[Candidate]) {
         if st.store.lock().unwrap().vacation_replied(&acc.id, addr, since).unwrap_or(true) {
             continue;
         }
-        let Ok(Some(raw)) = imap_sync::fetch_raw(acc, "INBOX", c.uid) else { continue };
+        let Ok(Some(raw)) = st.hub.with(acc, Kind::Cmd, |l| imap_sync::fetch_raw_on(l, "INBOX", c.uid)) else { continue };
         if vacation::is_automatic(&raw) {
             continue;
         }
@@ -1489,6 +1607,7 @@ pub fn run() {
             move_message,
             delete_forever,
             list_messages,
+            list_messages_page,
             search_messages,
             list_starred,
             search_starred,

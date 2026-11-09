@@ -571,3 +571,57 @@ fn fila_offline_reaplica_quando_a_rede_volta() {
     imap_sync::sync_mailbox(&dest, &mut theirs, "INBOX", None).unwrap();
     assert_eq!(theirs.list("INBOX", 10, 0).unwrap()[0].subject, "Enviada depois");
 }
+
+#[test]
+fn sessao_persistente_idle_entrega_em_menos_de_1s_e_corpo_sob_demanda() {
+    use mail_core::{Hub, IdleEnd, Kind};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+    let Some(acc) = account("hub") else { return };
+    session(&acc).append("INBOX", &raw(0, "Primeira")).finish().unwrap();
+    let hub = Arc::new(Hub::new());
+    let mut store = Store::open_in_memory().unwrap();
+
+    // Sync inicial pela sessão de comandos.
+    let r = hub.with(&acc, Kind::Cmd, |l| imap_sync::sync_on(l, &acc, &mut store, "INBOX", None)).unwrap();
+    assert_eq!(r.fetched, 1);
+
+    // Sessão de IDLE: espera, e a sync roda na mesma conexão assim que o servidor avisa.
+    let started = Arc::new(AtomicBool::new(false));
+    let waiter = {
+        let (hub, acc, started) = (hub.clone(), acc.clone(), started.clone());
+        std::thread::spawn(move || {
+            let mut store = Store::open_in_memory().unwrap();
+            hub.with(&acc, Kind::Idle, |l| {
+                imap_sync::sync_on(l, &acc, &mut store, "INBOX", None)?;
+                started.store(true, Ordering::SeqCst);
+                let end = imap_sync::idle_on(l, "INBOX", Duration::from_secs(20))?;
+                let r = imap_sync::sync_on(l, &acc, &mut store, "INBOX", None)?;
+                Ok((end, r.fetched, Instant::now()))
+            })
+            .unwrap()
+        })
+    };
+    while !started.load(Ordering::SeqCst) {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    std::thread::sleep(Duration::from_millis(700)); // dá tempo de o IDLE começar
+    let sent = Instant::now();
+    session(&acc).append("INBOX", &raw(1, "Chegou agora")).finish().unwrap();
+    let (end, fetched, done) = waiter.join().unwrap();
+    let total = done.duration_since(sent);
+    assert_eq!((end, fetched), (IdleEnd::Changed, 1));
+    assert!(total < Duration::from_secs(1), "da entrega ao banco: {total:?}");
+
+    // Corpo sob demanda (mensagem grande vem sem corpo) e sessão de comandos reaproveitada.
+    let big = format!("{}{}", String::from_utf8(raw(2, "Grande")).unwrap(), "linha longa de enchimento do corpo\r\n".repeat(400));
+    session(&acc).append("INBOX", big.as_bytes()).finish().unwrap();
+    let r = hub.with(&acc, Kind::Cmd, |l| imap_sync::sync_on(l, &acc, &mut store, "INBOX", None)).unwrap();
+    let id = *r.delta.inserted.iter().find(|i| store.get(**i).unwrap().unwrap().summary.subject == "Grande").unwrap();
+    // O Greenmail responde BODY[]<0>{n} sem espaço (contra o RFC): a sync cai para a mensagem inteira nele.
+    // Em servidor correto a grande chega sem corpo (imap_fake cobre); aqui basta garantir que o corpo abre.
+    imap_sync::load_body(&hub, &acc, &mut store, id).unwrap();
+    assert!(store.get(id).unwrap().unwrap().body_text.contains("linha longa"));
+    assert!(hub.is_open(&acc.id, Kind::Cmd));
+}

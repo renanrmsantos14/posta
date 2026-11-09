@@ -35,6 +35,24 @@ pub struct Scheduled {
     pub out: Outgoing,
 }
 
+/// Mantém as colunas desnormalizadas (`pinned`, `snooze_until`) de todas as cópias da mensagem
+/// (mesma chave: Message-ID, ou pasta/UID quando não há) iguais às tabelas `pins` e `snoozes`.
+fn mark(tx: &rusqlite::Connection, id: i64, col: &str, value: i64) -> Result<()> {
+    let key: Option<(String, String)> = tx
+        .query_row("SELECT account, message_id FROM messages WHERE id = ?1", params![id], |r| Ok((r.get(0)?, r.get(1)?)))
+        .optional()?;
+    let Some((account, message_id)) = key else { return Ok(()) };
+    if message_id.is_empty() {
+        tx.execute(&format!("UPDATE messages SET {col} = ?2 WHERE id = ?1"), params![id, value])?;
+    } else {
+        tx.execute(
+            &format!("UPDATE messages SET {col} = ?3 WHERE account = ?1 AND message_id = ?2"),
+            params![account, message_id, value],
+        )?;
+    }
+    Ok(())
+}
+
 impl Store {
     /// Esconde as mensagens até `until` (Unix, segundos). Adiar de novo troca a hora.
     pub fn snooze(&mut self, ids: &[i64], until: i64) -> Result<()> {
@@ -48,6 +66,7 @@ impl Store {
                 ),
                 params![id, until],
             )?;
+            mark(&tx, *id, "snooze_until", until)?;
         }
         Ok(tx.commit()?)
     }
@@ -62,6 +81,7 @@ impl Store {
                 ),
                 params![id],
             )?;
+            mark(&tx, *id, "snooze_until", 0)?;
         }
         Ok(tx.commit()?)
     }
@@ -94,6 +114,7 @@ impl Store {
                 format!("DELETE FROM pins WHERE (account, msg_key) IN (SELECT m.account, {MSG_KEY} FROM messages m WHERE m.id = ?1)")
             };
             tx.execute(&sql, params![id])?;
+            mark(&tx, *id, "pinned", pinned as i64)?;
         }
         Ok(tx.commit()?)
     }
@@ -200,7 +221,7 @@ mod tests {
         NewMessage {
             uid, from_name: "Ana".into(), from_addr: "ana@x.com".into(), subject: format!("m{uid}"), date,
             body_text: "oi".into(), body_html: String::new(), attachments: vec![], seen: true, message_id: format!("{uid}@x"),
-            refs: String::new(), reply_addr: String::new(), flagged: false, to_addrs: String::new(), cc_addrs: String::new(),
+            refs: String::new(), reply_addr: String::new(), flagged: false, to_addrs: String::new(), cc_addrs: String::new(), ..Default::default()
         }
     }
 

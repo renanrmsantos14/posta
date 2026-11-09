@@ -3,15 +3,18 @@
 use imap::{ClientBuilder, ConnectionMode, Session};
 use mail_parser::{MessageParser, PartKind};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
+use std::sync::Mutex;
 use std::time::Duration;
 
+use imap::types::UnsolicitedResponse;
 use imap_proto::NameAttribute;
 
 use crate::attachments;
 use crate::oauth::{Provider, XOauth2};
 use crate::folders::{archive_name, is_system, new_name, pick, renamed, user_folders, with_children, Folder, Listed, Role};
-use crate::store::{NewMessage, Store};
+use crate::session::{Hub, Kind, Live};
+use crate::store::{Delta, NewMessage, Store};
 use crate::Result;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -100,10 +103,34 @@ impl ImapAccount {
 pub struct SyncReport {
     pub fetched: usize,
     pub total: usize,
+    /// Como a pasta foi reconciliada: "full", "qresync", "condstore" ou "uidnext".
+    pub mode: &'static str,
+    /// Mensagens inseridas, alteradas e removidas, por id local.
+    #[serde(skip)]
+    pub delta: Delta,
 }
 
-/// Quantas mensagens completas buscar por comando FETCH.
-const BATCH: usize = 50;
+/// Quantas mensagens (só o início de cada uma) buscar por comando FETCH.
+const BATCH: usize = 100;
+/// Quantos bytes do início da mensagem baixar na sync: cabeçalhos mais a prévia do texto.
+/// Mensagem menor que isso já chega inteira.
+const PREVIEW_BYTES: usize = 8192;
+/// Quantas mensagens completas buscar por comando FETCH ao baixar corpos.
+const BODY_BATCH: usize = 10;
+/// Quantas das mensagens mais novas (por UID) a sync incremental sem QRESYNC reconfere (flags e exclusões).
+const RECENT_WINDOW: u32 = 500;
+
+/// Servidores cuja resposta a `BODY[]<0.N>` não deu para ler (o Greenmail, por exemplo, omite o espaço
+/// antes do literal, contra o RFC 3501). Neles a sync baixa a mensagem inteira, como antes.
+static NO_PARTIAL: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+fn server_key(acc: &ImapAccount) -> String {
+    format!("{}:{}", acc.host, acc.port)
+}
+
+fn partial_broken(acc: &ImapAccount) -> bool {
+    NO_PARTIAL.lock().unwrap_or_else(|p| p.into_inner()).contains(&server_key(acc))
+}
 
 pub(crate) type ImapSession = Session<imap::Connection>;
 
@@ -134,12 +161,19 @@ pub enum IdleEnd {
 
 /// Bloqueia até o servidor avisar de mudança em `mailbox` ou até `timeout`. Abre e fecha a própria conexão.
 pub fn idle_wait(acc: &ImapAccount, mailbox: &str, timeout: Duration) -> Result<IdleEnd> {
-    let mut session = connect(acc)?;
-    if !session.capabilities()?.has_str("IDLE") {
+    let mut live = Live::open(acc)?;
+    let end = idle_on(&mut live, mailbox, timeout);
+    live.logout();
+    end
+}
+
+/// IDLE numa sessão já aberta (a conexão fica selecionada em `mailbox` ao voltar, pronta para `sync_on`).
+pub fn idle_on(live: &mut Live, mailbox: &str, timeout: Duration) -> Result<IdleEnd> {
+    if !live.idle {
         return Ok(IdleEnd::Unsupported);
     }
-    session.select(mailbox)?;
-    let outcome = session.idle().timeout(timeout).keepalive(false).wait_while(imap::extensions::idle::stop_on_any)?;
+    live.s.select(mailbox)?;
+    let outcome = live.s.idle().timeout(timeout).keepalive(false).wait_while(imap::extensions::idle::stop_on_any)?;
     Ok(match outcome {
         imap::extensions::idle::WaitOutcome::MailboxChanged => IdleEnd::Changed,
         imap::extensions::idle::WaitOutcome::TimedOut => IdleEnd::TimedOut,
@@ -212,6 +246,7 @@ fn parse(uid: u32, raw: &[u8], seen: bool, flagged: bool, fallback_date: i64, ow
         reply_addr,
         to_addrs: msg.as_ref().map(|m| addresses(m.to())).unwrap_or_default(),
         cc_addrs: msg.as_ref().map(|m| addresses(m.cc())).unwrap_or_default(),
+        header_only: false,
     }
 }
 
@@ -233,55 +268,225 @@ fn is_flagged(fetch: &imap::types::Fetch) -> bool {
     fetch.flags().iter().any(|f| matches!(f, imap::types::Flag::Flagged))
 }
 
-/// Traz a pasta para o banco local: novas mensagens (as mais recentes primeiro),
-/// exclusões feitas no servidor e mudanças de lida/não lida.
-/// `Some(n)`: só baixa o corpo das n mais recentes do servidor; as locais mais antigas ficam.
+/// Traz a pasta para o banco local numa conexão só dela (abre e fecha). Para repetir sync, prefira `Hub` + `sync_on`.
+/// `Some(n)`: só baixa as n mais recentes do servidor; as locais mais antigas ficam.
 pub fn sync_mailbox(acc: &ImapAccount, store: &mut Store, mailbox: &str, keep: Option<usize>) -> Result<SyncReport> {
-    let mut session = connect(acc)?;
-    let selected = session.select(mailbox)?;
-    store.set_uid_validity(&acc.id, mailbox, selected.uid_validity.unwrap_or(0))?;
-
-    let mut server: Vec<(u32, bool, bool)> = Vec::new();
-    if selected.exists > 0 {
-        for f in session.uid_fetch("1:*", "(UID FLAGS)")?.iter() {
-            if let Some(uid) = f.uid {
-                server.push((uid, is_seen(f), is_flagged(f)));
-            }
+    loop {
+        let was_broken = partial_broken(acc);
+        let mut live = Live::open(acc)?;
+        let report = sync_on(&mut live, acc, store, mailbox, keep);
+        live.logout();
+        // O servidor acabou de se revelar incompatível com a leitura parcial: repete já sem ela.
+        if report.is_err() && !was_broken && partial_broken(acc) {
+            continue;
         }
+        return report;
     }
-    store.apply_server_state(&acc.id, mailbox, &server)?;
+}
 
-    let local: HashSet<u32> = store.local_uids(&acc.id, mailbox)?.into_iter().collect();
-    let mut newest: Vec<u32> = server.iter().map(|(u, _, _)| *u).collect();
-    newest.sort_unstable_by(|a, b| b.cmp(a));
-    if let Some(n) = keep {
-        newest.truncate(n);
-    }
-    let missing: Vec<u32> = newest.into_iter().filter(|u| !local.contains(u)).collect();
+/// Flags (UID, lida, estrela) das mensagens do conjunto `set` que casam com `query`.
+fn fetch_flags(s: &mut ImapSession, set: &str, query: &str) -> Result<Vec<(u32, bool, bool)>> {
+    Ok(s.uid_fetch(set, query)?.iter().filter_map(|f| Some((f.uid?, is_seen(f), is_flagged(f)))).collect())
+}
 
-    let mut report = SyncReport { fetched: 0, total: server.len() };
-    report.fetched = download(&mut session, acc, store, mailbox, &missing)?;
-    session.logout().ok();
+/// UIDs que o servidor disse ter sumido (`VANISHED`, só com QRESYNC) desde o último comando.
+fn vanished(s: &mut ImapSession) -> Vec<u32> {
+    s.take_all_unsolicited()
+        .filter_map(|u| match u {
+            UnsolicitedResponse::Vanished { uids, .. } => Some(uids),
+            _ => None,
+        })
+        .flatten()
+        .flatten()
+        .collect()
+}
+
+/// Sync de uma pasta numa sessão já aberta, no menor custo que o servidor permite:
+/// - sem estado anterior (ou UIDVALIDITY nova): lista tudo (`1:*`) e baixa o que falta;
+/// - QRESYNC: só o que mudou desde o HIGHESTMODSEQ guardado, inclusive exclusões;
+/// - CONDSTORE: o que mudou nas flags, mais a janela recente para ver exclusões;
+/// - nada disso: UIDNEXT e a janela recente (`RECENT_WINDOW` mensagens mais novas), sem varrer a pasta toda.
+pub fn sync_on(live: &mut Live, acc: &ImapAccount, store: &mut Store, mailbox: &str, keep: Option<usize>) -> Result<SyncReport> {
+    live.s.take_all_unsolicited().for_each(drop);
+    let sel = live.s.select(mailbox)?;
+    let validity = sel.uid_validity.unwrap_or(0);
+    let prev = store.sync_state(&acc.id, mailbox)?;
+    store.set_uid_validity(&acc.id, mailbox, validity)?;
+    // Cópia incompleta (janela anterior): só segue incremental se a janela pedida agora já está preenchida.
+    let have = store.count_box(&acc.id, mailbox)? as usize;
+    let base = prev.filter(|p| p.uid_validity == validity && p.uid_next > 0 && (p.complete || keep.is_some_and(|n| have >= n)));
+    let (highest, uid_next) = (sel.highest_mod_seq.unwrap_or(0), sel.uid_next.unwrap_or(0));
+    let mut report = SyncReport { total: sel.exists as usize, ..Default::default() };
+
+    let (missing, complete) = match base {
+        None => {
+            let server = if sel.exists > 0 { fetch_flags(&mut live.s, "1:*", "(UID FLAGS)")? } else { Vec::new() };
+            report.delta.merge(store.apply_server_state(&acc.id, mailbox, &server)?);
+            let local: HashSet<u32> = store.local_uids(&acc.id, mailbox)?.into_iter().collect();
+            let mut newest: Vec<u32> = server.iter().map(|(u, _, _)| *u).collect();
+            newest.sort_unstable_by(|a, b| b.cmp(a));
+            if let Some(n) = keep {
+                newest.truncate(n);
+            }
+            report.mode = "full";
+            (newest.into_iter().filter(|u| !local.contains(u)).collect::<Vec<u32>>(), keep.is_none())
+        }
+        Some(b) => {
+            let max_local = store.max_uid(&acc.id, mailbox)?;
+            let mut fresh: BTreeSet<u32> = BTreeSet::new();
+            report.mode = "uidnext";
+            if live.condstore && b.highest_modseq > 0 && highest > 0 {
+                let modifier = if live.qresync { " VANISHED" } else { "" };
+                let q = format!("(UID FLAGS) (CHANGEDSINCE {}{modifier})", b.highest_modseq);
+                let changes = fetch_flags(&mut live.s, "1:*", &q)?;
+                let gone = if live.qresync { vanished(&mut live.s) } else { Vec::new() };
+                let (new, old): (Vec<_>, Vec<_>) = changes.into_iter().partition(|c| c.0 > max_local);
+                fresh.extend(new.iter().map(|c| c.0));
+                report.delta.changed.extend(store.apply_flag_changes(&acc.id, mailbox, &old)?);
+                report.delta.removed.extend(store.remove_uids(&acc.id, mailbox, &gone)?);
+                report.mode = if live.qresync { "qresync" } else { "condstore" };
+            }
+            if !live.qresync {
+                // Sem QRESYNC o servidor não conta o que foi excluído: confere a janela recente.
+                let lo = store.window_start(&acc.id, mailbox, RECENT_WINDOW)?;
+                let server = if sel.exists > 0 { fetch_flags(&mut live.s, &format!("{}:*", lo.max(1)), "(UID FLAGS)")? } else { Vec::new() };
+                let d = store.apply_server_state_from(&acc.id, mailbox, lo, &server)?;
+                report.delta.changed.extend(d.changed);
+                report.delta.removed.extend(d.removed);
+                fresh.extend(server.iter().map(|c| c.0).filter(|u| *u > max_local));
+            }
+            let mut newest: Vec<u32> = fresh.into_iter().rev().collect();
+            let truncated = keep.is_some_and(|n| newest.len() > n);
+            if let Some(n) = keep {
+                newest.truncate(n);
+            }
+            (newest, b.complete && !truncated)
+        }
+    };
+    report.delta.inserted = download(&mut live.s, acc, store, mailbox, &missing)?;
+    report.fetched = report.delta.inserted.len();
+    report.delta.changed.sort_unstable();
+    report.delta.changed.dedup();
+    store.save_sync_state(&acc.id, mailbox, highest, uid_next, complete)?;
     Ok(report)
 }
 
-/// Baixa e grava as mensagens de `uids` (já com a pasta selecionada). Devolve quantas gravou.
-fn download(session: &mut ImapSession, acc: &ImapAccount, store: &mut Store, mailbox: &str, uids: &[u32]) -> Result<usize> {
-    let mut fetched = 0;
+/// Baixa o início de cada mensagem (cabeçalhos e uma prévia do texto) e a estrutura MIME, e grava.
+/// Mensagem curta cabe inteira na prévia e já fica com o corpo; as maiores ficam sem corpo
+/// (`body_loaded = 0`) até alguém abrir a mensagem ou o prefetch chegar nela. Devolve os ids gravados.
+fn download(session: &mut ImapSession, acc: &ImapAccount, store: &mut Store, mailbox: &str, uids: &[u32]) -> Result<Vec<i64>> {
+    let mut ids = Vec::new();
+    let partial = !partial_broken(acc);
+    let query = if partial {
+        format!("(UID FLAGS INTERNALDATE BODYSTRUCTURE BODY.PEEK[]<0.{PREVIEW_BYTES}>)")
+    } else {
+        "(UID FLAGS INTERNALDATE BODYSTRUCTURE BODY.PEEK[])".to_string()
+    };
     for chunk in uids.chunks(BATCH) {
         let set = chunk.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
-        let fetches = session.uid_fetch(&set, "(UID FLAGS INTERNALDATE BODY.PEEK[])")?;
+        let fetches = match session.uid_fetch(&set, &query) {
+            Ok(f) => f,
+            // Resposta ilegível: a conexão ficou dessincronizada. Anota o servidor e derruba a sessão;
+            // a nova tentativa (Hub ou sync_mailbox) já baixa sem leitura parcial.
+            Err(e) if partial && !matches!(e, imap::Error::Io(_) | imap::Error::ConnectionLost) => {
+                NO_PARTIAL.lock().unwrap_or_else(|p| p.into_inner()).push(server_key(acc));
+                return Err(imap::Error::ConnectionLost.into());
+            }
+            Err(e) => return Err(e.into()),
+        };
         let msgs: Vec<NewMessage> = fetches
             .iter()
             .filter_map(|f| {
                 let date = f.internal_date().map(|d| d.timestamp()).unwrap_or(0);
-                Some(parse(f.uid?, f.body()?, is_seen(f), is_flagged(f), date, &acc.username))
+                let raw = f.body()?;
+                let mut m = parse(f.uid?, raw, is_seen(f), is_flagged(f), date, &acc.username);
+                if partial && raw.len() >= PREVIEW_BYTES {
+                    // Cortada: o HTML pela metade não serve, e a lista de anexos vem da estrutura MIME.
+                    m.header_only = true;
+                    m.body_html.clear();
+                    if let Some(bs) = f.bodystructure() {
+                        m.attachments = structure_attachments(bs);
+                    }
+                }
+                Some(m)
             })
             .collect();
-        fetched += msgs.len();
-        store.insert_messages(&acc.id, mailbox, &msgs)?;
+        ids.extend(store.insert_messages(&acc.id, mailbox, &msgs)?);
     }
-    Ok(fetched)
+    Ok(ids)
+}
+
+fn param<'a>(params: &'a imap_proto::types::BodyParams, key: &str) -> Option<&'a str> {
+    params.as_ref()?.iter().find(|(k, _)| k.eq_ignore_ascii_case(key)).map(|(_, v)| v.as_ref())
+}
+
+/// Anexos de uma mensagem a partir do BODYSTRUCTURE (sem baixar o corpo). Provisório: ao baixar a mensagem
+/// inteira, a lista passa a ser a do mail-parser, que é a que `attachments::extract` usa.
+fn structure_attachments(bs: &imap_proto::types::BodyStructure) -> Vec<attachments::Attachment> {
+    use imap_proto::types::BodyStructure as B;
+    fn walk(bs: &B, out: &mut Vec<attachments::Attachment>) {
+        let (common, other, text) = match bs {
+            B::Multipart { bodies, .. } => return bodies.iter().for_each(|b| walk(b, out)),
+            B::Basic { common, other, .. } => (common, other, false),
+            B::Text { common, other, .. } => (common, other, true),
+            B::Message { common, other, .. } => (common, other, false),
+        };
+        let disp = common.disposition.as_ref();
+        let name = disp.and_then(|d| param(&d.params, "filename")).or_else(|| param(&common.ty.params, "name"));
+        let attached = disp.is_some_and(|d| d.ty.eq_ignore_ascii_case("attachment"));
+        let inline = disp.is_some_and(|d| d.ty.eq_ignore_ascii_case("inline"));
+        if attached || (!text && !inline && name.is_some()) {
+            out.push(attachments::Attachment {
+                name: name.unwrap_or("anexo").to_string(),
+                mime: format!("{}/{}", common.ty.ty, common.ty.subtype).to_lowercase(),
+                size: other.octets as u64,
+                index: out.len() as u32,
+            });
+        }
+    }
+    let mut out = Vec::new();
+    walk(bs, &mut out);
+    out
+}
+
+/// Baixa o corpo completo de `uids` (os que já estão no banco sem corpo) e grava. Devolve quantos gravou.
+fn fill_bodies(session: &mut ImapSession, acc: &ImapAccount, store: &mut Store, mailbox: &str, uids: &[u32]) -> Result<Vec<i64>> {
+    let mut done = Vec::new();
+    for chunk in uids.chunks(BODY_BATCH) {
+        let set = chunk.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
+        for f in session.uid_fetch(&set, "(UID BODY.PEEK[])")?.iter() {
+            let (Some(uid), Some(raw)) = (f.uid, f.body()) else { continue };
+            let full = parse(uid, raw, false, false, 0, &acc.username);
+            if let Some(id) = store.set_body(&acc.id, mailbox, uid, &full)? {
+                done.push(id);
+            }
+        }
+    }
+    Ok(done)
+}
+
+/// Corpo de uma mensagem que só tem o início no banco, buscado do servidor e gravado. `false`: já tinha corpo.
+pub fn load_body_on(live: &mut Live, acc: &ImapAccount, store: &mut Store, id: i64) -> Result<bool> {
+    let Some((account, mailbox, uid)) = store.body_missing(id)? else { return Ok(false) };
+    debug_assert_eq!(account, acc.id);
+    live.s.select(&mailbox)?;
+    Ok(!fill_bodies(&mut live.s, acc, store, &mailbox, &[uid])?.is_empty())
+}
+
+/// Como `load_body_on`, na sessão persistente da conta.
+pub fn load_body(hub: &Hub, acc: &ImapAccount, store: &mut Store, id: i64) -> Result<bool> {
+    hub.with(acc, Kind::Cmd, |live| load_body_on(live, acc, store, id))
+}
+
+/// Baixa em segundo plano o corpo das `limit` mensagens mais recentes da pasta que ainda não o têm,
+/// para abrirem sem rede. Devolve os ids atualizados.
+pub fn prefetch_bodies_on(live: &mut Live, acc: &ImapAccount, store: &mut Store, mailbox: &str, limit: u32) -> Result<Vec<i64>> {
+    let uids = store.uids_without_body(&acc.id, mailbox, limit)?;
+    if uids.is_empty() {
+        return Ok(Vec::new());
+    }
+    live.s.select(mailbox)?;
+    fill_bodies(&mut live.s, acc, store, mailbox, &uids)
 }
 
 /// Busca no servidor (IMAP SEARCH) na pasta. Mensagens que ainda não estão no banco local são baixadas,
@@ -426,23 +631,24 @@ fn uid_set(uids: &[u32]) -> String {
 
 /// Move vários UIDs da mesma pasta numa só conexão.
 pub fn move_messages(acc: &ImapAccount, from: &str, uids: &[u32], to: &str) -> Result<()> {
+    Live::once(acc, |l| move_messages_on(l, from, uids, to))
+}
+
+/// `move_messages` numa sessão já aberta.
+pub fn move_messages_on(live: &mut Live, from: &str, uids: &[u32], to: &str) -> Result<()> {
     if uids.is_empty() {
         return Ok(());
     }
-    let mut session = connect(acc)?;
-    let caps = session.capabilities()?;
-    let (has_move, uidplus) = (caps.has_str("MOVE"), caps.has_str("UIDPLUS"));
-    drop(caps);
-    session.select(from)?;
+    let (has_move, uidplus) = (live.has_move, live.uidplus);
+    live.s.select(from)?;
     let set = uid_set(uids);
     if has_move {
-        session.uid_mv(&set, to)?;
+        live.s.uid_mv(&set, to)?;
     } else {
-        session.uid_copy(&set, to)?;
-        session.uid_store(&set, "+FLAGS.SILENT (\\Deleted)")?;
-        if uidplus { session.uid_expunge(&set)?; } else { session.expunge()?; }
+        live.s.uid_copy(&set, to)?;
+        live.s.uid_store(&set, "+FLAGS.SILENT (\\Deleted)")?;
+        if uidplus { live.s.uid_expunge(&set)?; } else { live.s.expunge()?; }
     }
-    session.logout().ok();
     Ok(())
 }
 
@@ -452,16 +658,19 @@ pub fn delete_forever(acc: &ImapAccount, mailbox: &str, uid: u32) -> Result<()> 
 }
 
 pub fn delete_forever_many(acc: &ImapAccount, mailbox: &str, uids: &[u32]) -> Result<()> {
+    Live::once(acc, |l| delete_forever_on(l, mailbox, uids))
+}
+
+/// `delete_forever_many` numa sessão já aberta.
+pub fn delete_forever_on(live: &mut Live, mailbox: &str, uids: &[u32]) -> Result<()> {
     if uids.is_empty() {
         return Ok(());
     }
-    let mut session = connect(acc)?;
-    let uidplus = session.capabilities()?.has_str("UIDPLUS");
-    session.select(mailbox)?;
+    let uidplus = live.uidplus;
+    live.s.select(mailbox)?;
     let set = uid_set(uids);
-    session.uid_store(&set, "+FLAGS.SILENT (\\Deleted)")?;
-    if uidplus { session.uid_expunge(&set)?; } else { session.expunge()?; }
-    session.logout().ok();
+    live.s.uid_store(&set, "+FLAGS.SILENT (\\Deleted)")?;
+    if uidplus { live.s.uid_expunge(&set)?; } else { live.s.expunge()?; }
     Ok(())
 }
 
@@ -476,6 +685,11 @@ pub enum MsgFlag {
 
 /// Liga/desliga a flag em vários UIDs da mesma pasta. A UI já atualizou o banco local antes ou depois.
 pub fn set_flag(acc: &ImapAccount, mailbox: &str, uids: &[u32], flag: MsgFlag, on: bool) -> Result<()> {
+    Live::once(acc, |l| set_flag_on(l, mailbox, uids, flag, on))
+}
+
+/// `set_flag` numa sessão já aberta.
+pub fn set_flag_on(live: &mut Live, mailbox: &str, uids: &[u32], flag: MsgFlag, on: bool) -> Result<()> {
     if uids.is_empty() {
         return Ok(());
     }
@@ -483,10 +697,8 @@ pub fn set_flag(acc: &ImapAccount, mailbox: &str, uids: &[u32], flag: MsgFlag, o
         MsgFlag::Seen => "\\Seen",
         MsgFlag::Flagged => "\\Flagged",
     };
-    let mut session = connect(acc)?;
-    session.select(mailbox)?;
-    session.uid_store(uid_set(uids), format!("{}FLAGS.SILENT ({name})", if on { "+" } else { "-" }))?;
-    session.logout().ok();
+    live.s.select(mailbox)?;
+    live.s.uid_store(uid_set(uids), format!("{}FLAGS.SILENT ({name})", if on { "+" } else { "-" }))?;
     Ok(())
 }
 
@@ -497,28 +709,32 @@ pub fn set_seen(acc: &ImapAccount, mailbox: &str, uid: u32, seen: bool) -> Resul
 
 /// Primeiro endereço do cabeçalho To de uma mensagem, buscado só pelo cabeçalho.
 pub fn fetch_to(acc: &ImapAccount, mailbox: &str, uid: u32) -> Result<Option<String>> {
-    let mut session = connect(acc)?;
-    session.select(mailbox)?;
-    let fetches = session.uid_fetch(uid.to_string(), "BODY.PEEK[HEADER.FIELDS (TO)]")?;
-    let to = fetches.iter().find_map(|f| f.header()).and_then(|h| {
+    Live::once(acc, |l| fetch_to_on(l, mailbox, uid))
+}
+
+/// `fetch_to` numa sessão já aberta.
+pub fn fetch_to_on(live: &mut Live, mailbox: &str, uid: u32) -> Result<Option<String>> {
+    live.s.select(mailbox)?;
+    let fetches = live.s.uid_fetch(uid.to_string(), "BODY.PEEK[HEADER.FIELDS (TO)]")?;
+    Ok(fetches.iter().find_map(|f| f.header()).and_then(|h| {
         let msg = MessageParser::default().parse(h)?;
         first_to(&msg)
-    });
-    session.logout().ok();
-    Ok(to)
+    }))
+}
+
+/// Mensagem completa (para extrair um anexo sob demanda).
+pub fn fetch_raw(acc: &ImapAccount, mailbox: &str, uid: u32) -> Result<Option<Vec<u8>>> {
+    Live::once(acc, |l| fetch_raw_on(l, mailbox, uid))
+}
+
+/// `fetch_raw` numa sessão já aberta.
+pub fn fetch_raw_on(live: &mut Live, mailbox: &str, uid: u32) -> Result<Option<Vec<u8>>> {
+    live.s.select(mailbox)?;
+    let fetches = live.s.uid_fetch(uid.to_string(), "BODY.PEEK[]")?;
+    Ok(fetches.iter().find_map(|f| f.body().map(<[u8]>::to_vec)))
 }
 
 /// Testa as credenciais sem sincronizar nada.
-/// Mensagem completa (para extrair um anexo sob demanda).
-pub fn fetch_raw(acc: &ImapAccount, mailbox: &str, uid: u32) -> Result<Option<Vec<u8>>> {
-    let mut session = connect(acc)?;
-    session.select(mailbox)?;
-    let fetches = session.uid_fetch(uid.to_string(), "BODY.PEEK[]")?;
-    let raw = fetches.iter().find_map(|f| f.body().map(<[u8]>::to_vec));
-    session.logout().ok();
-    Ok(raw)
-}
-
 pub fn check_login(acc: &ImapAccount) -> Result<()> {
     connect(acc)?.logout().ok();
     Ok(())

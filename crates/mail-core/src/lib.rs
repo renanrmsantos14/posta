@@ -6,6 +6,7 @@ pub mod imap_sync;
 pub mod later;
 pub mod oauth;
 pub mod rules;
+pub mod session;
 pub mod search;
 pub mod outbox;
 pub mod send;
@@ -16,9 +17,10 @@ pub mod vacation;
 pub use attachments::Attachment;
 pub use folders::{Folder, Role};
 pub use imap_sync::{AuthMode, IdleEnd, ImapAccount, MsgFlag, Security, SmtpServer, SyncReport};
+pub use session::{Hub, Kind, Live};
 pub use outbox::{FlushReport, OpKind, OutboxItem, PendingOp};
 pub use send::{OutAttachment, Outgoing, SendReport};
-pub use store::{Contact, DraftRecord, MessageDetail, MessageSummary, ReplyRef, Store, UserFolder};
+pub use store::{Contact, Cursor, Delta, DraftRecord, Page, SyncState, MessageDetail, MessageSummary, ReplyRef, Store, UserFolder};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

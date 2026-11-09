@@ -197,7 +197,7 @@ mod tests {
         let m = |uid: u32| NewMessage {
             uid, from_name: String::new(), from_addr: "a@b.com".into(), subject: format!("s{uid}"), date: uid as i64,
             body_text: String::new(), body_html: String::new(), attachments: vec![], seen: false, message_id: format!("{uid}@x"),
-            refs: String::new(), reply_addr: String::new(), flagged: false, to_addrs: String::new(), cc_addrs: String::new(),
+            refs: String::new(), reply_addr: String::new(), flagged: false, to_addrs: String::new(), cc_addrs: String::new(), ..Default::default()
         };
         s.insert_messages("a", "INBOX", &[m(1), m(2)]).unwrap();
         let mark = s.max_id().unwrap();
