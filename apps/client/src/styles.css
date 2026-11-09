@@ -740,7 +740,7 @@ kbd {
   .app { --rail-w: 64px; }
   .resizer[data-edge="rail"] { display: none; }
   .rail { padding: 12px 8px; gap: 10px; }
-  .rail .nav-label, .rail .rail-label, .rail .rail-sub, .rail .account-name, .rail .nav-item > span:not(.nav-icon),
+  .rail .nav-label, .rail .rail-label, .rail .rail-sub, .rail .account-name, .rail .nav-item > span:not(.nav-icon):not(.count),
   .rail .folder-actions, .rail .add-account span { display: none; }
   .rail-section + .rail-section, .rail > .rail-section:not(:first-child) { padding-top: 10px; border-top: 1px solid var(--line); }
   .nav-item { justify-content: center; gap: 3px; padding: 6px 4px; }
@@ -1085,7 +1085,7 @@ button.scope-chip { cursor: pointer; }
 @container cmd (max-width: 679px) { .cmd-slot:is([data-pri="13"], [data-pri="14"]) { display: none; } }
 @container cmd (max-width: 599px) { .cmd-slot:is([data-pri="11"], [data-pri="12"]) { display: none; } }
 @container cmd (max-width: 519px) { .cmd-slot:is([data-pri="9"], [data-pri="10"]) { display: none; } }
-@container cmd (max-width: 439px) { .cmd-slot:is([data-pri="7"], [data-pri="8"]) { display: none; } }
+@container cmd (max-width: 459px) { .cmd-slot:is([data-pri="7"], [data-pri="8"]) { display: none; } }
 @container cmd (max-width: 369px) { .cmd-slot:is([data-pri="5"], [data-pri="6"]) { display: none; } }
 @container cmd (max-width: 299px) { .cmd-slot:is([data-pri="3"], [data-pri="4"]) { display: none; } }
 @container cmd (min-width: 680px) { .cmd-more { display: none; } }
