@@ -13,7 +13,10 @@ import { justSwiped, swipeProps, type SwipeAction, type SwipeDir } from "./swipe
 import { escapeHtml, textToHtml } from "./richtext";
 import { Toaster, toast } from "./toast";
 import { applyAppearance, themePref, watchSystem } from "./themes";
-import { FOLDERS, LOCAL_VIEWS, SHOWS_UNREAD, folderTree, viewInfo, withStarred, type Dest, type FolderNode } from "./folders";
+import { FOLDERS, LOCAL_VIEWS, SHOWS_UNREAD, folderKey, folderTree, parseOpenMap, viewInfo, withStarred, type Dest, type FolderNode } from "./folders";
+import { DragGhost, placeGhost } from "./DragGhost";
+import { canDragOut, dragOut } from "./dragout";
+import { dropViewAt, trackPointerDrag } from "./pointerdrag";
 import { Resizer } from "./Resizer";
 import { SettingsPage } from "./SettingsPage";
 import { UpdateDialog } from "./UpdateDialog";
@@ -159,6 +162,12 @@ export default function App() {
   const dragging = useRef<MessageSummary[]>([]);
   const [dragIds, setDragIds] = useState<Set<number>>(new Set());
   const [dropKey, setDropKey] = useState<string | null>(null);
+  /** Fantasma que segue o ponteiro (contagem; "+" quando Ctrl copia) e a posição dele, fora do estado. */
+  const [ghost, setGhost] = useState<{ count: number; copy: boolean; label: string } | null>(null);
+  const ghostEl = useRef<HTMLDivElement | null>(null);
+  const ghostPos = useRef({ x: 0, y: 0 });
+  /** Não lidas por pasta do usuário (chave de `folderKey`). */
+  const [folderUnread, setFolderUnread] = useState<Map<string, number>>(new Map());
   const folderRef = useRef(folder);
   /** Verdadeiro enquanto uma ação de deslizar roda (takeOut não troca a seleção). */
   const swiping = useRef(false);
@@ -175,6 +184,7 @@ export default function App() {
 
   const refreshCounts = useCallback(() => {
     api.unreadCounts().then(setCounts).catch(() => {});
+    api.userFolderUnread().then((l) => setFolderUnread(new Map(l.map((x) => [folderKey(x), x.unread])))).catch(() => {});
   }, []);
   const { messages, setMessages, results, setResults, hasMore, freshIds, reload, loadPage, applyDelta, resetKnown } = useMessageList(folder, pendingMove, refreshCounts);
   /** Tamanho atual da lista, para os "Desfazer" recarregarem sem encolher a janela. */
@@ -330,6 +340,13 @@ export default function App() {
 
   // Fechar ou enviar o painel muda os rascunhos salvos e a fila de agendados.
   useEffect(() => { if (!compose) { refreshDrafts(); refreshScheduled(); } }, [compose, refreshDrafts, refreshScheduled]);
+  // Arquivo solto fora do compositor não pode navegar a janela para ele (o compositor trata o próprio soltar).
+  useEffect(() => {
+    const stop = (e: DragEvent) => { if (Array.from(e.dataTransfer?.types ?? []).includes("Files")) e.preventDefault(); };
+    window.addEventListener("dragover", stop);
+    window.addEventListener("drop", stop);
+    return () => { window.removeEventListener("dragover", stop); window.removeEventListener("drop", stop); };
+  }, []);
 
   // O backend só notifica com a janela sem foco: avisa a cada mudança de foco ou visibilidade.
   useEffect(() => {
@@ -682,6 +699,18 @@ export default function App() {
   /** Muda só na tela (arrasto das colunas); `changeSetting` grava ao soltar. */
   const previewSetting = (key: string, value: string) => setSettings((s) => ({ ...s, [key]: value }));
 
+  const openRaw = settings["folders:open"];
+  const openMap = useMemo(() => parseOpenMap(openRaw), [openRaw]);
+  const openRef = useRef(openMap);
+  openRef.current = openMap;
+  /** Abre ou fecha uma pasta da árvore e guarda a escolha (por conta + pasta). */
+  const toggleFolder = useCallback((n: FolderNode, open: boolean) => {
+    openRef.current = { ...openRef.current, [folderKey(n)]: open };
+    const next = JSON.stringify(openRef.current);
+    setSettings((s) => ({ ...s, "folders:open": next }));
+    api.setSetting("folders:open", next).catch((e) => toast(`Não consegui salvar a configuração: ${e}`, "error"));
+  }, []);
+
   function changeSetting(key: string, value: string) {
     setSettings((s) => ({ ...s, [key]: value }));
     api.setSetting(key, value).catch((e) => toast(`Não consegui salvar a configuração: ${e}`, "error"));
@@ -761,38 +790,91 @@ export default function App() {
     dragging.current = [];
     setDragIds(new Set());
     setDropKey(null);
+    setGhost(null);
   }
 
-  /** Alvo de soltar mensagens arrastadas da lista; a pasta aberta não é alvo. */
-  function dropProps(key: string, view: View, dest: Dest): Record<string, unknown> {
+  /** Alvo de soltar mensagens arrastadas da lista; a pasta aberta não é alvo (o hit-test lê `data-drop-view`). */
+  function dropProps(key: string, view: View): Record<string, unknown> {
     if (view === folder || showDrafts || showScheduled) return {};
-    return {
-      "data-drop": dropKey === key || undefined,
-      onDragOver: (e: React.DragEvent) => {
-        if (!dragging.current.length) return;
-        e.preventDefault();
-        e.dataTransfer.dropEffect = "move";
-        setDropKey(key);
-      },
-      onDragLeave: (e: React.DragEvent) => {
-        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDropKey((k) => (k === key ? null : k));
-      },
-      onDrop: (e: React.DragEvent) => {
-        e.preventDefault();
-        const ms = dragging.current;
-        endDrag();
-        if (!ms.length) return;
-        if (typeof dest === "string") {
-          const todo = ms.filter((m) => m.role !== dest);
-          if (todo.length) moveOut(todo, dest);
-          return;
+    return { "data-drop-view": view, "data-drop": dropKey === key || undefined };
+  }
+
+  /** Destino de soltar sobre `view`, ou null quando nenhuma das mensagens arrastadas poderia ir para lá. */
+  function destOf(view: string, ms: MessageSummary[]): Dest | null {
+    const box = parseBox(view as View);
+    if (box) return ms.some((m) => m.account === box.account) ? { account: box.account, name: box.name, label: viewInfo(view as View, userFolders, categories).label } : null;
+    return Object.hasOwn(FOLDERS, view) && view !== "starred" && view !== "all" && ms.some((m) => m.role !== view) ? (view as Role) : null;
+  }
+
+  /** Copia (Ctrl ao soltar): a original fica onde está e não há "Desfazer". */
+  async function copyOut(ms: MessageSummary[], to: Dest) {
+    const mine = typeof to === "string" ? ms.filter((m) => m.role !== to) : ms.filter((m) => m.account === to.account);
+    if (typeof to !== "string" && mine.length < ms.length) toast("Só dá para copiar para pastas da mesma conta", "info");
+    if (!mine.length) return;
+    const ids = mine.map((m) => m.id);
+    const name = typeof to === "string" ? FOLDERS[to].label : to.label;
+    try {
+      if (typeof to === "string") await api.copyMany(ids, to);
+      else await api.copyToFolder(ids, to.account, to.name);
+      toast(`${plural(ids.length, "mensagem copiada", "mensagens copiadas")} para ${name}`, "info");
+      refreshCounts();
+    } catch (e) {
+      toast(`Não foi possível copiar: ${e}`, "error");
+    }
+  }
+
+  /** Anexo do leitor arrastado para fora da janela: o sistema recebe o arquivo (só no app instalado). */
+  function dragAttachment(e: React.PointerEvent, id: number, att: Attachment) {
+    if (!canDragOut) return;
+    trackPointerDrag(e, {
+      leave: async (released) => {
+        try {
+          await dragOut(() => api.prepareDragAttachment(id, att.index), released);
+        } catch (err) {
+          toast(`Não consegui arrastar o anexo: ${err}`, "error");
         }
-        const same = ms.filter((m) => m.account === dest.account);
-        const other = ms.length - same.length;
-        if (other) toast(`${plural(other, "mensagem é", "mensagens são")} de outra conta e não ${other === 1 ? "foi movida" : "foram movidas"}`, "info");
-        if (same.length) moveOut(same, dest);
       },
+    });
+  }
+
+  /** Arrasto da lista com o mouse: fantasma, alvo destacado, solta = mover (Ctrl = copiar); fora da janela vira arrasto nativo de .eml. */
+  function startRowDrag(e: React.PointerEvent, row: ListRow) {
+    const ms = checked.has(row.head.id) ? checkedList : row.members;
+    const hit = (x: number, y: number) => {
+      const v = dropViewAt(x, y);
+      return v && destOf(v, ms) ? v : null;
     };
+    trackPointerDrag(e, {
+      start: (x, y) => {
+        dragging.current = ms;
+        ghostPos.current = { x, y };
+        setDragIds(new Set(ms.map((m) => m.id)));
+        setGhost({ count: ms.length, copy: e.ctrlKey, label: row.head.subject });
+      },
+      move: (x, y, copy) => {
+        ghostPos.current = { x, y };
+        placeGhost(ghostEl.current, x, y);
+        setGhost((g) => (g && g.copy !== copy ? { ...g, copy } : g));
+        setDropKey(hit(x, y));
+      },
+      end: (x, y, copy) => {
+        const v = hit(x, y);
+        endDrag();
+        const dest = v && destOf(v, ms);
+        if (!dest) return;
+        if (copy) void copyOut(ms, dest);
+        else moveToDest(ms, dest);
+      },
+      cancel: endDrag,
+      leave: canDragOut ? async (released) => {
+        endDrag();
+        try {
+          await dragOut(() => api.prepareDragEml(ms.map((m) => m.id)), released);
+        } catch (err) {
+          toast(`Não consegui arrastar para fora: ${err}`, "error");
+        }
+      } : undefined,
+    });
   }
 
   async function removeAccount(id: string) {
@@ -1468,11 +1550,7 @@ export default function App() {
       <RouteLayout>
         <Rail navFolders={navFolders} favorites={favorites} folder={folder} inList={inList} unread={(v) => (Object.hasOwn(FOLDERS, v) ? (unreadOf(v as Role | "starred" | "all") ?? 0) : 0)}
           open={openFolder}
-          drop={(key, view) => {
-            const box = parseBox(view);
-            if (box) return dropProps(key, view, { account: box.account, name: box.name, label: viewInfo(view, userFolders, categories).label });
-            return Object.hasOwn(FOLDERS, view) && view !== "starred" && view !== "all" ? dropProps(key, view, view as Role) : {};
-          }}
+          drop={dropProps} openMap={openMap} onToggleFolder={toggleFolder} folderUnread={folderUnread} hoverView={dropKey}
           onContext={folderContext} userFolders={userFolders} categories={categories} tree={tree} accounts={accounts}
           accountFilter={accountFilter} onAccountFilter={(id) => { setAccountFilter(id); if (id && folder === "all") openFolder("inbox"); }}
           drafts={drafts.length} scheduled={scheduled.length} outbox={net.outbox} showDrafts={showDrafts} showScheduled={showScheduled} showOutbox={showOutbox}
@@ -1524,14 +1602,7 @@ export default function App() {
               intro={intro} byDate={!results} label="Mensagens" canArchive={canArchive} canTrash={canTrash}
               onOpen={(e, m) => { if (!justSwiped()) onRowClick(e, m); }} onCheck={toggleCheck} onStar={(row) => toggleStar(row.members)}
               onContext={rowContext}
-              onDragStart={(e, row) => {
-                const ms = checked.has(row.head.id) ? checkedList : row.members;
-                dragging.current = ms;
-                e.dataTransfer.effectAllowed = "move";
-                e.dataTransfer.setData("text/plain", ms.map((x) => x.subject).join("\n"));
-                setDragIds(new Set(ms.map((x) => x.id)));
-              }}
-              onDragEnd={endDrag} onDouble={() => setFull(true)} onNearEnd={() => void loadMore()}
+              onDragStart={startRowDrag} onDouble={() => setFull(true)} onNearEnd={() => void loadMore()}
               swipe={(row) => swipeProps(swipeAction, (dir) => swipeRow(row, dir))}
               tools={{
                 archive: (row) => archive(withThread(row.members)),
@@ -1565,7 +1636,7 @@ export default function App() {
           expanded={expanded} full={full} viaKeyboard={viaKeyboard} folderLabel={info.label} hasMessages={messages.length > 0} imagesOk={imagesOk}
           savingAtt={savingAtt} mobileActions={mobileActions} onFull={setFull} onBack={() => (full ? setFull(false) : setReaderOpen(false))}
           onContact={openContact} onReaderContext={readerContext} onToggleThread={(id) => void toggleThreadMsg(id)}
-          onShowImages={(id) => setImagesOk((s) => new Set(s).add(id))} onSaveAttachment={(id, att) => void saveAttachment(id, att)}>
+          onShowImages={(id) => setImagesOk((s) => new Set(s).add(id))} onSaveAttachment={(id, att) => void saveAttachment(id, att)} onDragAttachment={dragAttachment}>
           {confirmDelete && (
             <div className="confirm scrim" onMouseDown={(e) => { if (e.target === e.currentTarget && !deleting) setConfirmDelete(null); }}>
               <div className="confirm-card" role="alertdialog" aria-labelledby="delete-title">
@@ -1626,6 +1697,7 @@ export default function App() {
           <NotePencil size={22} weight="bold" />
         </button>
       )}
+      {ghost && <DragGhost elRef={ghostEl} pos={ghostPos} count={ghost.count} copy={ghost.copy} label={ghost.label} />}
       <Toaster />
       <footer className="statusbar"><div className="version" aria-hidden>v{build.version} · {build.builtAt}</div></footer>
     </AppShell>

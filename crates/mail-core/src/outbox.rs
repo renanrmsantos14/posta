@@ -21,6 +21,8 @@ pub enum OpKind {
     Move,
     /// Excluir de vez (só vale dentro da Lixeira).
     Delete,
+    /// Copiar para a pasta `arg`, mantendo a original onde está.
+    Copy,
 }
 
 impl OpKind {
@@ -32,6 +34,7 @@ impl OpKind {
             OpKind::Unstar => "unstar",
             OpKind::Move => "move",
             OpKind::Delete => "delete",
+            OpKind::Copy => "copy",
         }
     }
 
@@ -43,6 +46,7 @@ impl OpKind {
             "unstar" => OpKind::Unstar,
             "move" => OpKind::Move,
             "delete" => OpKind::Delete,
+            "copy" => OpKind::Copy,
             _ => return None,
         })
     }
@@ -54,7 +58,7 @@ impl OpKind {
             OpKind::Unseen => Some((MsgFlag::Seen, false)),
             OpKind::Star => Some((MsgFlag::Flagged, true)),
             OpKind::Unstar => Some((MsgFlag::Flagged, false)),
-            OpKind::Move | OpKind::Delete => None,
+            OpKind::Move | OpKind::Delete | OpKind::Copy => None,
         }
     }
 }
@@ -195,6 +199,7 @@ pub fn apply_op_on(live: &mut Live, mailbox: &str, uids: &[u32], kind: OpKind, a
     match kind.flag() {
         Some((flag, on)) => imap_sync::set_flag_on(live, mailbox, uids, flag, on),
         None if kind == OpKind::Move => imap_sync::move_messages_on(live, mailbox, uids, arg),
+        None if kind == OpKind::Copy => imap_sync::copy_messages_on(live, mailbox, uids, arg),
         None => imap_sync::delete_forever_on(live, mailbox, uids),
     }
 }

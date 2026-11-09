@@ -894,9 +894,27 @@ kbd {
 .folder-actions .icon-btn { width: 22px; height: 22px; border-color: transparent; background: transparent; }
 @media (hover: none) { .folder-actions { display: flex; } }
 /* Alvo de soltar: realça enquanto a mensagem passa por cima. */
-[data-drop] { background: var(--blue-bg) !important; color: var(--blue) !important; box-shadow: inset 0 0 0 1px var(--blue); }
-.row[draggable="true"] { cursor: grab; }
+[data-drop] { background: var(--blue-bg) !important; color: var(--blue) !important; box-shadow: inset 0 0 0 1px var(--blue); transition: background-color 140ms ease-out, box-shadow 140ms ease-out; }
+/* Arrasto de mensagens com o mouse: sem seleção de texto, cursor de pegar e fantasma que segue o ponteiro. */
+:root[data-pdrag], :root[data-pdrag] * { user-select: none; cursor: grabbing !important; }
+.row { cursor: default; }
 .row[data-dragging] { opacity: 0.5; }
+.drag-ghost {
+  position: fixed; top: 0; left: 0; z-index: 80; display: flex; align-items: center; gap: 6px; max-width: 240px; padding: 4px 10px 4px 5px;
+  border: 1px solid var(--line); border-radius: 9999px; background: var(--surface); color: var(--strong); font-size: 12px; font-weight: 500;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.18); pointer-events: none; will-change: transform;
+}
+.drag-ghost-n { display: grid; place-items: center; min-width: 20px; height: 20px; padding: 0 5px; border-radius: 9999px; background: var(--btn); color: var(--btn-text); font: 600 11px/1 var(--mono); }
+.drag-ghost[data-copy] { border-color: var(--blue); color: var(--blue); }
+.drag-ghost-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Pasta com subpastas: seta para abrir/fechar à esquerda do nome. */
+.folder-caret {
+  position: absolute; left: calc(var(--depth, 0) * 14px - 2px); z-index: 1; display: grid; place-items: center; width: 18px; height: 22px; padding: 0;
+  border: 0; border-radius: 4px; background: transparent; color: var(--muted); cursor: pointer;
+}
+@media (hover: hover) { .folder-caret:hover { color: var(--strong); background: var(--hover); } }
+.folder-row:has(.folder-caret) .nav-item { padding-left: calc(18px + var(--depth, 0) * 14px); }
+@media (pointer: coarse) { .folder-caret { width: 32px; height: 36px; left: calc(var(--depth, 0) * 14px - 6px); } }
 
 .cat-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; }
 .cat-chip { margin-right: 6px; padding: 1px 7px; border-radius: 9999px; font: 500 11px/1.5 var(--sans); vertical-align: 1px; }
@@ -990,10 +1008,13 @@ kbd {
 .topbar {
   position: relative; z-index: 15;
   display: grid; grid-template-columns: minmax(120px, 1fr) minmax(0, 2fr) minmax(120px, 1fr); align-items: center; gap: 12px;
-  min-height: 48px; padding: 0 14px;
+  min-height: 34px; padding: 0 12px;
   background: var(--rail); border-bottom: 1px solid var(--line);
 }
-.topbar .brand { font-size: 22px; padding: 0 4px; }
+.topbar .brand { font-size: 18px; padding: 0 4px; }
+.topbar .icon-btn, .topbar .search { height: 26px; }
+.topbar .icon-btn { width: 26px; }
+.topbar .search { gap: 6px; padding: 0 8px; font-size: 13px; }
 .searchbox { position: relative; display: flex; align-items: center; gap: 6px; justify-self: center; width: min(100%, 720px); min-width: 0; }
 .searchbox .search kbd { margin-left: auto; }
 .search-clear { display: grid; place-items: center; width: 20px; height: 20px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--muted); cursor: pointer; }
@@ -1020,11 +1041,11 @@ button.scope-chip { cursor: pointer; }
 
 /* ---------- Faixa de comandos: uma linha só; rótulos e depois itens somem pela largura da própria faixa ---------- */
 .cmdbar-host { container: cmd / inline-size; background: var(--surface); border-bottom: 1px solid var(--line); }
-.cmdbar { display: flex; flex-wrap: nowrap; align-items: center; gap: 2px; height: 40px; padding: 0 10px; overflow: hidden; }
+.cmdbar { display: flex; flex-wrap: nowrap; align-items: center; gap: 2px; height: 25px; padding: 0 8px; overflow: hidden; }
 .cmd-slot { display: inline-flex; flex: none; align-items: center; }
-.cmd-sep { width: 1px; height: 18px; margin: 0 6px; background: var(--line); }
+.cmd-sep { width: 1px; height: 14px; margin: 0 5px; background: var(--line); }
 .cmd {
-  display: inline-flex; flex: none; align-items: center; gap: 6px; height: 30px; padding: 0 8px; border: 0; border-radius: 6px;
+  display: inline-flex; flex: none; align-items: center; gap: 6px; height: 22px; padding: 0 7px; border: 0; border-radius: 5px;
   background: transparent; color: var(--text); font-size: 13px; font-weight: 500; white-space: nowrap; cursor: pointer;
   transition: transform 160ms var(--ease-out), background-color 150ms ease, color 150ms ease;
 }
@@ -1100,6 +1121,14 @@ button.scope-chip { cursor: pointer; }
 }
 .contact-chip:hover { background: var(--hover); }
 
+/* ---------- Toque e celular: a barra compacta do desktop volta a ter alvos de 44px ---------- */
+@media (pointer: coarse), (max-width: 720px) {
+  .topbar { min-height: 52px; }
+  .topbar .icon-btn { width: 44px; height: 44px; }
+  .topbar .search { height: 44px; }
+  .topbar .brand { font-size: 22px; }
+}
+
 /* ---------- Mobile: barra superior sem estourar a largura ---------- */
 @media (max-width: 720px) {
   .topbar { grid-template-columns: minmax(0, 1fr) auto; gap: 8px; padding-left: 10px; padding-right: 10px; }
@@ -1164,6 +1193,9 @@ button.scope-chip { cursor: pointer; }
   :root[data-theme-swap], :root[data-theme-swap] * { transition: none !important; }
   .theme-card, .theme-check { transition: none; }
 }
+
+/* Arquivo do sistema solto no compositor vira anexo. */
+.composer[data-fileover] { box-shadow: inset 0 0 0 2px var(--blue); transition: box-shadow 140ms ease-out; }
 
 .oauth-advanced { margin-top: 16px; display: flex; flex-direction: column; gap: 10px; }
 .oauth-advanced > summary { cursor: pointer; font-size: 13px; color: var(--muted); }

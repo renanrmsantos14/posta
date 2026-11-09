@@ -3,7 +3,7 @@ import { FileText, PaperPlaneTilt, Plus, Clock } from "@phosphor-icons/react";
 import type { Account, Category, UserFolder, View } from "./api";
 import { FolderTree } from "./FolderTree";
 import { PageLayout } from "./layout/primitives";
-import { viewInfo, type FolderNode } from "./folders";
+import { viewInfo, type FolderNode, type OpenMap } from "./folders";
 
 type NavView = "all" | "inbox" | "starred" | "sent" | "archive" | "trash" | "junk";
 
@@ -35,6 +35,10 @@ interface Props {
   onRenameFolder: (n: FolderNode) => void;
   onDeleteFolder: (n: FolderNode) => void;
   onAddAccount: () => void;
+  openMap: OpenMap;
+  onToggleFolder: (n: FolderNode, open: boolean) => void;
+  folderUnread: Map<string, number>;
+  hoverView: string | null;
 }
 
 export function Rail(p: Props) {
@@ -77,7 +81,8 @@ export function Rail(p: Props) {
       </nav>
       <FolderTree nodes={p.tree} accounts={p.accounts ?? []} byAccount={(p.accounts?.length ?? 0) > 1 && !p.accountFilter}
         categories={p.categories} folder={p.folder} inList={p.inList} open={p.open} drop={p.drop} onContext={p.onContext}
-        onNew={p.onNewFolder} onRename={p.onRenameFolder} onDelete={p.onDeleteFolder} />
+        onNew={p.onNewFolder} onRename={p.onRenameFolder} onDelete={p.onDeleteFolder}
+        openMap={p.openMap} onToggle={p.onToggleFolder} unread={p.folderUnread} hoverView={p.hoverView} />
       <div className="rail-section" aria-label="Contas">
         <div className="rail-label">Contas</div>
         {p.accounts && p.accounts.length > 1 && (

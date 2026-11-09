@@ -44,8 +44,8 @@ interface Props {
   onCheck: (m: MessageSummary, range: boolean) => void;
   onStar: (row: ListRow) => void;
   onContext: (x: number, y: number, row: ListRow) => void;
-  onDragStart: (e: React.DragEvent, row: ListRow) => void;
-  onDragEnd: () => void;
+  /** Botão do mouse pressionado numa linha: começa a acompanhar um possível arrasto. */
+  onDragStart: (e: React.PointerEvent, row: ListRow) => void;
   onDouble: () => void;
   onNearEnd: () => void;
   swipe: (row: ListRow) => Record<string, unknown>;
@@ -84,15 +84,14 @@ const RowView = memo(function RowView({ item: it, rowH, live, setFocusId, groupe
   // Os gestos de arrastar-para-o-lado leem a ação atual na hora do evento (ela depende da configuração).
   const swipe = useMemo(() => {
     const via = (k: string) => (e: unknown) => (live.current!.swipe(row)[k] as (e: unknown) => void)(e);
-    return { onPointerDown: via("onPointerDown"), onPointerMove: via("onPointerMove"), onPointerUp: via("onPointerUp"), onPointerCancel: via("onPointerCancel") };
+    const down = via("onPointerDown");
+    return { onPointerDown: (e: React.PointerEvent) => { down(e); live.current!.onDragStart(e, row); }, onPointerMove: via("onPointerMove"), onPointerUp: via("onPointerUp"), onPointerCancel: via("onPointerCancel") };
   }, [live, row]);
   return (
     <div id={`opt-${m.id}`} data-rid={m.id} role="option" aria-selected={open} tabIndex={tab0 ? 0 : -1}
       className="row" style={{ top: it.top, height: rowH, "--i": Math.min(it.index, 12) } as React.CSSProperties}
       data-unread={unread || undefined} data-fresh={fresh || undefined} data-checked={checked || undefined}
       data-dragging={dragging || undefined}
-      draggable
-      onDragStart={(e) => live.current!.onDragStart(e, row)} onDragEnd={() => live.current!.onDragEnd()}
       onFocus={() => setFocusId(m.id)}
       onContextMenu={(e) => { e.preventDefault(); live.current!.onContext(e.clientX, e.clientY, row); }}
       onKeyDown={(e) => {

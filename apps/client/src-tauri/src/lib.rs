@@ -795,6 +795,74 @@ async fn save_eml(app: AppHandle, id: i64) -> CmdResult<String> {
     Ok(path.display().to_string())
 }
 
+/// Arquivos prontos para o arrasto nativo para fora do app (um `.eml` por mensagem, ou um anexo) e a miniatura do cursor.
+#[derive(Serialize)]
+struct DragFiles {
+    files: Vec<String>,
+    icon: String,
+}
+
+/// Pasta temporária própria do arrasto (uma por processo, só do usuário); recriada a cada preparo
+/// (os arquivos antigos já foram soltos ou descartados).
+fn drag_dir() -> CmdResult<PathBuf> {
+    let dir = std::env::temp_dir().join(format!("posta-drag-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).map_err(err)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).map_err(err)?;
+    }
+    Ok(dir)
+}
+
+fn drag_icon(dir: &std::path::Path) -> CmdResult<String> {
+    let icon = dir.join(".icone.png");
+    fs::write(&icon, include_bytes!("../icons/32x32.png")).map_err(err)?;
+    Ok(icon.display().to_string())
+}
+
+/// Grava as mensagens como `.eml` (nome = assunto limpo) numa pasta temporária para arrastar para fora do app.
+#[tauri::command]
+async fn prepare_drag_eml(app: AppHandle, ids: Vec<i64>) -> CmdResult<DragFiles> {
+    blocking(app, move |st| {
+        let dir = drag_dir()?;
+        let mut files = Vec::new();
+        for id in ids {
+            let subject = st.store.lock().unwrap().get(id).map_err(err)?.map(|d| d.summary.subject).unwrap_or_default();
+            let raw = fetch_raw_online(st, id)?;
+            // Nome de arquivo tem limite em bytes (255): 80 caracteres de 4 bytes estouram.
+            let mut title = String::new();
+            for c in subject.trim().chars().take(80) {
+                if title.len() + c.len_utf8() > 150 {
+                    break;
+                }
+                title.push(c);
+            }
+            let name = format!("{}.eml", if title.is_empty() { "mensagem" } else { title.as_str() });
+            let path = free_path(&dir, &mail_core::attachments::safe_name(&name));
+            fs::write(&path, raw).map_err(err)?;
+            files.push(path.display().to_string());
+        }
+        Ok(DragFiles { files, icon: drag_icon(&dir)? })
+    })
+    .await
+}
+
+/// Grava um anexo da mensagem numa pasta temporária para arrastar para fora do app.
+#[tauri::command]
+async fn prepare_drag_attachment(app: AppHandle, id: i64, index: u32) -> CmdResult<DragFiles> {
+    blocking(app, move |st| {
+        let dir = drag_dir()?;
+        let raw = fetch_raw_online(st, id)?;
+        let (att, data) = mail_core::attachments::extract(&raw, index).ok_or_else(|| "anexo não encontrado na mensagem".to_string())?;
+        let path = free_path(&dir, &mail_core::attachments::safe_name(&att.name));
+        fs::write(&path, data).map_err(err)?;
+        Ok(DragFiles { files: vec![path.display().to_string()], icon: drag_icon(&dir)? })
+    })
+    .await
+}
+
 /// Anexos da mensagem `id` prontos para o rascunho de um encaminhamento (baixa a mensagem do servidor).
 #[tauri::command]
 async fn forward_attachments(app: AppHandle, id: i64) -> CmdResult<Vec<mail_core::OutAttachment>> {
@@ -954,6 +1022,12 @@ async fn sync_user_folder(app: AppHandle, account: String, folder: String, keep:
     .await
 }
 
+/// Não lidas por pasta do usuário (para o contador da árvore de pastas).
+#[tauri::command]
+fn user_folder_unread(state: State<'_, AppState>) -> CmdResult<Vec<mail_core::FolderUnread>> {
+    state.store.lock().unwrap().user_folder_unread().map_err(err)
+}
+
 #[tauri::command]
 fn list_user_folder(state: State<'_, AppState>, account: String, folder: String, limit: u32, offset: u32) -> CmdResult<Vec<MessageSummary>> {
     state.store.lock().unwrap().list_box(&account, &folder, limit, offset).map_err(err)
@@ -985,6 +1059,43 @@ fn move_to_user_folder(st: &AppState, ids: &[i64], account: &str, folder: &str) 
         moved += items.len();
     }
     Ok(moved)
+}
+
+/// Copia para a pasta do papel (cada uma na sua conta); as originais ficam onde estão.
+#[tauri::command]
+async fn copy_messages(app: AppHandle, ids: Vec<i64>, role: Role) -> CmdResult<usize> {
+    blocking(app, move |st| {
+        let mut copied = 0;
+        for ((account, mailbox), items) in st.locate_groups(&ids)? {
+            let to = st.store.lock().unwrap().folder_name(&account, role).map_err(err)?.ok_or_else(|| "esta conta não tem essa pasta".to_string())?;
+            if to == mailbox {
+                continue;
+            }
+            let uids: Vec<u32> = items.iter().map(|(_, u)| *u).collect();
+            run_op(st, &account, &mailbox, &uids, OpKind::Copy, &to)?;
+            copied += items.len();
+        }
+        Ok(copied)
+    })
+    .await
+}
+
+/// Copia para uma pasta do usuário. Só mensagens da mesma conta da pasta; devolve quantas foram copiadas.
+#[tauri::command]
+async fn copy_to_folder(app: AppHandle, ids: Vec<i64>, account: String, folder: String) -> CmdResult<usize> {
+    blocking(app, move |st| {
+        let mut copied = 0;
+        for ((acc_id, mailbox), items) in st.locate_groups(&ids)? {
+            if acc_id != account || mailbox == folder {
+                continue;
+            }
+            let uids: Vec<u32> = items.iter().map(|(_, u)| *u).collect();
+            run_op(st, &acc_id, &mailbox, &uids, OpKind::Copy, &folder)?;
+            copied += items.len();
+        }
+        Ok(copied)
+    })
+    .await
 }
 
 /// Aplica (ou tira, com `None`) a categoria colorida. Só local.
@@ -1466,6 +1577,7 @@ pub fn run() {
             #[cfg(desktop)]
             {
                 app.handle().plugin(tauri_plugin_updater::Builder::new().build())?;
+                app.handle().plugin(tauri_plugin_drag::init())?;
                 app.handle().plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, Some(vec!["--minimized"])))?;
             }
             let dir = app.path().app_data_dir()?;
@@ -1535,6 +1647,7 @@ pub fn run() {
             send_message,
             remove_account,
             list_user_folders,
+            user_folder_unread,
             create_folder,
             rename_folder,
             count_folder,
@@ -1543,6 +1656,10 @@ pub fn run() {
             list_user_folder,
             search_user_folder,
             move_to_folder,
+            copy_messages,
+            copy_to_folder,
+            prepare_drag_eml,
+            prepare_drag_attachment,
             set_category,
             list_category,
             search_category,

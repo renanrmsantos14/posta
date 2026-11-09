@@ -12,6 +12,7 @@
   ],
   "permissions": [
     "updater:default",
+    "drag:default",
     "process:allow-restart"
   ]
 }

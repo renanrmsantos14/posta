@@ -249,6 +249,14 @@ pub struct UserFolder {
     pub delimiter: String,
 }
 
+/// Não lidas de uma pasta do usuário (só as que têm alguma).
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct FolderUnread {
+    pub account: String,
+    pub name: String,
+    pub unread: u32,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct MessageDetail {
     #[serde(flatten)]
@@ -1523,6 +1531,20 @@ impl Store {
         Ok(tx.commit()?)
     }
 
+    /// Não lidas por pasta do usuário (mensagens adiadas não contam, como nos papéis).
+    pub fn user_folder_unread(&self) -> Result<Vec<FolderUnread>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT m.account, m.mailbox, COUNT(*) FROM messages m
+             JOIN user_folders u ON u.account = m.account AND u.name = m.mailbox
+             WHERE m.seen = 0 AND m.snooze_until <= CAST(strftime('%s', 'now') AS INTEGER)
+             GROUP BY m.account, m.mailbox ORDER BY m.account, m.mailbox",
+        )?;
+        let rows = stmt
+            .query_map([], |r| Ok(FolderUnread { account: r.get(0)?, name: r.get(1)?, unread: r.get(2)? }))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(rows)
+    }
+
     pub fn user_folders(&self) -> Result<Vec<UserFolder>> {
         let mut stmt = self.conn.prepare_cached("SELECT account, name, delimiter FROM user_folders ORDER BY account, name")?;
         let rows = stmt
@@ -2191,6 +2213,19 @@ mod tests {
         s.set_category(&[two], None).unwrap();
         assert!(s.list_category("verde", 10, 0).unwrap().is_empty());
         s.set_category(&[999], Some("azul")).unwrap();
+    }
+
+    #[test]
+    fn nao_lidas_por_pasta_do_usuario_ignoram_papeis_e_lidas() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.set_user_folders("a", &["Clientes".into(), "Clientes/Lumen".into()], "/").unwrap();
+        s.insert_messages("a", "INBOX", &[msg(1, "caixa", "x", 1)]).unwrap();
+        s.insert_messages("a", "Clientes", &[msg(1, "um", "x", 2), msg(2, "dois", "x", 3)]).unwrap();
+        s.insert_messages("a", "Clientes/Lumen", &[msg(1, "tres", "x", 4)]).unwrap();
+        let id = s.list_box("a", "Clientes", 10, 0).unwrap()[0].id;
+        s.set_seen(id, true).unwrap();
+        let got: Vec<_> = s.user_folder_unread().unwrap().into_iter().map(|f| (f.name, f.unread)).collect();
+        assert_eq!(got, [("Clientes".to_string(), 1), ("Clientes/Lumen".to_string(), 1)]);
     }
 
     #[test]
