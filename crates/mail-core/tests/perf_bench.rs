@@ -192,7 +192,7 @@ fn bench_local() {
         let t = Instant::now();
         store.insert_messages("a", "INBOX", &batch).unwrap();
         ins += t.elapsed().as_secs_f64();
-        if off == 0 || hi == n || off % (n / 4 / 50 * 50).max(50) == 0 { println!("PERF   lote {}..{}: insert_messages {:.1} ms", off, hi, t.elapsed().as_secs_f64() * 1000.0); }
+        if t.elapsed().as_millis() > 25 || off == 0 || hi == n || off % (n / 4 / 50 * 50).max(50) == 0 { println!("PERF   lote {}..{}: insert_messages {:.1} ms", off, hi, t.elapsed().as_secs_f64() * 1000.0); }
         off = hi;
     }
     println!("PERF local {n}: insert_messages total (lotes de 50, inclui rebuild_threads por lote) = {:.0} ms; total com parse = {:.0} ms", ins * 1000.0, t0.elapsed().as_secs_f64() * 1000.0);

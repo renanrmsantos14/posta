@@ -490,17 +490,17 @@ fn thread_incremental(conn: &Connection, account: &str, new_ids: &[i64]) -> Resu
         let mut by_id = conn.prepare_cached(
             "SELECT id, message_id, refs, subject, thread_id, subject_key, subject_re FROM messages WHERE id = ?1",
         )?;
-        let mut by_msgid = conn.prepare_cached("SELECT id, thread_id FROM messages WHERE account = ?1 AND message_id = ?2 AND id < ?3")?;
+        let mut by_msgid = conn.prepare_cached("SELECT id, thread_id FROM messages WHERE account = ?1 AND message_id = ?2 AND message_id <> '' AND id < ?3")?;
         let mut children = conn.prepare_cached(
             "SELECT m.id, m.thread_id FROM msg_refs r JOIN messages m ON m.id = r.id
              WHERE r.account = ?1 AND r.ref = ?2 AND m.id < ?3",
         )?;
         let mut prefixed = conn.prepare_cached(
-            "SELECT EXISTS (SELECT 1 FROM messages WHERE account = ?1 AND subject_key = ?2 AND subject_re = 1 AND id < ?3)",
+            "SELECT EXISTS (SELECT 1 FROM messages WHERE account = ?1 AND subject_key = ?2 AND subject_key <> '' AND subject_re = 1 AND id < ?3)",
         )?;
-        let mut peers = conn.prepare_cached("SELECT id, thread_id FROM messages WHERE account = ?1 AND subject_key = ?2 AND id < ?3")?;
+        let mut peers = conn.prepare_cached("SELECT id, thread_id FROM messages WHERE account = ?1 AND subject_key = ?2 AND subject_key <> '' AND id < ?3")?;
         let mut one_peer =
-            conn.prepare_cached("SELECT id, thread_id FROM messages WHERE account = ?1 AND subject_key = ?2 AND id < ?3 LIMIT 1")?;
+            conn.prepare_cached("SELECT id, thread_id FROM messages WHERE account = ?1 AND subject_key = ?2 AND subject_key <> '' AND id < ?3 LIMIT 1")?;
         for &id in new_ids {
             let (mid, refs, subject, tid, key, re): (String, String, String, i64, String, bool) =
                 by_id.query_row(params![id], |r| Ok((r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)))?;
@@ -568,6 +568,12 @@ impl Store {
         Self::init(Connection::open(path)?)
     }
 
+    /// Devolve o WAL ao arquivo principal sem bloquear leitores. O auto-checkpoint só dispara a cada ~128 MB,
+    /// então quem termina uma sync grande chama isto para o WAL não crescer.
+    pub fn checkpoint(&self) {
+        self.conn.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |_| Ok(())).ok();
+    }
+
     pub fn open_in_memory() -> Result<Self> {
         Self::init(Connection::open_in_memory()?)
     }
@@ -580,6 +586,7 @@ impl Store {
              PRAGMA busy_timeout = 5000;
              PRAGMA cache_size = -65536;
              PRAGMA mmap_size = 268435456;
+             PRAGMA wal_autocheckpoint = 32768;
              PRAGMA temp_store = MEMORY;",
         )?;
         Ok(())
@@ -977,22 +984,26 @@ impl Store {
             tx.prepare(sql)?.query_map(params![account, mailbox], |r| r.get(0))?.collect()
         };
         let removed = ids("SELECT id FROM messages WHERE account = ?1 AND mailbox = ?2 AND uid NOT IN (SELECT uid FROM server_uids)")?;
-        let changed = ids(
-            "SELECT m.id FROM messages m JOIN server_uids s ON s.uid = m.uid
-             WHERE m.account = ?1 AND m.mailbox = ?2 AND (m.seen <> s.seen OR m.flagged <> s.flagged)",
-        )?;
+        let flips: Vec<(i64, bool, bool)> = {
+            let mut st = tx.prepare(
+                "SELECT m.id, s.seen, s.flagged FROM messages m JOIN server_uids s ON s.uid = m.uid
+                 WHERE m.account = ?1 AND m.mailbox = ?2 AND (m.seen <> s.seen OR m.flagged <> s.flagged)",
+            )?;
+            let rows = st.query_map(params![account, mailbox], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<rusqlite::Result<_>>()?;
+            rows
+        };
         tx.execute(
             "DELETE FROM messages WHERE account = ?1 AND mailbox = ?2
              AND uid NOT IN (SELECT uid FROM server_uids)",
             params![account, mailbox],
         )?;
-        tx.execute(
-            "UPDATE messages SET seen = s.seen, flagged = s.flagged
-             FROM server_uids s
-             WHERE s.uid = messages.uid AND messages.account = ?1 AND messages.mailbox = ?2
-             AND (messages.seen <> s.seen OR messages.flagged <> s.flagged)",
-            params![account, mailbox],
-        )?;
+        {
+            let mut up = tx.prepare_cached("UPDATE messages SET seen = ?2, flagged = ?3 WHERE id = ?1")?;
+            for (id, seen, flagged) in &flips {
+                up.execute(params![id, seen, flagged])?;
+            }
+        }
+        let changed = flips.into_iter().map(|f| f.0).collect();
         tx.commit()?;
         Ok(Delta { inserted: Vec::new(), changed, removed })
     }
@@ -1148,8 +1159,10 @@ impl Store {
             return Ok(Vec::new());
         };
         let mut stmt = self.conn.prepare_cached(&format!(
-            "SELECT {SUMMARY_COLS} FROM messages_fts f JOIN messages m ON m.id = f.rowid
-             WHERE messages_fts MATCH ?1 AND m.flagged = 1 AND {NOT_DISCARDED} ORDER BY m.date DESC LIMIT ?2"
+            "SELECT {SUMMARY_COLS} FROM messages m WHERE m.id IN (
+               SELECT m.id FROM messages_fts f JOIN messages m ON m.id = f.rowid
+             WHERE messages_fts MATCH ?1 AND m.flagged = 1 AND {NOT_DISCARDED} ORDER BY m.date DESC LIMIT ?2)
+             ORDER BY m.date DESC"
         ))?;
         let rows = stmt
             .query_map(params![q, limit], row_to_summary)?
@@ -1174,8 +1187,10 @@ impl Store {
             return Ok(Vec::new());
         };
         let mut stmt = self.conn.prepare_cached(&format!(
-            "SELECT {SUMMARY_COLS} FROM messages_fts f JOIN messages m ON m.id = f.rowid
-             WHERE messages_fts MATCH ?1 ORDER BY m.date DESC LIMIT ?2"
+            "SELECT {SUMMARY_COLS} FROM messages m WHERE m.id IN (
+               SELECT m.id FROM messages_fts f JOIN messages m ON m.id = f.rowid
+             WHERE messages_fts MATCH ?1 ORDER BY m.date DESC LIMIT ?2)
+             ORDER BY m.date DESC"
         ))?;
         let rows = stmt
             .query_map(params![q, limit], row_to_summary)?
@@ -1350,8 +1365,10 @@ impl Store {
             return Ok(Vec::new());
         };
         let mut stmt = self.conn.prepare_cached(&format!(
-            "SELECT {SUMMARY_COLS} FROM messages_fts f JOIN messages m ON m.id = f.rowid
-             WHERE messages_fts MATCH ?2 AND {IN_ROLE} ORDER BY m.date DESC LIMIT ?3"
+            "SELECT {SUMMARY_COLS} FROM messages m WHERE m.id IN (
+               SELECT m.id FROM messages_fts f JOIN messages m ON m.id = f.rowid
+             WHERE messages_fts MATCH ?2 AND {IN_ROLE} ORDER BY m.date DESC LIMIT ?3)
+             ORDER BY m.date DESC"
         ))?;
         let rows = stmt
             .query_map(params![role.as_str(), q, limit], row_to_summary)?
@@ -1511,8 +1528,10 @@ impl Store {
             return Ok(Vec::new());
         };
         let mut stmt = self.conn.prepare_cached(&format!(
-            "SELECT {SUMMARY_COLS} FROM messages_fts f JOIN messages m ON m.id = f.rowid
-             WHERE messages_fts MATCH ?1 AND m.account = ?2 AND m.mailbox = ?3 ORDER BY m.date DESC LIMIT ?4"
+            "SELECT {SUMMARY_COLS} FROM messages m WHERE m.id IN (
+               SELECT m.id FROM messages_fts f JOIN messages m ON m.id = f.rowid
+             WHERE messages_fts MATCH ?1 AND m.account = ?2 AND m.mailbox = ?3 ORDER BY m.date DESC LIMIT ?4)
+             ORDER BY m.date DESC"
         ))?;
         let rows = stmt
             .query_map(params![q, account, mailbox, limit], row_to_summary)?
@@ -1564,11 +1583,13 @@ impl Store {
             return Ok(Vec::new());
         };
         let mut stmt = self.conn.prepare_cached(&format!(
-            "SELECT {SUMMARY_COLS} FROM messages_fts f JOIN messages m ON m.id = f.rowid
+            "SELECT {SUMMARY_COLS} FROM messages m WHERE m.id IN (
+               SELECT m.id FROM messages_fts f JOIN messages m ON m.id = f.rowid
              WHERE messages_fts MATCH ?1
                AND (SELECT c.category FROM message_categories c WHERE c.account = m.account AND c.msg_key = {key}) = ?2
                AND {NOT_DISCARDED}
-             ORDER BY m.date DESC LIMIT ?3",
+             ORDER BY m.date DESC LIMIT ?3)
+             ORDER BY m.date DESC",
             key = msg_key!()
         ))?;
         let rows = stmt
