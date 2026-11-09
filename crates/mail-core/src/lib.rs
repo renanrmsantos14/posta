@@ -1,14 +1,16 @@
 //! Núcleo do Posta: sincronização de email e cópia local pesquisável.
 
+pub mod attachments;
 pub mod folders;
 pub mod imap_sync;
 pub mod oauth;
 pub mod send;
 pub mod store;
 
+pub use attachments::Attachment;
 pub use folders::{Folder, Role};
 pub use imap_sync::{AuthMode, IdleEnd, ImapAccount, Security, SmtpServer, SyncReport};
-pub use send::{Outgoing, SendReport};
+pub use send::{OutAttachment, Outgoing, SendReport};
 pub use store::{MessageDetail, MessageSummary, ReplyRef, Store};
 
 #[derive(Debug, thiserror::Error)]

@@ -451,6 +451,56 @@ async fn open_message(app: AppHandle, id: i64) -> CmdResult<Option<MessageDetail
     Ok(Some(detail))
 }
 
+/// Primeiro nome livre na pasta: "a.pdf", "a (2).pdf", ...
+fn free_path(dir: &std::path::Path, name: &str) -> PathBuf {
+    let first = dir.join(name);
+    if !first.exists() {
+        return first;
+    }
+    let p = std::path::Path::new(name);
+    let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or(name);
+    let ext = p.extension().and_then(|s| s.to_str()).map(|e| format!(".{e}")).unwrap_or_default();
+    (2..)
+        .map(|n| dir.join(format!("{stem} ({n}){ext}")))
+        .find(|c| !c.exists())
+        .expect("sempre há um nome livre")
+}
+
+/// Baixa o anexo do servidor, grava em Downloads (ou numa pasta do app, se o sistema não tiver
+/// Downloads) e, no desktop, abre com o programa padrão. Devolve o caminho gravado.
+#[tauri::command]
+async fn save_attachment(app: AppHandle, id: i64, index: u32, open: bool) -> CmdResult<String> {
+    let dir = app
+        .path()
+        .download_dir()
+        .or_else(|_| app.path().app_data_dir().map(|d| d.join("downloads")))
+        .map_err(err)?;
+    let path = blocking(app.clone(), move |st| {
+        let loc = st.locate(id)?;
+        let acc = st.account_with_password(&loc.account)?;
+        let raw = imap_sync::fetch_raw(&acc, &loc.mailbox, loc.uid)
+            .map_err(err)?
+            .ok_or_else(|| "mensagem não encontrada no servidor".to_string())?;
+        let (att, data) = mail_core::attachments::extract(&raw, index)
+            .ok_or_else(|| "anexo não encontrado na mensagem".to_string())?;
+        fs::create_dir_all(&dir).map_err(err)?;
+        let path = free_path(&dir, &mail_core::attachments::safe_name(&att.name));
+        fs::write(&path, data).map_err(err)?;
+        Ok(path)
+    })
+    .await?;
+    #[cfg(desktop)]
+    if open {
+        use tauri_plugin_opener::OpenerExt;
+        if let Err(e) = app.opener().open_path(path.to_string_lossy(), None::<&str>) {
+            eprintln!("abrir anexo falhou: {e}");
+        }
+    }
+    #[cfg(not(desktop))]
+    let _ = open;
+    Ok(path.display().to_string())
+}
+
 #[derive(Deserialize)]
 struct Draft {
     account: String,
@@ -510,6 +560,7 @@ pub fn run() {
             list_messages,
             search_messages,
             open_message,
+            save_attachment,
             send_message
         ])
         .run(tauri::generate_context!())

@@ -39,12 +39,29 @@ export interface MessageSummary {
   seen: boolean;
 }
 
+export interface Attachment {
+  name: string;
+  mime: string;
+  /** Bytes. */
+  size: number;
+  /** Posição da parte na mensagem; vale para `saveAttachment`. */
+  index: number;
+}
+
+/** Arquivo anexado ao rascunho; `data` é o conteúdo em base64. */
+export interface OutAttachment {
+  name: string;
+  mime: string;
+  data: string;
+}
+
 export interface MessageDetail extends MessageSummary {
   body_text: string;
   /** HTML original; vazio quando a mensagem só tem texto. */
   body_html: string;
   /** Reply-To, ou o remetente. */
   reply_addr: string;
+  attachments: Attachment[];
 }
 
 export interface Draft {
@@ -54,6 +71,10 @@ export interface Draft {
   to: string;
   subject: string;
   body: string;
+  /** Vários endereços separados por vírgula ou ponto e vírgula. */
+  cc?: string;
+  bcc?: string;
+  attachments?: OutAttachment[];
 }
 
 export interface SendReport {
@@ -89,6 +110,8 @@ export const api = isTauri
       move: (id: number, role: Role) => invoke<void>("move_message", { id, role }),
       deleteForever: (id: number) => invoke<void>("delete_forever", { id }),
       open: (id: number) => invoke<MessageDetail | null>("open_message", { id }),
+      saveAttachment: (id: number, index: number, open: boolean) =>
+        invoke<string>("save_attachment", { id, index, open }),
       send: (draft: Draft) => invoke<SendReport>("send_message", { draft }),
     }
   : mockApi;

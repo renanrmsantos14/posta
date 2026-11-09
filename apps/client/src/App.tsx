@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, ArrowBendUpLeft, ArrowsClockwise, Archive, MagnifyingGlass, NotePencil, Plus, Trash, Tray, EnvelopeSimple, GearSix } from "@phosphor-icons/react";
+import { ArrowLeft, ArrowBendUpLeft, ArrowsClockwise, Archive, MagnifyingGlass, NotePencil, Plus, Trash, Tray, EnvelopeSimple, GearSix, Paperclip } from "@phosphor-icons/react";
 import { HtmlBody, hasRemoteImages } from "./HtmlBody";
-import { api, isTauri, type Account, type MessageDetail, type MessageSummary, type Role } from "./api";
+import { api, isTauri, type Account, type Attachment, type MessageDetail, type MessageSummary, type Role } from "./api";
 import { AccountDialog } from "./AccountDialog";
 import { Composer, type ComposeInit } from "./Composer";
 import { Toaster, toast } from "./toast";
 import { FOLDERS } from "./folders";
+import { fmtSize } from "./format";
 import { SettingsDialog } from "./SettingsDialog";
 import { UpdateDialog } from "./UpdateDialog";
 import { autoCheck, checkUpdate, CHECK_EVERY_MS, skip, skipped, type Update } from "./updater";
@@ -58,6 +59,7 @@ export default function App() {
   const [dialog, setDialog] = useState(false);
   const [readerOpen, setReaderOpen] = useState(false);
   const [compose, setCompose] = useState<ComposeInit | null>(null);
+  const [savingAtt, setSavingAtt] = useState<string | null>(null);
   const [settings, setSettings] = useState(false);
   const [update, setUpdate] = useState<Update | null>(null);
   /** Remonta o painel a cada abertura, mesmo com o mesmo rascunho. */
@@ -250,6 +252,19 @@ export default function App() {
       const markSeen = (l: MessageSummary[]) => l.map((m) => (m.id === id ? { ...m, seen: true } : m));
       setMessages(markSeen);
       setResults((r) => r && markSeen(r));
+    }
+  }
+
+  async function saveAttachment(id: number, a: Attachment) {
+    const key = `${id}:${a.index}`;
+    setSavingAtt(key);
+    try {
+      const path = await api.saveAttachment(id, a.index, true);
+      toast(`Salvo em ${path}`, "success");
+    } catch (e) {
+      toast(`Não foi possível baixar ${a.name}: ${e}`, "error");
+    } finally {
+      setSavingAtt((k) => (k === key ? null : k));
     }
   }
 
@@ -604,6 +619,20 @@ export default function App() {
                 <Trash size={15} weight="bold" /> {folder === "trash" ? "Excluir de vez" : "Excluir"} <kbd>#</kbd>
               </button>
             </div>
+            {detail.attachments.length > 0 && (
+              <ul className="attachments" aria-label="Anexos">
+                {detail.attachments.map((a) => (
+                  <li key={a.index}>
+                    <button type="button" className="chip attachment" disabled={savingAtt === `${detail.id}:${a.index}`}
+                      title={`Salvar e abrir ${a.name}`} onClick={() => void saveAttachment(detail.id, a)}>
+                      <Paperclip size={14} weight="bold" aria-hidden />
+                      <span className="chip-name">{a.name}</span>
+                      <span className="chip-size">{fmtSize(a.size)}</span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
             {detail.body_html ? (
               <>
                 {!imagesOk.has(detail.id) && hasRemoteImages(detail.body_html) && (

@@ -1,7 +1,8 @@
 //! Envio por SMTP. Depois de entregue, guarda a cópia em Enviados e marca a original como respondida.
 
 use imap::types::Flag;
-use lettre::message::{header, Mailbox, Mailboxes};
+use base64::Engine;
+use lettre::message::{header, Attachment, Mailbox, Mailboxes, MultiPart, SinglePart};
 use lettre::transport::smtp::authentication::{Credentials, Mechanism};
 use lettre::{Message, SmtpTransport, Transport};
 use serde::{Deserialize, Serialize};
@@ -17,7 +18,27 @@ pub struct Outgoing {
     pub to: String,
     pub subject: String,
     pub body: String,
+    /// Cópia visível (vários endereços, como em `to`).
+    #[serde(default)]
+    pub cc: String,
+    /// Cópia oculta.
+    #[serde(default)]
+    pub bcc: String,
+    #[serde(default)]
+    pub attachments: Vec<OutAttachment>,
 }
+
+/// Arquivo anexado ao rascunho; o conteúdo vem em base64.
+#[derive(Debug, Clone, Deserialize)]
+pub struct OutAttachment {
+    pub name: String,
+    #[serde(default)]
+    pub mime: String,
+    pub data: String,
+}
+
+/// Limite do total anexado (antes do base64), abaixo do que a maioria dos servidores aceita.
+pub const MAX_ATTACHMENTS_BYTES: usize = 25 * 1024 * 1024;
 
 #[derive(Debug, Default, Serialize, PartialEq, Eq)]
 pub struct SendReport {
@@ -26,17 +47,30 @@ pub struct SendReport {
     pub warning: Option<String>,
 }
 
-fn recipients(to: &str) -> Result<Mailboxes> {
+fn mailboxes(to: &str) -> Result<Vec<Mailbox>> {
     let list: Vec<Mailbox> = to
         .split([',', ';'])
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(|s| s.parse().map_err(|_| Error::Invalid(format!("endereço inválido: {s}"))))
         .collect::<Result<_>>()?;
+    Ok(list)
+}
+
+fn recipients(to: &str) -> Result<Mailboxes> {
+    let list = mailboxes(to)?;
     if list.is_empty() {
         return Err(Error::Invalid("informe ao menos um destinatário".into()));
     }
     Ok(list.into_iter().collect())
+}
+
+fn attachment_part(a: &OutAttachment, data: Vec<u8>) -> Result<SinglePart> {
+    let mime = if a.mime.is_empty() { "application/octet-stream" } else { a.mime.as_str() };
+    let ct = header::ContentType::parse(mime)
+        .or_else(|_| header::ContentType::parse("application/octet-stream"))
+        .map_err(|_| Error::Invalid(format!("tipo inválido: {mime}")))?;
+    Ok(Attachment::new(crate::attachments::safe_name(&a.name)).body(data, ct))
 }
 
 /// Monta a mensagem. Em resposta, In-Reply-To e References mantêm a conversa agrupada.
@@ -58,7 +92,30 @@ pub fn build(acc: &ImapAccount, out: &Outgoing, reply: Option<&ReplyRef>) -> Res
             .join(" ");
         b = b.in_reply_to(parent).references(refs);
     }
-    Ok(b.header(header::ContentType::TEXT_PLAIN).body(out.body.clone())?)
+    let cc = mailboxes(&out.cc)?;
+    if !cc.is_empty() {
+        b = b.mailbox(header::Cc::from(cc.into_iter().collect::<Mailboxes>()));
+    }
+    let bcc = mailboxes(&out.bcc)?;
+    if !bcc.is_empty() {
+        b = b.mailbox(header::Bcc::from(bcc.into_iter().collect::<Mailboxes>()));
+    }
+    if out.attachments.is_empty() {
+        return Ok(b.header(header::ContentType::TEXT_PLAIN).body(out.body.clone())?);
+    }
+    let mut total = 0;
+    let mut multi = MultiPart::mixed().singlepart(SinglePart::plain(out.body.clone()));
+    for a in &out.attachments {
+        let data = base64::engine::general_purpose::STANDARD
+            .decode(a.data.trim())
+            .map_err(|_| Error::Invalid(format!("anexo corrompido: {}", a.name)))?;
+        total += data.len();
+        if total > MAX_ATTACHMENTS_BYTES {
+            return Err(Error::Invalid("anexos passam de 25 MB no total".into()));
+        }
+        multi = multi.singlepart(attachment_part(a, data)?);
+    }
+    Ok(b.multipart(multi)?)
 }
 
 fn transport(acc: &ImapAccount) -> Result<SmtpTransport> {
@@ -137,7 +194,7 @@ mod tests {
     }
 
     fn out(to: &str) -> Outgoing {
-        Outgoing { to: to.into(), subject: "Re: Orçamento".into(), body: "Combinado, até amanhã.".into() }
+        Outgoing { to: to.into(), subject: "Re: Orçamento".into(), body: "Combinado, até amanhã.".into(), cc: String::new(), bcc: String::new(), attachments: vec![] }
     }
 
     #[test]
@@ -160,6 +217,51 @@ mod tests {
     fn destinatario_invalido_ou_vazio_falha() {
         assert!(matches!(build(&acc(), &out("sem-arroba"), None), Err(Error::Invalid(_))));
         assert!(matches!(build(&acc(), &out(" , "), None), Err(Error::Invalid(_))));
+    }
+
+    fn att(name: &str, mime: &str, bytes: &[u8]) -> OutAttachment {
+        OutAttachment { name: name.into(), mime: mime.into(), data: base64::engine::general_purpose::STANDARD.encode(bytes) }
+    }
+
+    #[test]
+    fn cc_e_bcc_entram_no_envelope_e_so_cc_no_cabecalho() {
+        let mut o = out("ana@x.com");
+        o.cc = "Bia <bia@x.com>; caio@x.com".into();
+        o.bcc = "dan@x.com, ,".into();
+        let m = build(&acc(), &o, None).unwrap();
+        let to: Vec<String> = m.envelope().to().iter().map(|a| a.to_string()).collect();
+        assert_eq!(to, ["ana@x.com", "bia@x.com", "caio@x.com", "dan@x.com"]);
+        let raw = String::from_utf8(m.formatted()).unwrap();
+        assert!(raw.contains("Cc: ") && raw.contains("bia@x.com"), "{raw}");
+        assert!(!raw.contains("dan@x.com"), "Bcc vazou no cabeçalho: {raw}");
+        o.cc = "ruim".into();
+        assert!(matches!(build(&acc(), &o, None), Err(Error::Invalid(_))));
+    }
+
+    #[test]
+    fn anexos_viram_multipart_mixed() {
+        let mut o = out("ana@x.com");
+        o.attachments = vec![att("relatório.pdf", "application/pdf", b"%PDF-1.4 oi"), att("../x.bin", "", &[0, 1, 2, 255])];
+        let raw = build(&acc(), &o, None).unwrap().formatted();
+        let text = String::from_utf8_lossy(&raw);
+        assert!(text.contains("multipart/mixed"), "{text}");
+        let parsed = mail_parser::MessageParser::default().parse(&raw).unwrap();
+        let l = crate::attachments::list(&parsed, "");
+        assert_eq!(l.len(), 2, "{l:?}");
+        assert_eq!((l[0].name.as_str(), l[0].mime.as_str(), l[0].size), ("relatório.pdf", "application/pdf", 11));
+        assert_eq!((l[1].name.as_str(), l[1].mime.as_str()), ("x.bin", "application/octet-stream"));
+        let (_, data) = crate::attachments::extract(&raw, 1).unwrap();
+        assert_eq!(data, [0, 1, 2, 255]);
+        assert_eq!(parsed.body_text(0).unwrap().trim(), "Combinado, até amanhã.");
+    }
+
+    #[test]
+    fn anexos_acima_do_limite_ou_corrompidos_falham() {
+        let mut o = out("ana@x.com");
+        o.attachments = vec![att("a.bin", "", &vec![0u8; MAX_ATTACHMENTS_BYTES / 2 + 1]), att("b.bin", "", &vec![0u8; MAX_ATTACHMENTS_BYTES / 2 + 1])];
+        assert!(matches!(build(&acc(), &o, None), Err(Error::Invalid(m)) if m.contains("25 MB")));
+        o.attachments = vec![OutAttachment { name: "a".into(), mime: "".into(), data: "***".into() }];
+        assert!(matches!(build(&acc(), &o, None), Err(Error::Invalid(_))));
     }
 
     #[test]
