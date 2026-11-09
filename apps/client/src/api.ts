@@ -2,6 +2,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { mockApi } from "./mock";
 import { parseBox, parseCat } from "./views";
+import type { ScheduledItem } from "./productivity";
 
 export type Security = "tls" | "starttls" | "plaintext";
 export type Provider = "google" | "microsoft";
@@ -50,6 +51,8 @@ export interface MessageSummary {
   thread_count: number;
   /** Id da categoria colorida (local), se houver. */
   category?: string | null;
+  /** Fixada no topo da lista (local). */
+  pinned?: boolean;
 }
 
 export interface Attachment {
@@ -94,6 +97,8 @@ export interface Draft {
   cc?: string;
   bcc?: string;
   attachments?: OutAttachment[];
+  /** Remetente alternativo (alias da conta); ausente = o endereço da conta. */
+  from?: string;
 }
 
 /** Rascunho salvo localmente pelo Composer. */
@@ -119,7 +124,9 @@ export interface Contact {
   count: number;
 }
 
-/** Configurações: `signature:<id da conta>`, `offlineN` (corpos baixados para leitura offline, padrão 200), `notify` ("0" desliga as notificações) e `group` ("0" desliga o agrupamento por conversa). */
+/** Configurações: `signature:<id da conta>`, `aliases:<id da conta>` (um remetente por linha), `offlineN` (corpos baixados para leitura offline, padrão 200),
+ * `notify` ("0" desliga as notificações), `group` ("0" desliga o agrupamento por conversa), `closeToTray` ("0" faz fechar a janela encerrar o app)
+ * e `swipeRight`/`swipeLeft` (archive, trash, read, none). */
 export type Settings = Record<string, string>;
 
 export interface SendReport {
@@ -185,6 +192,25 @@ export interface FlushReport {
   offline: boolean;
 }
 
+/** Agendamento tirado da fila para editar: o conteúdo volta ao Composer. */
+export interface ScheduledEdit extends Omit<Draft, "reply_to"> {
+  id: string;
+  reply_to: number | null;
+  send_at: number;
+}
+
+/** Onde a busca olha; `kind` segue o enum do núcleo. */
+export type SearchScope = { kind: "role"; role: Role } | { kind: "starred" } | { kind: "box"; account: string; mailbox: string } | { kind: "category"; id: string };
+
+export function scopeOf(view: View): SearchScope {
+  const box = parseBox(view);
+  const cat = parseCat(view);
+  if (box) return { kind: "box", account: box.account, mailbox: box.name };
+  if (cat) return { kind: "category", id: cat };
+  if (view === "starred") return { kind: "starred" };
+  return { kind: "role", role: view === "all" ? "inbox" : (view as Role) };
+}
+
 export const isTauri = "__TAURI_INTERNALS__" in window;
 
 export const api = isTauri
@@ -220,6 +246,15 @@ export const api = isTauri
           ? invoke<MessageSummary[]>("search_starred", { query })
           : invoke<MessageSummary[]>("search_messages", { query, role: view === "all" ? "inbox" : view });
       },
+      searchFiltered: (query: string, view: View) => invoke<MessageSummary[]>("search_filtered", { scope: scopeOf(view), query }),
+      searchServer: (query: string, view: View) => invoke<MessageSummary[]>("search_server", { scope: scopeOf(view), query }),
+      applyRulesNow: () => invoke<number>("apply_rules_now"),
+      snooze: (ids: number[], until: number) => invoke<void>("snooze_messages", { ids, until }),
+      unsnooze: (ids: number[]) => invoke<void>("unsnooze_messages", { ids }),
+      setPinned: (ids: number[], pinned: boolean) => invoke<void>("set_pinned", { ids, pinned }),
+      scheduleSend: (id: string, sendAt: number, draft: Draft) => invoke<void>("schedule_send", { id, sendAt, draft }),
+      listScheduled: () => invoke<ScheduledItem[]>("list_scheduled"),
+      takeScheduled: (id: string) => invoke<ScheduledEdit | null>("take_scheduled", { id }),
       thread: (id: number) => invoke<MessageSummary[]>("thread_messages", { id }),
       userFolders: () => invoke<UserFolder[]>("list_user_folders"),
       createFolder: (account: string, parent: string | null, name: string) => invoke<UserFolder[]>("create_folder", { account, parent, name }),
@@ -239,6 +274,9 @@ export const api = isTauri
       open: (id: number) => invoke<MessageDetail | null>("open_message", { id }),
       saveAttachment: (id: number, index: number, open: boolean) =>
         invoke<string>("save_attachment", { id, index, open }),
+      saveEml: (id: number) => invoke<string>("save_eml", { id }),
+      getAutostart: () => invoke<boolean>("get_autostart"),
+      setAutostart: (enabled: boolean) => invoke<void>("set_autostart", { enabled }),
       forwardAttachments: (id: number) => invoke<OutAttachment[]>("forward_attachments", { id }),
       send: (draft: Draft) => invoke<SendReport>("send_message", { draft }),
       removeAccount: (id: string) => invoke<void>("remove_account", { id }),

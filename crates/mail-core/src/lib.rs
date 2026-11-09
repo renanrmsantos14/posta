@@ -3,11 +3,15 @@
 pub mod attachments;
 pub mod folders;
 pub mod imap_sync;
+pub mod later;
 pub mod oauth;
+pub mod rules;
+pub mod search;
 pub mod outbox;
 pub mod send;
 pub mod store;
 pub mod threads;
+pub mod vacation;
 
 pub use attachments::Attachment;
 pub use folders::{Folder, Role};

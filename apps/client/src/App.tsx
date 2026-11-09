@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, ArrowsIn, ArrowsOut, ArrowBendUpLeft, ArrowBendDoubleUpLeft, ArrowBendUpRight, ArrowsClockwise, Archive, CaretUp, Check, MagnifyingGlass, NotePencil, Plus, Star, Trash, Tray, EnvelopeSimple, EnvelopeSimpleOpen, GearSix, Paperclip, FileText, PaperPlaneTilt, X } from "@phosphor-icons/react";
+import { ArrowLeft, ArrowsIn, ArrowsOut, ArrowBendUpLeft, ArrowBendDoubleUpLeft, ArrowBendUpRight, ArrowsClockwise, Archive, CaretUp, Check, MagnifyingGlass, NotePencil, Plus, Star, Trash, Tray, EnvelopeSimple, EnvelopeSimpleOpen, GearSix, Paperclip, FileText, FloppyDisk, FunnelSimple, PaperPlaneTilt, Printer, PushPin, Clock, X } from "@phosphor-icons/react";
 import { HtmlBody, hasRemoteImages } from "./HtmlBody";
 import { api, isTauri, type Account, type Attachment, type MessageDetail, type MessageSummary, type OutAttachment, type OutboxItem, type Role, type Settings, type StoredDraft, type UnreadCounts, type UserFolder, type View } from "./api";
 import { AccountDialog } from "./AccountDialog";
@@ -9,6 +9,8 @@ import { FolderTree } from "./FolderTree";
 import { OfflineBadge, OutboxPane, useQueue } from "./Offline";
 import { boxView, catView, parseBox, parseCat } from "./views";
 import { Composer, type ComposeInit } from "./Composer";
+import { aliasFor, aliasLines, addrOf } from "./aliases";
+import { justSwiped, swipeProps, type SwipeAction, type SwipeDir } from "./swipe";
 import { escapeHtml, textToHtml } from "./richtext";
 import { Toaster, toast } from "./toast";
 import { FOLDERS, LOCAL_VIEWS, SHOWS_UNREAD, folderTree, viewInfo, withStarred, type Dest, type FolderNode } from "./folders";
@@ -17,9 +19,13 @@ import { Resizer } from "./Resizer";
 import { SettingsPage } from "./SettingsPage";
 import { UpdateDialog } from "./UpdateDialog";
 import { autoCheck, checkUpdate, CHECK_EVERY_MS, skip, skipped, type Update } from "./updater";
+import { addFilter, hasFilters, parseTemplates, SEARCH_FILTERS, whenLabel, type ScheduledItem } from "./productivity";
+import { useDismiss, WhenMenu } from "./WhenMenu";
 import build from "./version.json";
 
 const PAGE = 100;
+/** O WebView do Android não tem impressão por `window.print`. */
+const ANDROID = /Android/i.test(navigator.userAgent);
 // Rede de segurança: a chegada normal vem do IDLE (evento `mail-changed`).
 const SYNC_EVERY_MS = 300_000;
 /** Janela inicial das pastas fora da Caixa de entrada, e quanto cresce ao rolar até o fim. */
@@ -124,6 +130,11 @@ export default function App() {
   const [drafts, setDrafts] = useState<StoredDraft[]>([]);
   const [settings, setSettings] = useState<Settings>({});
   const [showDrafts, setShowDrafts] = useState(false);
+  const [showScheduled, setShowScheduled] = useState(false);
+  const [scheduled, setScheduled] = useState<ScheduledItem[]>([]);
+  const [filterMenu, setFilterMenu] = useState(false);
+  const [serverBusy, setServerBusy] = useState(false);
+  const [fromServer, setFromServer] = useState(false);
   /** Caixa de saída: usa o mesmo painel dos rascunhos (`showDrafts` junto) para mostrar outra lista. */
   const [showOutbox, setShowOutbox] = useState(false);
   const [outbox, setOutbox] = useState<OutboxItem[]>([]);
@@ -145,12 +156,16 @@ export default function App() {
   const [dropKey, setDropKey] = useState<string | null>(null);
   const known = useRef<Set<number> | null>(null);
   const folderRef = useRef(folder);
+  /** Verdadeiro enquanto uma ação de deslizar roda (takeOut não troca a seleção). */
+  const swiping = useRef(false);
   folderRef.current = folder;
   const loadingMore = useRef(false);
   /** Mensagens no intervalo do "Desfazer": ainda estão no banco local, mas não devem voltar à lista. */
   const pendingMove = useRef<Set<number>>(new Set());
   const appRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
+  const filterRoot = useRef<HTMLSpanElement>(null);
+  useDismiss(filterMenu, () => setFilterMenu(false), filterRoot);
   const listRef = useRef<HTMLUListElement>(null);
 
   const grouped = settings.group !== "0";
@@ -191,6 +206,7 @@ export default function App() {
     return accounts!.some((x) => x.id !== id && x.username.split("@")[0] === local) ? a.username : local;
   };
   const categories = useMemo(() => parseCategories(settings.categories), [settings.categories]);
+  const templates = useMemo(() => parseTemplates(settings.templates), [settings.templates]);
   const tree = useMemo(() => folderTree(userFolders.filter((f) => !accountFilter || f.account === accountFilter)), [userFolders, accountFilter]);
   const info = viewInfo(folder, userFolders, categories);
 
@@ -284,21 +300,23 @@ export default function App() {
   useEffect(() => { if (showOutbox || net.outbox) refreshOutbox(); }, [showOutbox, net.outbox, refreshOutbox]);
 
   const refreshDrafts = useCallback(() => api.listDrafts().then(setDrafts).catch(() => {}), []);
+  const refreshScheduled = useCallback(() => api.listScheduled().then(setScheduled).catch(() => {}), []);
 
   useEffect(() => {
     api.listAccounts().then(setAccounts);
     api.folders().then((r) => setFolderList(withStarred(r))).catch(() => {});
     api.userFolders().then(setUserFolders).catch(() => {});
     refreshDrafts();
+    refreshScheduled();
     api.settings().then((s) => {
       setSettings(s);
       // Android 13+ só mostra notificações depois do aceite; no desktop a chamada é inofensiva.
       if (s.notify !== "0") api.listAccounts().then((a) => (a.length ? api.requestNotifyPermission() : false)).catch(() => {});
     }).catch(() => {}).finally(() => setPrefsReady(true));
-  }, [refreshDrafts]);
+  }, [refreshDrafts, refreshScheduled]);
 
-  // Fechar ou enviar o painel muda os rascunhos salvos.
-  useEffect(() => { if (!compose) refreshDrafts(); }, [compose, refreshDrafts]);
+  // Fechar ou enviar o painel muda os rascunhos salvos e a fila de agendados.
+  useEffect(() => { if (!compose) { refreshDrafts(); refreshScheduled(); } }, [compose, refreshDrafts, refreshScheduled]);
 
   // O backend só notifica com a janela sem foco: avisa a cada mudança de foco ou visibilidade.
   useEffect(() => {
@@ -378,6 +396,7 @@ export default function App() {
   const onMailChanged = useRef(async (_fetched: number) => {});
   onMailChanged.current = async (fetched: number) => {
     api.folders().then((r) => setFolderList(withStarred(r))).catch(() => {});
+    refreshScheduled();
     if (!LOCAL_VIEWS.includes(folderRef.current)) return;
     await reload(messages.length);
     if (fetched) toast(plural(fetched, "mensagem nova", "mensagens novas"), "success");
@@ -392,11 +411,28 @@ export default function App() {
     return () => { alive = false; off?.(); };
   }, []);
 
+  // Menu da bandeja (desktop): "Escrever" e "Sincronizar" chegam como eventos.
+  const trayRef = useRef({ write: () => {}, sync: () => {} });
+  trayRef.current = { write: writeNew, sync: () => void sync(true) };
+  useEffect(() => {
+    if (!isTauri) return;
+    const offs: (() => void)[] = [];
+    let alive = true;
+    import("@tauri-apps/api/event").then(async ({ listen }) => {
+      for (const [name, run] of [["tray-compose", () => trayRef.current.write()], ["tray-sync", () => trayRef.current.sync()]] as const) {
+        const un = await listen(name, run);
+        if (alive) offs.push(un); else un();
+      }
+    });
+    return () => { alive = false; offs.forEach((f) => f()); };
+  }, []);
+
   // Busca local a cada tecla: sem debounce, o SQLite responde em < 1 ms.
   useEffect(() => {
+    setFromServer(false);
     if (!query.trim()) return setResults(null);
     let alive = true;
-    api.search(query, folder).then((r) => alive && setResults(r));
+    (hasFilters(query) ? api.searchFiltered(query, folder) : api.search(query, folder)).then((r) => alive && setResults(r));
     return () => { alive = false; };
   }, [query, folder]);
 
@@ -415,6 +451,7 @@ export default function App() {
 
   function openFolder(role: View) {
     setShowDrafts(false);
+    setShowScheduled(false);
     setShowOutbox(false);
     if (role === folder) return;
     setQuery("");
@@ -467,6 +504,14 @@ export default function App() {
     setExpanded((s) => new Set(s).add(id));
   }
 
+  async function saveEml(id: number) {
+    try {
+      toast(`Salvo em ${await api.saveEml(id)}`, "success");
+    } catch (e) {
+      toast(`Não foi possível salvar a mensagem: ${e}`, "error");
+    }
+  }
+
   async function saveAttachment(id: number, a: Attachment) {
     const key = `${id}:${a.index}`;
     setSavingAtt(key);
@@ -502,15 +547,25 @@ export default function App() {
     openComposer({ title: d.reply_to !== null ? "Responder" : "Nova mensagem", draftId: d.id, account, reply_to: d.reply_to, to: d.to, cc: d.cc, bcc: d.bcc, subject: d.subject, body: d.body, html: d.html || undefined });
   }
 
+  function openScheduled() {
+    setShowScheduled(true);
+    setShowOutbox(false);
+    setShowDrafts(false);
+    setReaderOpen(false);
+    refreshScheduled();
+  }
+
   function openOutbox() {
     setShowDrafts(true);
     setShowOutbox(true);
+    setShowScheduled(false);
     setReaderOpen(false);
     refreshOutbox();
   }
 
   function openDrafts() {
     setShowDrafts(true);
+    setShowScheduled(false);
     setShowOutbox(false);
     setReaderOpen(false);
     refreshDrafts();
@@ -614,7 +669,7 @@ export default function App() {
 
   /** Alvo de soltar mensagens arrastadas da lista; a pasta aberta não é alvo. */
   function dropProps(key: string, view: View, dest: Dest): Record<string, unknown> {
-    if (view === folder || showDrafts) return {};
+    if (view === folder || showDrafts || showScheduled) return {};
     return {
       "data-drop": dropKey === key || undefined,
       onDragOver: (e: React.DragEvent) => {
@@ -659,17 +714,20 @@ export default function App() {
     toast("Conta removida", "success");
   }
 
+  /** Responde pelo alias para o qual a mensagem foi enviada (se for de um da conta). */
+  const replyFrom = (d: MessageDetail, account: string) => aliasFor(aliasLines(settings[`aliases:${account}`]), d.to_addrs, d.cc_addrs);
+
   function reply() {
     if (!detail || !accounts?.length) return;
     const subject = /^re:/i.test(detail.subject) ? detail.subject : `Re: ${detail.subject}`;
     const account = accounts.some((a) => a.id === detail.account) ? detail.account : accounts[0].id;
-    openComposer({ title: "Responder", account, reply_to: detail.id, to: detail.reply_addr, subject, body: "", html: signatureFor(account) + replyHtml(detail) });
+    openComposer({ title: "Responder", account, reply_to: detail.id, to: detail.reply_addr, subject, body: "", html: signatureFor(account) + replyHtml(detail), from: replyFrom(detail, account) });
   }
 
   /** Remetente em Para; os demais destinatários da original em Cc, sem as minhas contas e sem repetir. */
   function replyAll() {
     if (!detail || !accounts?.length) return;
-    const own = new Set(accounts.map((a) => a.username.toLowerCase()));
+    const own = new Set([...accounts.map((a) => a.username.toLowerCase()), ...accounts.flatMap((a) => aliasLines(settings[`aliases:${a.id}`]).map(addrOf))]);
     const split = (v: string) => v.split(",").map((x) => x.trim()).filter(Boolean);
     const seen = new Set([detail.reply_addr.toLowerCase()]);
     const others = [...split(detail.to_addrs), ...split(detail.cc_addrs)].filter((a) => {
@@ -682,7 +740,7 @@ export default function App() {
     const account = accounts.some((a) => a.id === detail.account) ? detail.account : accounts[0].id;
     openComposer({
       title: "Responder a todos", account, reply_to: detail.id,
-      to: detail.reply_addr, cc: others.join(", "), subject, body: "", html: replyHtml(detail),
+      to: detail.reply_addr, cc: others.join(", "), subject, body: "", html: replyHtml(detail), from: replyFrom(detail, account),
     });
   }
 
@@ -729,6 +787,97 @@ export default function App() {
     });
   }
 
+  /** Agenda o envio: o app guarda a mensagem e manda na hora marcada (com o Posta aberto). */
+  async function schedule(d: ComposeInit, at: number) {
+    const { title: _t, restored: _r, draftId, ...draft } = d;
+    await api.scheduleSend(draftId ?? crypto.randomUUID(), at, draft);
+    if (draftId) api.deleteDraft(draftId).catch(() => {});
+    setCompose(null);
+    refreshScheduled();
+    toast(`Agendada para ${whenLabel(at)}`, "success");
+  }
+
+  /** Tira da fila e reabre no Composer; se fechar sem reagendar, o rascunho fica salvo. */
+  async function editScheduled(s: ScheduledItem) {
+    try {
+      const t = await api.takeScheduled(s.id);
+      refreshScheduled();
+      if (!t) return;
+      openComposer({ title: "Editar mensagem agendada", draftId: t.id, account: t.account, reply_to: t.reply_to, to: t.to, cc: t.cc, bcc: t.bcc, subject: t.subject, body: t.body, html: t.html || undefined, attachments: t.attachments });
+    } catch (e) {
+      toast(`Não foi possível abrir: ${e}`, "error");
+    }
+  }
+
+  /** Cancelar não perde o texto: a mensagem volta para Rascunhos. */
+  async function cancelScheduled(s: ScheduledItem) {
+    try {
+      const t = await api.takeScheduled(s.id);
+      if (t) {
+        await api.saveDraft({ id: t.id, account: t.account, reply_to: t.reply_to, to: t.to, cc: t.cc, bcc: t.bcc, subject: t.subject, body: t.body, html: t.html });
+        refreshDrafts();
+      }
+      refreshScheduled();
+      toast(t?.attachments?.length ? "Envio cancelado. O texto está em Rascunhos; reanexe os arquivos." : "Envio cancelado. A mensagem está em Rascunhos.", "info");
+    } catch (e) {
+      toast(`Não foi possível cancelar: ${e}`, "error");
+    }
+  }
+
+  /** Esconde até `until`; volta ao topo como não lida. Dá para desfazer logo depois. */
+  function snooze(ms: MessageSummary[], until: number) {
+    const ids = ms.map((m) => m.id);
+    const undo = takeOutMany(ms);
+    api.snooze(ids, until).then(refreshCounts).catch((e) => { undo(); toast(`Não foi possível adiar: ${e}`, "error"); });
+    toast(`Adiada até ${whenLabel(until)}`, "info", {
+      action: { label: "Desfazer", onClick: async () => { await api.unsnooze(ids).catch(() => {}); undo(); refreshCounts(); } },
+      duration: UNDO_MS,
+    });
+  }
+
+  /** Fixar: se todas já estão fixadas, desafixa; senão fixa todas. */
+  async function togglePin(ms: MessageSummary[]) {
+    if (!ms.length) return;
+    const on = !ms.every((m) => m.pinned);
+    const ids = new Set(ms.map((m) => m.id));
+    const set = (v: boolean) => (l: MessageSummary[]) => l.map((m) => (ids.has(m.id) ? { ...m, pinned: v } : m));
+    setMessages(set(on));
+    setResults((r) => r && set(on)(r));
+    try {
+      await api.setPinned([...ids], on);
+      await reload(messages.length);
+      toast(on ? "Fixada no topo" : "Desafixada", "info");
+    } catch (e) {
+      setMessages(set(!on));
+      setResults((r) => r && set(!on)(r));
+      toast(`Não foi possível fixar: ${e}`, "error");
+    }
+  }
+
+  /** "Buscar no servidor": IMAP SEARCH na pasta atual; o que ainda não estava no aparelho é baixado. */
+  async function searchServer() {
+    setServerBusy(true);
+    try {
+      setResults(await api.searchServer(query, folder));
+      setFromServer(true);
+    } catch (e) {
+      toast(`Busca no servidor falhou: ${e}`, "error");
+    } finally {
+      setServerBusy(false);
+    }
+  }
+
+  async function applyRules() {
+    try {
+      const n = await api.applyRulesNow();
+      toast(n ? `${plural(n, "mensagem atualizada", "mensagens atualizadas")} pelas regras` : "Nenhuma mensagem da Entrada casou com as regras", n ? "success" : "info");
+      await reload(messages.length);
+      api.userFolders().then(setUserFolders).catch(() => {});
+    } catch (e) {
+      toast(`Não foi possível aplicar as regras: ${e}`, "error");
+    }
+  }
+
   async function loadMore() {
     if (results || loadingMore.current) return;
     loadingMore.current = true;
@@ -760,14 +909,18 @@ export default function App() {
     const drop = (l: MessageSummary[]) => l.filter((x) => x.id !== m.id);
     setMessages(drop);
     setResults((r) => r && drop(r));
-    if (next) select(next.id, true);
+    // Deslizar na lista não abre mensagem: no celular o leitor cobriria a lista e o próximo gesto cairia nele.
+    const quiet = swiping.current;
+    if (quiet) {
+      if (selectedId === m.id) { setSelectedId(null); setDetail(null); setReaderOpen(false); }
+    } else if (next) select(next.id, true);
     else { setSelectedId(null); setDetail(null); setReaderOpen(false); }
     return () => {
       if (folderRef.current !== from) return;
       const put = (l: MessageSummary[]) => (l.some((x) => x.id === m.id) ? l : [...l.slice(0, idx), m, ...l.slice(idx)]);
       setMessages(put);
       setResults((r) => r && put(r));
-      select(m.id, true);
+      if (!quiet) select(m.id, true);
     };
   }
 
@@ -810,6 +963,23 @@ export default function App() {
         }
       },
     });
+  }
+
+  /** Gestos de deslizar a linha (toque): configuráveis em Configurações. */
+  const swipeAction = (dir: SwipeDir): SwipeAction => {
+    const v = dir === "right" ? settings.swipeRight : settings.swipeLeft;
+    return v === "archive" || v === "trash" || v === "read" || v === "none" ? v : dir === "right" ? "archive" : "trash";
+  };
+  function swipeRow(row: Row, dir: SwipeDir) {
+    const what = swipeAction(dir);
+    swiping.current = true;
+    try {
+      if (what === "archive") archive(row.members);
+      else if (what === "trash") remove(row.members);
+      else if (what === "read") markSeen(row.members, row.members.some((x) => !x.seen));
+    } finally {
+      swiping.current = false;
+    }
   }
 
   /** Agrupa por destino: na pasta "Com estrela" cada mensagem pode ter um destino diferente. */
@@ -956,7 +1126,7 @@ export default function App() {
         if (e.key === "Escape" && !deleting) setConfirmDelete(null);
         return;
       }
-      if (showDrafts && !(e.key === "c" || e.key === "Escape")) return;
+      if ((showDrafts || showScheduled) && !(e.key === "c" || e.key === "Escape")) return;
       const t = e.target;
       const typing = t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement || t instanceof HTMLSelectElement;
       if (e.key === "Escape") {
@@ -1000,6 +1170,8 @@ export default function App() {
         toggleStar(acts, true);
       } else if (e.key === "u") {
         markSeen(acts, false);
+      } else if (e.key === "p") {
+        togglePin(acts);
       }
     };
     window.addEventListener("keydown", onKey);
@@ -1037,6 +1209,16 @@ export default function App() {
         </button>
         {current && (
           <>
+            {!ANDROID && (
+              <button className="btn icon-only" onClick={() => window.print()}
+                aria-label="Imprimir ou salvar como PDF" title="Imprimir ou salvar como PDF">
+                <Printer size={15} weight="bold" />
+              </button>
+            )}
+            <button className="btn icon-only" onClick={() => void saveEml(current.id)}
+              aria-label="Salvar como .eml" title="Salvar como .eml">
+              <FloppyDisk size={15} weight="bold" />
+            </button>
             <button className="btn icon-only star-btn" data-on={current.flagged || undefined} data-pop={popId === current.id || undefined}
               onClick={() => toggleStar(withThread([current]))} aria-pressed={current.flagged}
               aria-label={current.flagged ? "Tirar a estrela" : "Marcar com estrela"} title="Estrela (s)">
@@ -1047,6 +1229,11 @@ export default function App() {
               <EnvelopeSimple size={15} weight="bold" />
             </button>
             <CategoryPicker className="btn icon-only" categories={categories} current={current.category ?? null} onPick={(id) => applyCategory(withThread([current]), id)} />
+            <WhenMenu className="btn icon-only" label="Adiar" onPick={(at) => snooze(withThread([current]), at)}><Clock size={15} weight="bold" /></WhenMenu>
+            <button className="btn icon-only star-btn" data-on={current.pinned || undefined} onClick={() => togglePin(withThread([current]))}
+              aria-pressed={!!current.pinned} aria-label={current.pinned ? "Desafixar" : "Fixar no topo"} title="Fixar no topo (p)">
+              <PushPin size={15} weight={current.pinned ? "fill" : "bold"} />
+            </button>
           </>
         )}
       </div>
@@ -1124,7 +1311,7 @@ export default function App() {
             const Icon = FOLDERS[r].icon;
             return (
               <button key={r} className="nav-item" title={FOLDERS[r].label} onClick={() => openFolder(r)}
-                aria-current={r === folder && !showDrafts ? "page" : undefined}
+                aria-current={r === folder && !showDrafts && !showScheduled ? "page" : undefined}
                 {...(r === "starred" || r === "all" ? {} : dropProps(r, r, r))}>
                 <Icon size={16} weight="bold" />
                 <span>{FOLDERS[r].label}</span>
@@ -1137,6 +1324,11 @@ export default function App() {
             <span>Rascunhos</span>
             {drafts.length > 0 && <span className="count plain">{drafts.length}</span>}
           </button>
+          <button className="nav-item" title="Agendados" onClick={openScheduled} aria-current={showScheduled ? "page" : undefined}>
+            <Clock size={16} weight="bold" />
+            <span>Agendados</span>
+            {scheduled.length > 0 && <span className="count plain">{scheduled.length}</span>}
+          </button>
           {(net.outbox > 0 || showOutbox) && (
             <button className="nav-item" title="Caixa de saída" onClick={openOutbox} aria-current={showOutbox ? "page" : undefined}>
               <PaperPlaneTilt size={16} weight="bold" />
@@ -1146,7 +1338,7 @@ export default function App() {
           )}
         </nav>
         <FolderTree nodes={tree} accounts={accounts ?? []} byAccount={(accounts?.length ?? 0) > 1 && !accountFilter}
-          categories={categories} folder={folder} inList={!showDrafts} open={openFolder}
+          categories={categories} folder={folder} inList={!showDrafts && !showScheduled} open={openFolder}
           drop={(key, view) => {
             const box = parseBox(view);
             return box ? dropProps(key, view, { account: box.account, name: box.name, label: viewInfo(view, userFolders, categories).label }) : {};
@@ -1203,6 +1395,21 @@ export default function App() {
               onChange={(e) => setQuery(e.target.value)} aria-label="Buscar mensagens" />
             {!query && <kbd>/</kbd>}
           </label>
+          <span className="cat-picker" ref={filterRoot}>
+            <button type="button" className="icon-btn" aria-label="Filtros da busca" title="Filtros da busca" aria-haspopup="menu" aria-expanded={filterMenu}
+              onClick={() => setFilterMenu((o) => !o)}>
+              <FunnelSimple size={16} weight="bold" />
+            </button>
+            {filterMenu && (
+              <div className="cat-menu" role="menu" aria-label="Filtros da busca">
+                {SEARCH_FILTERS.map((f) => (
+                  <button key={f.token} type="button" role="menuitem" onClick={() => { setQuery(addFilter(query, f.token)); setFilterMenu(false); searchRef.current?.focus(); }}>
+                    <span>{f.label}</span><small>{f.token}</small>
+                  </button>
+                ))}
+              </div>
+            )}
+          </span>
           <OfflineBadge status={net} />
           <button className="icon-btn" onClick={() => sync(true)} aria-label="Sincronizar" data-busy={syncing || undefined}
             disabled={!accounts?.length}>
@@ -1220,7 +1427,7 @@ export default function App() {
             const Icon = FOLDERS[r].icon;
             return (
               <button key={r} className="btn ghost small" onClick={() => openFolder(r)}
-                aria-current={r === folder && !showDrafts ? "page" : undefined}>
+                aria-current={r === folder && !showDrafts && !showScheduled ? "page" : undefined}>
                 <Icon size={14} weight="bold" /> {FOLDERS[r].label}
               </button>
             );
@@ -1228,13 +1435,16 @@ export default function App() {
           {[...tree.map((n) => boxView(n.account, n.name)), ...categories.map((c) => catView(c.id))].map((v) => {
             const { label, icon: Icon } = viewInfo(v, userFolders, categories);
             return (
-              <button key={v} className="btn ghost small" onClick={() => openFolder(v)} aria-current={v === folder && !showDrafts ? "page" : undefined}>
+              <button key={v} className="btn ghost small" onClick={() => openFolder(v)} aria-current={v === folder && !showDrafts && !showScheduled ? "page" : undefined}>
                 <Icon size={14} weight="bold" /> {label}
               </button>
             );
           })}
           <button className="btn ghost small" onClick={openDrafts} aria-current={showDrafts && !showOutbox ? "page" : undefined}>
             <FileText size={14} weight="bold" /> Rascunhos
+          </button>
+          <button className="btn ghost small" onClick={openScheduled} aria-current={showScheduled ? "page" : undefined}>
+            <Clock size={14} weight="bold" /> Agendados
           </button>
           {(net.outbox > 0 || showOutbox) && (
             <button className="btn ghost small" onClick={openOutbox} aria-current={showOutbox ? "page" : undefined}>
@@ -1262,16 +1472,43 @@ export default function App() {
                 aria-label="Marcar como não lida" title="Marcar como não lida (u)"><EnvelopeSimple size={16} weight="bold" /></button>
               <button className="icon-btn" onClick={() => toggleStar(checkedList)}
                 aria-label="Alternar estrela" title="Alternar estrela (s)"><Star size={16} weight="bold" /></button>
+              <WhenMenu className="icon-btn" label="Adiar" onPick={(at) => snooze(checkedList, at)}><Clock size={16} weight="bold" /></WhenMenu>
+              <button className="icon-btn" onClick={() => togglePin(checkedList)}
+                aria-label="Alternar fixar" title="Fixar no topo (p)"><PushPin size={16} weight="bold" /></button>
               <CategoryPicker className="icon-btn" categories={categories} onPick={(id) => applyCategory(checkedList, id)}
                 current={checkedList.every((m) => m.category === checkedList[0].category) ? checkedList[0].category ?? null : undefined} />
             </span>
           </div>
         )}
-        {results && !showDrafts && (
-          <div className="result-meta">{plural(results.length, "resultado", "resultados")} para “{query.trim()}”</div>
+        {results && !showDrafts && !showScheduled && (
+          <div className="result-meta">
+            <span>{plural(results.length, "resultado", "resultados")} para “{query.trim()}”{fromServer && " (com o servidor)"}</span>
+            {!fromServer && folder !== "starred" && !String(folder).startsWith("category") && (
+              <button type="button" className="btn small" onClick={searchServer} disabled={serverBusy}>{serverBusy ? "Buscando…" : "Buscar no servidor"}</button>
+            )}
+          </div>
         )}
 
-        {showOutbox ? (
+        {showScheduled ? (
+          scheduled.length === 0 ? (
+            <div className="empty quiet"><p>Nenhuma mensagem agendada</p></div>
+          ) : (
+            <ul className="list" role="listbox" aria-label="Agendados">
+              {scheduled.map((s) => (
+                <li key={s.id} role="option" aria-selected={false} className="row draft-row" onClick={() => editScheduled(s)}>
+                  <PaperPlaneTilt size={13} weight="bold" className="sched-icon" aria-hidden />
+                  <span className="from">{s.to.trim() || "(sem destinatário)"}</span>
+                  <time className="date" dateTime={new Date(s.send_at * 1000).toISOString()}>{whenLabel(s.send_at)}</time>
+                  <span className="subject">{s.subject || "(sem assunto)"}</span>
+                  <span className="snippet sched-status" data-failed={s.status === "failed" || undefined}>
+                    {s.status === "failed" ? `Falhou: ${s.error}` : s.status === "sending" ? "Enviando…" : "Aguardando a hora"}
+                    <button type="button" className="btn ghost small" onClick={(e) => { e.stopPropagation(); cancelScheduled(s); }}>Cancelar envio</button>
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )
+        ) : showOutbox ? (
           <OutboxPane items={outbox} accounts={(accounts ?? []).map((a) => a.id)} online={net.online} onChange={refreshOutbox} />
         ) : showDrafts ? (
           draftsShown.length === 0 ? (
@@ -1327,7 +1564,8 @@ export default function App() {
                   }}
                   onDragEnd={endDrag}
                   style={{ "--i": Math.min(i, 12) } as React.CSSProperties}
-                  onClick={(e) => onRowClick(e, m)} onDoubleClick={(e) => { if (!(e.target as Element).closest("button")) setFull(true); }}>
+                  {...swipeProps(swipeAction, (dir) => swipeRow(row, dir))}
+                  onClick={(e) => { if (!justSwiped()) onRowClick(e, m); }} onDoubleClick={(e) => { if (!(e.target as Element).closest("button")) setFull(true); }}>
                   <span className="dot" aria-hidden />
                   <button type="button" className="check" role="checkbox" aria-checked={checked.has(m.id)}
                     aria-label={`Selecionar ${n > 1 ? "conversa" : "mensagem"} de ${m.from_name || m.from_addr}`}
@@ -1346,6 +1584,7 @@ export default function App() {
                   </button>
                   <span className="subject">
                     {folder === "all" && <span className="acct" title={m.account}>{acctLabel(m.account)}</span>}
+                    {m.pinned && <PushPin size={12} weight="fill" className="pin-mark" aria-label="Fixada" />}
                     {categories.filter((c) => c.id === m.category).map((c) => <CategoryChip key={c.id} category={c} />)}
                     {m.subject || "(sem assunto)"}
                   </span>
@@ -1433,11 +1672,11 @@ export default function App() {
         />
       )}
       {compose && accounts && (
-        <Composer key={composeKey} init={compose} accounts={accounts} onSend={send} onDiscard={() => setCompose(null)} />
+        <Composer key={composeKey} init={compose} accounts={accounts} settings={settings} onSend={send} onSchedule={schedule} templates={templates} onDiscard={() => setCompose(null)} />
       )}
       {settingsOpen && (
         <SettingsPage accounts={accounts ?? []} settings={settings} onSetting={changeSetting} onRemoveAccount={removeAccount}
-          onAddAccount={() => setDialog(true)} onAccountSaved={accountSaved} onClose={() => setSettingsOpen(false)} onUpdate={showUpdate} />
+          onAddAccount={() => setDialog(true)} onAccountSaved={accountSaved} onClose={() => setSettingsOpen(false)} onUpdate={showUpdate} onApplyRules={applyRules} />
       )}
       {folderDialog && (
         <FolderDialog state={folderDialog} accounts={accounts ?? []} folders={userFolders} onSubmit={submitFolder} onClose={() => setFolderDialog(null)} />

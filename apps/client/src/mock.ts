@@ -1,5 +1,6 @@
 // Dados de exemplo para rodar a UI no navegador (pnpm dev), sem Tauri e sem rede.
-import type { Account, Contact, Draft, FlushReport, OutboxItem, QueueStatus, Provider, MessageDetail, MessageSummary, NewAccount, OutAttachment, Role, SendReport, Settings, StoredDraft, SyncResult, UnreadCounts, UserFolder, View } from "./api";
+import type { Account, Contact, Draft, FlushReport, OutboxItem, QueueStatus, Provider, MessageDetail, MessageSummary, NewAccount, OutAttachment, Role, ScheduledEdit, SendReport, Settings, StoredDraft, SyncResult, UnreadCounts, UserFolder, View } from "./api";
+import { parseRules, type ScheduledItem } from "./productivity";
 import { parseBox, parseCat } from "./views";
 
 const now = Math.floor(Date.now() / 1000);
@@ -24,7 +25,7 @@ let accounts: Account[] = [
 ];
 
 /** `thread_count` é calculado ao responder; `thread_id` 0 = mensagem sem fio. `box`: nome completo da pasta do usuário (então `role` é null). */
-type MockMessage = Omit<MessageDetail, "thread_count"> & { role: Role | null; box?: string };
+type MockMessage = Omit<MessageDetail, "thread_count"> & { role: Role | null; box?: string; snoozeUntil?: number; woke?: boolean };
 
 let messages: MockMessage[] = Array.from({ length: 60 }, (_, i) => {
   const [from_name, from_addr, subject, body, hoursAgo] = seed[i % seed.length];
@@ -77,7 +78,7 @@ messages.unshift({
   snippet: "Seguem a planta revisada e o orçamento em anexo.", body_text: "Seguem a planta revisada e o orçamento em anexo.\n\nMarina",
   body_html: `<div style="font-family:Arial,sans-serif;max-width:560px"><img src="${LOGO}" width="160" height="48" alt="Lumen"><p>Oi, Renan! Seguem a <b>planta revisada</b> e o orçamento em anexo.</p><p>Marina</p></div>`,
   seen: false, flagged: true, reply_addr: "marina@lumenarquitetura.com.br", role: "inbox", thread_id: 1100,
-  to_addrs: "renan@exemplo.com", cc_addrs: "carla.mendes@outlook.com, pedro@antunes.dev",
+  to_addrs: "contato@exemplo.com", cc_addrs: "carla.mendes@outlook.com, pedro@antunes.dev",
   attachments: [
     { name: "planta-sala-reuniao-v3.pdf", mime: "application/pdf", size: 2_516_582, index: 0 },
     { name: "orçamento.xlsx", mime: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", size: 48_210, index: 1 },
@@ -131,8 +132,9 @@ let drafts: StoredDraft[] = [
   { id: "d-seed-2", account: accounts[0].id, reply_to: null, to: "", subject: "", body: "Lembrar de cobrar o orçamento do marceneiro.", updated: now - 30 * H },
 ];
 // As preferências sobrevivem ao reload (como no app, que grava no banco local).
+let autostart = false;
 const SETTINGS_KEY = "posta-mock-settings";
-let settings: Settings = { [`signature:${accounts[0].id}`]: "Renan\nBetinhos Executive Service" };
+let settings: Settings = { [`signature:${accounts[0].id}`]: "Renan\nBetinhos Executive Service", [`aliases:${accounts[0].id}`]: "Betinhos Executive <contato@exemplo.com>\nreservas@exemplo.com" };
 try { settings = { ...settings, ...JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? "{}") }; } catch { /* sem armazenamento */ }
 
 // Pastas do usuário de exemplo (separador "/"), com duas mensagens na subpasta.
@@ -151,17 +153,78 @@ const withCount = <T extends MockMessage>(m: T) => ({
   thread_count: m.thread_id ? messages.filter((x) => x.account === m.account && x.thread_id === m.thread_id).length : 1,
 });
 const summary = (m: MockMessage): MessageSummary => {
-  const { box: _x, body_text: _b, body_html: _h, reply_addr: _r, attachments: _a, to_addrs: _t, cc_addrs: _c, ...s } = withCount(m);
+  const { box: _x, snoozeUntil: _s, woke: _w, body_text: _b, body_html: _h, reply_addr: _r, attachments: _a, to_addrs: _t, cc_addrs: _c, ...s } = withCount(m);
   return s;
 };
 /** Pastas virtuais: "Com estrela" (fora de Lixeira e Spam), "Todas as caixas" (a Entrada de todas as contas), pastas do usuário e categorias. */
+const snoozed = (m: MockMessage) => (m.snoozeUntil ?? 0) > Math.floor(Date.now() / 1000);
+/** Ordem da lista: fixadas primeiro; depois a data (ou a hora em que a adiada voltou). */
+const topKey = (m: MockMessage) => Math.max(m.date, m.snoozeUntil ?? 0);
+const byTop = (a: MockMessage, b: MockMessage) => Number(!!b.pinned) - Number(!!a.pinned) || topKey(b) - topKey(a);
+/** Adiadas que venceram voltam como não lidas. */
+const wake = () => {
+  for (const m of messages) if (m.snoozeUntil && !snoozed(m) && !m.woke) { m.woke = true; m.seen = false; }
+};
 const inView = (m: MockMessage, view: View) => {
+  if (snoozed(m)) return false;
   const box = parseBox(view);
   const cat = parseCat(view);
   if (box) return m.account === box.account && m.box === box.name;
   if (cat) return m.category === cat && m.role !== "trash" && m.role !== "junk";
   return view === "starred" ? m.flagged && m.role !== "trash" && m.role !== "junk" : m.role === (view === "all" ? "inbox" : view);
 };
+/** Mesmo vocabulário do núcleo: de:, para:, assunto:, tem:anexo, é:não-lida, antes:, depois:; o resto é texto livre. */
+function matchFilters(m: MockMessage, query: string): boolean {
+  const text: string[] = [];
+  const ok = (v: string, hay: string) => norm(hay).includes(norm(v));
+  let pass = true;
+  for (const t of query.match(/(?:[^\s"]+|"[^"]*")+/g) ?? []) {
+    const [key, ...rest] = t.replace(/"/g, "").split(":");
+    const val = rest.join(":");
+    const k = norm(key);
+    const v = norm(val);
+    const day = /^\d{4}-\d{2}-\d{2}$/.test(val) ? Date.parse(`${val}T00:00:00-03:00`) / 1000 : NaN;
+    if (!val) text.push(t);
+    else if (k === "de" || k === "from") pass &&= ok(val, `${m.from_name} ${m.from_addr}`);
+    else if (k === "para" || k === "to") pass &&= ok(val, `${m.to_addrs} ${m.cc_addrs}`);
+    else if (k === "assunto" || k === "subject") pass &&= ok(val, m.subject);
+    else if ((k === "tem" || k === "has") && v.startsWith("anexo")) pass &&= m.attachments.length > 0;
+    else if ((k === "e" || k === "is") && (v === "nao-lida" || v === "naolida")) pass &&= !m.seen;
+    else if ((k === "e" || k === "is") && v === "lida") pass &&= m.seen;
+    else if ((k === "antes" || k === "before") && !isNaN(day)) pass &&= m.date < day;
+    else if ((k === "depois" || k === "after" || k === "desde") && !isNaN(day)) pass &&= m.date >= day;
+    else text.push(t);
+  }
+  return pass && text.every((w) => ok(w, `${m.subject} ${m.from_name} ${m.from_addr} ${m.body_text}`));
+}
+
+/** Mensagens que só existem "no servidor": a busca no servidor as traz para o banco local. */
+const serverOnly: MockMessage[] = [
+  ["Marina Duarte", "marina@lumenarquitetura.com.br", "Contrato de prestação 2023 (arquivo antigo)", 9000],
+  ["Juliana Prado", "juliana@prado.adv.br", "Contrato social: versão final de 2022", 15000],
+].map(([from_name, from_addr, subject, hoursAgo], i) => ({
+  id: 5000 + i, account: accounts[0].id, uid: 5000 + i, from_name: String(from_name), from_addr: String(from_addr), subject: String(subject),
+  date: now - Number(hoursAgo) * H, snippet: "Mensagem antiga, só no servidor.", body_text: "Mensagem antiga, só no servidor.", body_html: "",
+  seen: true, flagged: false, reply_addr: String(from_addr), attachments: [], to_addrs: "renan@exemplo.com", cc_addrs: "", role: "inbox" as Role, thread_id: 0,
+}));
+
+/** Agendados do mock; a mensagem sai quando a hora chega (como o relógio do app). */
+let scheduled: { item: ScheduledItem; draft: Draft }[] = [];
+setInterval(() => {
+  const t = Math.floor(Date.now() / 1000);
+  const due = scheduled.filter((s) => s.item.send_at <= t);
+  if (!due.length) return;
+  scheduled = scheduled.filter((s) => s.item.send_at > t);
+  for (const { draft } of due) {
+    const id = Math.max(...messages.map((m) => m.id)) + 1;
+    messages.push({
+      id, account: draft.account, uid: id, from_name: "Renan", from_addr: "renan@exemplo.com", subject: draft.subject, date: t,
+      snippet: draft.body.slice(0, 200), body_text: draft.body, body_html: "", seen: true, flagged: false, reply_addr: draft.to,
+      attachments: [], to_addrs: draft.to, cc_addrs: "", role: "sent", thread_id: 0,
+    });
+  }
+}, 2000);
+
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 // Rede simulada: no console do navegador, `__mockOffline(true)` liga o modo offline (ações entram na fila).
@@ -237,6 +300,15 @@ export const mockApi = {
     try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch { /* sem armazenamento */ }
   },
   async setFocused(_focused: boolean): Promise<void> {},
+  async saveEml(_id: number): Promise<string> {
+    return "/home/renan/Downloads/mensagem.eml";
+  },
+  async getAutostart(): Promise<boolean> {
+    return autostart;
+  },
+  async setAutostart(enabled: boolean): Promise<void> {
+    autostart = enabled;
+  },
   async requestNotifyPermission(): Promise<boolean> {
     return true;
   },
@@ -324,7 +396,8 @@ export const mockApi = {
     return { fetched: 1, total: messages.length, errors: [], skipped: false, offline: false };
   },
   async list(view: View, limit: number, offset: number): Promise<MessageSummary[]> {
-    return messages.filter((m) => inView(m, view)).sort((a, b) => b.date - a.date).slice(offset, offset + limit).map(summary);
+    wake();
+    return messages.filter((m) => inView(m, view)).sort(byTop).slice(offset, offset + limit).map(summary);
   },
   async search(query: string, view: View): Promise<MessageSummary[]> {
     const terms = norm(query).split(/\s+/).filter(Boolean);
@@ -332,6 +405,62 @@ export const mockApi = {
       .filter((m) => inView(m, view) && terms.every((t) => norm(`${m.subject} ${m.from_name} ${m.from_addr} ${m.body_text}`).includes(t)))
       .sort((a, b) => b.date - a.date)
       .map(summary);
+  },
+  async searchFiltered(query: string, view: View): Promise<MessageSummary[]> {
+    wake();
+    return messages.filter((m) => inView(m, view) && matchFilters(m, query)).sort(byTop).map(summary);
+  },
+  async searchServer(query: string, view: View): Promise<MessageSummary[]> {
+    await wait(700);
+    const found = serverOnly.filter((m) => inView(m, view) && matchFilters(m, query));
+    for (const m of found) { serverOnly.splice(serverOnly.indexOf(m), 1); messages.push(m); }
+    return messages.filter((m) => inView(m, view) && matchFilters(m, query)).sort(byTop).map(summary);
+  },
+  /** Aplica `settings.rules` à Entrada; devolve quantas mensagens mudaram. */
+  async applyRulesNow(): Promise<number> {
+    await wait(300);
+    const rules = parseRules(settings.rules).filter((r) => r.enabled && r.contains.trim());
+    let changed = 0;
+    for (const m of messages.filter((x) => x.role === "inbox" && !snoozed(x))) {
+      let hit = false;
+      for (const r of rules) {
+        const hay = r.field === "from" ? `${m.from_name} ${m.from_addr}` : r.field === "to" ? `${m.to_addrs} ${m.cc_addrs}` : m.subject;
+        if (!norm(hay).includes(norm(r.contains))) continue;
+        hit = true;
+        if (r.action === "read") m.seen = true;
+        else if (r.action === "star") m.flagged = true;
+        else if (r.action === "category") m.category = r.arg;
+        else if (r.action === "move" && userFolders.some((f) => f.account === m.account && f.name === r.arg)) { m.role = null; m.box = r.arg; }
+        else if (r.action === "archive") m.role = "archive";
+      }
+      if (hit) changed++;
+    }
+    return changed;
+  },
+  async snooze(ids: number[], until: number): Promise<void> {
+    await wait(100);
+    messages.forEach((m) => { if (ids.includes(m.id)) { m.snoozeUntil = until; m.woke = false; } });
+  },
+  async unsnooze(ids: number[]): Promise<void> {
+    messages.forEach((m) => { if (ids.includes(m.id)) { delete m.snoozeUntil; delete m.woke; } });
+  },
+  async setPinned(ids: number[], pinned: boolean): Promise<void> {
+    await wait(100);
+    messages.forEach((m) => { if (ids.includes(m.id)) m.pinned = pinned; });
+  },
+  async scheduleSend(id: string, sendAt: number, draft: Draft): Promise<void> {
+    if (draft.to.includes("erro")) throw "endereço inválido";
+    const item: ScheduledItem = { id, account: draft.account, send_at: sendAt, status: "pending", error: "", to: draft.to, subject: draft.subject };
+    scheduled = [...scheduled.filter((s) => s.item.id !== id), { item, draft }];
+  },
+  async listScheduled(): Promise<ScheduledItem[]> {
+    return scheduled.map((s) => s.item).sort((a, b) => a.send_at - b.send_at);
+  },
+  async takeScheduled(id: string): Promise<ScheduledEdit | null> {
+    const s = scheduled.find((x) => x.item.id === id);
+    if (!s) return null;
+    scheduled = scheduled.filter((x) => x !== s);
+    return { ...s.draft, reply_to: s.draft.reply_to ?? null, id, send_at: s.item.send_at };
   },
   async thread(id: number): Promise<MessageSummary[]> {
     const m = messages.find((x) => x.id === id);
@@ -393,7 +522,7 @@ export const mockApi = {
   },
   async unreadCounts(): Promise<UnreadCounts> {
     const out: UnreadCounts = {};
-    for (const m of messages) if (!m.seen && m.role) out[m.role] = (out[m.role] ?? 0) + 1;
+    for (const m of messages) if (!m.seen && m.role && !snoozed(m)) out[m.role] = (out[m.role] ?? 0) + 1;
     return out;
   },
   async forwardAttachments(id: number): Promise<OutAttachment[]> {

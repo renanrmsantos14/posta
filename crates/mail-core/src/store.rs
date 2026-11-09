@@ -82,6 +82,35 @@ CREATE TABLE IF NOT EXISTS message_categories (
   category TEXT NOT NULL,
   PRIMARY KEY (account, msg_key)
 );
+-- Produtividade (só locais, chaveados como as categorias): adiadas, fixadas no topo, envios agendados e respostas de férias.
+CREATE TABLE IF NOT EXISTS snoozes (
+  account TEXT NOT NULL,
+  msg_key TEXT NOT NULL,
+  until INTEGER NOT NULL,
+  woken INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (account, msg_key)
+);
+CREATE TABLE IF NOT EXISTS pins (
+  account TEXT NOT NULL,
+  msg_key TEXT NOT NULL,
+  PRIMARY KEY (account, msg_key)
+);
+CREATE TABLE IF NOT EXISTS scheduled (
+  id TEXT PRIMARY KEY,
+  account TEXT NOT NULL,
+  reply_to INTEGER,
+  send_at INTEGER NOT NULL,
+  payload TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  attempts INTEGER NOT NULL DEFAULT 0,
+  error TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS vacation_replied (
+  account TEXT NOT NULL,
+  addr TEXT NOT NULL,
+  at INTEGER NOT NULL,
+  PRIMARY KEY (account, addr)
+);
 -- Fila offline (dados do usuário): ações aguardando o servidor e envios aguardando rede.
 CREATE TABLE IF NOT EXISTS pending_ops (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -173,6 +202,8 @@ pub struct MessageSummary {
     pub thread_count: u32,
     /// Id da categoria colorida aplicada (definidas nas configurações); `None` sem categoria.
     pub category: Option<String>,
+    /// Fixada no topo da lista.
+    pub pinned: bool,
 }
 
 /// Pasta criada pelo usuário numa conta.
@@ -245,8 +276,9 @@ macro_rules! msg_key {
         "CASE WHEN m.message_id <> '' THEN m.message_id ELSE m.mailbox || '/' || m.uid END"
     };
 }
+pub(crate) const MSG_KEY: &str = msg_key!();
 
-const SUMMARY_COLS: &str = concat!(
+pub(crate) const SUMMARY_COLS: &str = concat!(
     "m.id, m.account, m.uid, m.from_name, m.from_addr, m.subject, m.date, m.snippet, m.seen, m.flagged,
     COALESCE((SELECT f.role FROM folders f WHERE f.account = m.account AND f.name = m.mailbox),
     CASE WHEN m.mailbox = 'INBOX' THEN 'inbox' END),
@@ -254,13 +286,32 @@ const SUMMARY_COLS: &str = concat!(
     CASE WHEN m.thread_id = 0 THEN 1 ELSE (SELECT COUNT(*) FROM messages t WHERE t.account = m.account AND t.thread_id = m.thread_id) END,
     (SELECT c.category FROM message_categories c WHERE c.account = m.account AND c.msg_key = ",
     msg_key!(),
+    "),
+    EXISTS (SELECT 1 FROM pins p WHERE p.account = m.account AND p.msg_key = ",
+    msg_key!(),
     ")"
 );
 
-/// Fora da Lixeira e do Spam.
-const NOT_DISCARDED: &str = "COALESCE((SELECT f.role FROM folders f WHERE f.account = m.account AND f.name = m.mailbox), '') NOT IN ('trash', 'junk')";
+/// Adiada e ainda dentro do prazo: some das listas até a hora marcada.
+const NOT_SNOOZED: &str = concat!(
+    "NOT EXISTS (SELECT 1 FROM snoozes z WHERE z.account = m.account AND z.msg_key = ",
+    msg_key!(),
+    " AND z.until > CAST(strftime('%s', 'now') AS INTEGER))"
+);
 
-fn row_to_summary(r: &rusqlite::Row) -> rusqlite::Result<MessageSummary> {
+/// Fixadas primeiro; depois a data, ou a hora em que a adiada voltou (o que a leva ao topo).
+const ORDER_TOP: &str = concat!(
+    "ORDER BY EXISTS (SELECT 1 FROM pins p WHERE p.account = m.account AND p.msg_key = ",
+    msg_key!(),
+    ") DESC, MAX(m.date, COALESCE((SELECT z.until FROM snoozes z WHERE z.account = m.account AND z.msg_key = ",
+    msg_key!(),
+    "), 0)) DESC, m.id DESC"
+);
+
+/// Fora da Lixeira e do Spam.
+pub(crate) const NOT_DISCARDED: &str = "COALESCE((SELECT f.role FROM folders f WHERE f.account = m.account AND f.name = m.mailbox), '') NOT IN ('trash', 'junk')";
+
+pub(crate) fn row_to_summary(r: &rusqlite::Row) -> rusqlite::Result<MessageSummary> {
     Ok(MessageSummary {
         id: r.get(0)?,
         account: r.get(1)?,
@@ -276,6 +327,7 @@ fn row_to_summary(r: &rusqlite::Row) -> rusqlite::Result<MessageSummary> {
         thread_id: r.get(11)?,
         thread_count: r.get(12)?,
         category: r.get(13)?,
+        pinned: r.get(14)?,
     })
 }
 
@@ -289,7 +341,7 @@ fn snippet(body: &str) -> String {
 }
 
 /// Converte o texto digitado em consulta FTS5 segura: cada palavra vira prefixo entre aspas.
-fn fts_query(input: &str) -> Option<String> {
+pub(crate) fn fts_query(input: &str) -> Option<String> {
     let terms: Vec<String> = input
         .split_whitespace()
         .map(|w| format!("\"{}\"*", w.replace('"', "")))
@@ -505,7 +557,7 @@ impl Store {
     pub fn unread_counts(&self) -> Result<Vec<(Role, u32)>> {
         let mut stmt = self
             .conn
-            .prepare_cached(&format!("SELECT COUNT(*) FROM messages m WHERE m.seen = 0 AND {IN_ROLE}"))?;
+            .prepare_cached(&format!("SELECT COUNT(*) FROM messages m WHERE m.seen = 0 AND {IN_ROLE} AND {NOT_SNOOZED}"))?;
         Role::ALL
             .iter()
             .map(|r| Ok((*r, stmt.query_row(params![r.as_str()], |row| row.get(0))?)))
@@ -573,12 +625,12 @@ impl Store {
                 |r| {
                     Ok(MessageDetail {
                         summary: row_to_summary(r)?,
-                        body_text: r.get(14)?,
-                        body_html: r.get(15)?,
-                        reply_addr: r.get(16)?,
-                        attachments: serde_json::from_str(&r.get::<_, String>(17)?).unwrap_or_default(),
-                        to_addrs: r.get(18)?,
-                        cc_addrs: r.get(19)?,
+                        body_text: r.get(15)?,
+                        body_html: r.get(16)?,
+                        reply_addr: r.get(17)?,
+                        attachments: serde_json::from_str(&r.get::<_, String>(18)?).unwrap_or_default(),
+                        to_addrs: r.get(19)?,
+                        cc_addrs: r.get(20)?,
                     })
                 },
             )
@@ -649,8 +701,8 @@ impl Store {
     /// Pasta unificada: o papel em todas as contas, mais recentes primeiro.
     pub fn list_folder(&self, role: Role, limit: u32, offset: u32) -> Result<Vec<MessageSummary>> {
         let mut stmt = self.conn.prepare_cached(&format!(
-            "SELECT {SUMMARY_COLS} FROM messages m WHERE {IN_ROLE}
-             ORDER BY m.date DESC, m.id DESC LIMIT ?2 OFFSET ?3"
+            "SELECT {SUMMARY_COLS} FROM messages m WHERE {IN_ROLE} AND {NOT_SNOOZED}
+             {ORDER_TOP} LIMIT ?2 OFFSET ?3"
         ))?;
         let rows = stmt
             .query_map(params![role.as_str(), limit, offset], row_to_summary)?
@@ -854,8 +906,8 @@ impl Store {
     /// Mensagens de uma pasta de uma conta (as pastas do usuário não se juntam entre contas).
     pub fn list_box(&self, account: &str, mailbox: &str, limit: u32, offset: u32) -> Result<Vec<MessageSummary>> {
         let mut stmt = self.conn.prepare_cached(&format!(
-            "SELECT {SUMMARY_COLS} FROM messages m WHERE m.account = ?1 AND m.mailbox = ?2
-             ORDER BY m.date DESC, m.id DESC LIMIT ?3 OFFSET ?4"
+            "SELECT {SUMMARY_COLS} FROM messages m WHERE m.account = ?1 AND m.mailbox = ?2 AND {NOT_SNOOZED}
+             {ORDER_TOP} LIMIT ?3 OFFSET ?4"
         ))?;
         let rows = stmt
             .query_map(params![account, mailbox, limit, offset], row_to_summary)?
@@ -946,6 +998,10 @@ impl Store {
             "DELETE FROM outbox WHERE account = ?1",
             "DELETE FROM user_folders WHERE account = ?1",
             "DELETE FROM message_categories WHERE account = ?1",
+            "DELETE FROM snoozes WHERE account = ?1",
+            "DELETE FROM pins WHERE account = ?1",
+            "DELETE FROM scheduled WHERE account = ?1",
+            "DELETE FROM vacation_replied WHERE account = ?1",
             "DELETE FROM settings WHERE key = 'signature:' || ?1",
         ] {
             tx.execute(sql, params![account])?;
@@ -1370,6 +1426,28 @@ mod tests {
         let conn = s.conn;
         let again = Store::init(conn).unwrap();
         assert_eq!(again.list("INBOX", 5, 0).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn banco_da_integracao_outlook_ganha_as_tabelas_dos_tres_pacotes() {
+        // Esquema do feat/integracao-outlook: já tem pastas e categorias, mas não as tabelas de produtividade nem da fila offline.
+        let conn = Connection::open_in_memory().unwrap();
+        let cut = |t: &str, from: &str| -> String {
+            let a = t.find(from).unwrap();
+            let b = t[a..].find("CREATE VIRTUAL TABLE").unwrap() + a;
+            format!("{}{}", &t[..a], &t[b..])
+        };
+        conn.execute_batch(&cut(SCHEMA, "-- Produtividade")).unwrap();
+        for t in ["snoozes", "pins", "scheduled", "vacation_replied", "pending_ops", "outbox"] {
+            assert!(conn.prepare(&format!("SELECT * FROM {t}")).is_err(), "{t} não deveria existir ainda");
+        }
+        conn.pragma_update(None, "user_version", SCHEMA_VERSION).unwrap();
+        let s = Store::init(conn).unwrap();
+        for t in ["snoozes", "pins", "scheduled", "vacation_replied", "pending_ops", "outbox"] {
+            s.conn.prepare(&format!("SELECT * FROM {t}")).unwrap_or_else(|e| panic!("{t}: {e}"));
+        }
+        let again = Store::init(s.conn).unwrap();
+        assert_eq!((again.pending_count().unwrap(), again.outbox_count().unwrap()), (0, 0));
     }
 
     #[test]

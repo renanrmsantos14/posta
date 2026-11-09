@@ -139,6 +139,7 @@ fn responde_por_smtp_guarda_em_enviados_e_marca_respondida() {
         cc: String::new(),
         bcc: String::new(),
         attachments: vec![],
+        from: None,
     };
     let report = send::send(&eu, &out, Some(&reply)).unwrap();
     assert_eq!(report.warning, None);
@@ -287,6 +288,7 @@ fn envia_com_anexo_e_cc_e_le_de_volta() {
             mime: "application/octet-stream".into(),
             data: base64::engine::general_purpose::STANDARD.encode(&conteudo),
         }],
+        from: None,
     };
     send::send(&eu, &out, None).unwrap();
 
@@ -442,6 +444,75 @@ fn cria_renomeia_e_exclui_pastas_com_subpastas() {
 }
 
 #[test]
+fn busca_no_servidor_acha_e_baixa_o_que_nao_esta_no_banco() {
+    let Some(acc) = account("srv") else { return };
+    let mut s = session(&acc);
+    s.append("INBOX", &raw(1, "Contrato antigo")).finish().unwrap();
+    s.append("INBOX", &raw(2, "Cotação aeroporto")).flag(imap::types::Flag::Seen).finish().unwrap();
+    s.append("INBOX", &raw(3, "Outro assunto")).finish().unwrap();
+    let anexo = "From: x@y.com\r\nTo: eu@exemplo.com\r\nSubject: Planta\r\nMIME-Version: 1.0\r\n\
+                 Content-Type: multipart/mixed; boundary=b\r\n\r\n--b\r\nContent-Type: text/plain\r\n\r\nveja\r\n\
+                 --b\r\nContent-Type: application/pdf; name=a.pdf\r\nContent-Disposition: attachment; filename=a.pdf\r\n\
+                 Content-Transfer-Encoding: base64\r\n\r\nSGVsbG8=\r\n--b--\r\n";
+    s.append("INBOX", anexo.as_bytes()).finish().unwrap();
+    s.logout().ok();
+
+    // Só a mais recente fica no banco; a busca no servidor traz as outras.
+    let mut store = Store::open_in_memory().unwrap();
+    imap_sync::sync_mailbox(&acc, &mut store, "INBOX", Some(1)).unwrap();
+    assert_eq!(store.list("INBOX", 50, 0).unwrap().len(), 1);
+
+    let f = mail_core::search::parse("assunto:contrato");
+    let uids = imap_sync::search_server(&acc, &mut store, "INBOX", &f).unwrap();
+    assert_eq!(uids.len(), 1);
+    let found = store.by_uids(&acc.id, "INBOX", &uids).unwrap();
+    assert_eq!(found[0].subject, "Contrato antigo");
+
+    let f = mail_core::search::parse("é:não-lida de:ana@exemplo.com");
+    assert_eq!(imap_sync::search_server(&acc, &mut store, "INBOX", &f).unwrap().len(), 2);
+
+    let f = mail_core::search::parse("tem:anexo");
+    let uids = imap_sync::search_server(&acc, &mut store, "INBOX", &f).unwrap();
+    assert_eq!(store.by_uids(&acc.id, "INBOX", &uids).unwrap()[0].subject, "Planta");
+
+    // Sem critério não consulta nada.
+    assert!(imap_sync::search_server(&acc, &mut store, "INBOX", &mail_core::search::parse("")).unwrap().is_empty());
+}
+
+#[test]
+fn envia_com_alias_como_remetente() {
+    let (Some(eu), Some(ana)) = (account("eu"), account("ana")) else { return };
+    if eu.smtp.is_none() {
+        return;
+    }
+    let out = Outgoing {
+        to: ana.username.clone(),
+        subject: "Enviado pelo alias".into(),
+        body: "Mensagem vinda do alias.".into(),
+        html: None,
+        cc: String::new(),
+        bcc: String::new(),
+        attachments: vec![],
+        from: Some("Reservas Betinhos <reservas@betinhos.exemplo>".into()),
+    };
+    send::send(&eu, &out, None).unwrap();
+
+    let mut store = Store::open_in_memory().unwrap();
+    let mut got = None;
+    for _ in 0..20 {
+        imap_sync::sync_mailbox(&ana, &mut store, "INBOX", None).unwrap();
+        got = store.search("alias", 5).unwrap().into_iter().find(|m| m.subject == "Enviado pelo alias");
+        if got.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let got = got.expect("mensagem do alias chegou");
+    assert_eq!(got.from_addr, "reservas@betinhos.exemplo");
+    assert_eq!(got.from_name, "Reservas Betinhos");
+}
+
+#[test]
 fn fila_offline_reaplica_quando_a_rede_volta() {
     let (Some(acc), Some(dest)) = (account("fila"), account("dest")) else { return };
     if acc.smtp.is_none() {
@@ -473,6 +544,7 @@ fn fila_offline_reaplica_quando_a_rede_volta() {
         cc: String::new(),
         bcc: String::new(),
         attachments: vec![],
+        from: None,
     };
     store.enqueue_op(&acc.id, "INBOX", uids[0], mail_core::OpKind::Seen, "").unwrap();
     store.enqueue_op(&acc.id, "INBOX", uids[1], mail_core::OpKind::Star, "").unwrap();
