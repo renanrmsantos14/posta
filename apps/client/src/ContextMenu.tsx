@@ -29,7 +29,7 @@ function Items({ items, onClose, label, sub, onLeave }: { items: MenuItem[]; onC
     if (sub && root.current) setFlip(root.current.getBoundingClientRect().right > window.innerWidth - 4);
   }, [sub]);
 
-  const buttons = () => [...(root.current?.querySelectorAll<HTMLButtonElement>(":scope > button:not(:disabled)") ?? [])];
+  const buttons = () => [...(root.current?.querySelectorAll<HTMLButtonElement>(":scope > .ctx-wrap > button:not(:disabled)") ?? [])];
   useEffect(() => { if (!sub) buttons()[0]?.focus(); }, [sub]);
 
   const onKey = (e: React.KeyboardEvent) => {
@@ -58,7 +58,7 @@ function Items({ items, onClose, label, sub, onLeave }: { items: MenuItem[]; onC
             {it.items && <CaretRight size={12} weight="bold" aria-hidden />}
           </button>
           {it.items && open === idx && (
-            <SubMenu items={it.items} label={it.label ?? ""} onClose={onClose} onLeave={() => { setOpen(null); }} />
+            <SubMenu items={it.items} label={it.label ?? ""} onClose={onClose} onLeave={() => { const wrap = root.current?.querySelector<HTMLElement>(":scope > .ctx-wrap:has(> .ctx-subhost) > button"); setOpen(null); requestAnimationFrame(() => wrap?.focus()); }} />
           )}
         </div>
       ))}
@@ -69,7 +69,7 @@ function Items({ items, onClose, label, sub, onLeave }: { items: MenuItem[]; onC
 function SubMenu({ items, label, onClose, onLeave }: { items: MenuItem[]; label: string; onClose: () => void; onLeave: () => void }) {
   const ref = useRef<HTMLDivElement>(null);
   // Entra com o foco no primeiro item; ← devolve o foco ao item pai.
-  useEffect(() => { ref.current?.querySelector<HTMLButtonElement>(":scope > .ctx-menu > button:not(:disabled)")?.focus(); }, []);
+  useEffect(() => { ref.current?.querySelector<HTMLButtonElement>(":scope > .ctx-menu > .ctx-wrap > button:not(:disabled)")?.focus(); }, []);
   return (
     <div ref={ref} className="ctx-subhost">
       <Items items={items} onClose={onClose} label={label} sub onLeave={onLeave} />

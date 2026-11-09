@@ -1,9 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowBendUpLeft, ArrowBendDoubleUpLeft, ArrowBendUpRight, ArrowsClockwise, Archive, Copy, FolderOpen, FolderSimple, NotePencil, Star, Tag, Trash, EnvelopeSimple, EnvelopeSimpleOpen, FloppyDisk, PaperPlaneTilt, FileText, Printer, PushPin, Clock, X } from "@phosphor-icons/react";
+import { ArrowBendUpLeft, ArrowBendDoubleUpLeft, ArrowBendUpRight, ArrowsClockwise, Archive, Copy, FolderOpen, FolderSimple, NotePencil, Star, Tag, Trash, EnvelopeSimple, EnvelopeSimpleOpen, FloppyDisk, PaperPlaneTilt, Printer, PushPin, Clock } from "@phosphor-icons/react";
 import { api, isTauri, type Account, type Attachment, type MessageDetail, type MessageSummary, type OutAttachment, type OutboxItem, type Role, type Settings, type StoredDraft, type UnreadCounts, type UserFolder, type View } from "./api";
 import { AccountDialog } from "./AccountDialog";
-import { CategoryPicker, parseCategories } from "./Categories";
-import { WhenMenu } from "./WhenMenu";
+import { parseCategories } from "./Categories";
 import { FolderDialog, type FolderDialogState } from "./FolderDialog";
 import { OutboxPane, useQueue } from "./Offline";
 import { boxView, catView, parseBox, parseCat } from "./views";
@@ -24,6 +23,7 @@ import { CommandBar } from "./CommandBar";
 import { buildCommands } from "./commands";
 import { Rail } from "./Rail";
 import { MobileActions } from "./MobileActions";
+import { BulkBar, FolderTabs, ListHead } from "./ListParts";
 import { ReaderPane, splitAddrs } from "./ReaderPane";
 import { MessageList, type Density, type ListHandle, type ListRow } from "./MessageList";
 import { PAGE, useMessageList } from "./useMessageList";
@@ -1346,6 +1346,11 @@ export default function App() {
       if (!action) return;
       if ((showDrafts || showScheduled || showOutbox) && action !== "compose" && action !== "search") return;
       if (action === "open" && !(t instanceof Element && t.closest("[role=option]"))) return;
+      // Setas/Home/End só movem a seleção com o foco na lista ou fora de qualquer controle (não roubam a rolagem do leitor nem botões).
+      if (e.key.startsWith("Arrow") || e.key === "Home" || e.key === "End") {
+        const free = !(t instanceof Element) || t === document.body || t === document.documentElement;
+        if (!free && !(t instanceof Element && t.closest("[role=listbox]"))) return;
+      }
       e.preventDefault();
       const idx = rows.findIndex((r) => r.members.some((m) => m.id === selectedId));
       const targets = checkedList.length ? checkedList : current ? withThread([current]) : [];
@@ -1373,7 +1378,8 @@ export default function App() {
         case "unread": return void markSeen(targets, false);
         case "pin": return void togglePin(targets);
         case "undo":
-          return void popUndo().then((label) => toast(label ? `Desfeito: ${label}` : "Nada para desfazer", "info", { duration: 2000 }));
+          return void popUndo().then((label) => toast(label ? `Desfeito: ${label}` : "Nada para desfazer", "info", { duration: 2000 }))
+            .catch(() => toast("Não foi possível desfazer", "error"));
       }
     };
     window.addEventListener("keydown", onKey);
@@ -1402,44 +1408,11 @@ export default function App() {
 
   const inList = !showDrafts && !showScheduled;
   const folderTabs = (
-    <div className="folder-tabs mobile-only" role="group" aria-label="Pastas">
-      {navFolders.map((r) => {
-        const Icon = FOLDERS[r].icon;
-        return (
-          <button key={r} className="btn ghost small" onClick={() => openFolder(r)} aria-current={r === folder && inList ? "page" : undefined}>
-            <Icon size={14} weight="bold" /> {FOLDERS[r].label}
-          </button>
-        );
-      })}
-      {[...tree.map((n) => boxView(n.account, n.name)), ...categories.map((c) => catView(c.id))].map((v) => {
-        const { label, icon: Icon } = viewInfo(v, userFolders, categories);
-        return (
-          <button key={v} className="btn ghost small" onClick={() => openFolder(v)} aria-current={v === folder && inList ? "page" : undefined}>
-            <Icon size={14} weight="bold" /> {label}
-          </button>
-        );
-      })}
-      <button className="btn ghost small" onClick={openDrafts} aria-current={showDrafts && !showOutbox ? "page" : undefined}>
-        <FileText size={14} weight="bold" /> Rascunhos
-      </button>
-      <button className="btn ghost small" onClick={openScheduled} aria-current={showScheduled ? "page" : undefined}>
-        <Clock size={14} weight="bold" /> Agendados
-      </button>
-      {(net.outbox > 0 || showOutbox) && (
-        <button className="btn ghost small" onClick={openOutbox} aria-current={showOutbox ? "page" : undefined}>
-          <PaperPlaneTilt size={14} weight="bold" /> Caixa de saída
-        </button>
-      )}
-    </div>
+    <FolderTabs navFolders={navFolders} tree={tree} categories={categories} userFolders={userFolders} folder={folder} inList={inList}
+      showDrafts={showDrafts} showScheduled={showScheduled} showOutbox={showOutbox} outbox={net.outbox}
+      onOpen={openFolder} onDrafts={openDrafts} onScheduled={openScheduled} onOutbox={openOutbox} />
   );
-
   const pickTab = (t: "focused" | "other") => changeSetting("inbox:tab", t);
-  const onTabKey = (e: React.KeyboardEvent) => {
-    if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
-    e.preventDefault();
-    pickTab(tab === "focused" ? "other" : "focused");
-    requestAnimationFrame(() => document.querySelector<HTMLElement>(".focus-tabs [aria-selected=true]")?.focus());
-  };
 
   return (
     <AppShell shellRef={appRef} data-reader={readerOpen || undefined} data-pane={pane === "right" ? undefined : pane}
@@ -1469,46 +1442,14 @@ export default function App() {
 
         <PageLayout area="list" aria-label="Lista de mensagens">
           {folderTabs}
-          <div className="list-head">
-            <h2 className="list-title">{showScheduled ? "Agendados" : showOutbox ? "Caixa de saída" : showDrafts ? "Rascunhos" : info.label}</h2>
-            {tabsOn && inList && (
-              <div className="focus-tabs" role="tablist" aria-label="Foco e Outros" onKeyDown={onTabKey}>
-                <button type="button" role="tab" id="tab-focused" aria-selected={tab === "focused"} tabIndex={tab === "focused" ? 0 : -1} onClick={() => pickTab("focused")}>
-                  Foco{tabUnread.focused > 0 && <span className="tab-n">{tabUnread.focused}</span>}
-                </button>
-                <button type="button" role="tab" id="tab-other" aria-selected={tab === "other"} tabIndex={tab === "other" ? 0 : -1} onClick={() => pickTab("other")}>
-                  Outros{tabUnread.other > 0 && <span className="tab-n">{tabUnread.other}</span>}
-                </button>
-              </div>
-            )}
-          </div>
+          <ListHead title={showScheduled ? "Agendados" : showOutbox ? "Caixa de saída" : showDrafts ? "Rascunhos" : info.label}
+            tabsOn={tabsOn && inList} tab={tab} unread={tabUnread} onTab={pickTab} />
           {checkedList.length > 0 && (
-            <div className="bulk" role="toolbar" aria-label="Ações em lote">
-              <button className="icon-btn" onClick={() => setChecked(new Set())} aria-label="Limpar seleção" title="Limpar seleção (Esc)">
-                <X size={15} weight="bold" />
-              </button>
-              <span className="bulk-count">{checkedRows.length} {checkedRows.length === 1 ? "selecionada" : "selecionadas"}</span>
-              {checkedRows.length < rows.length && (
-                <button className="btn ghost small" onClick={() => setChecked(new Set(rows.map((r) => r.head.id)))}>Todas</button>
-              )}
-              <span className="bulk-actions">
-                <button className="icon-btn" onClick={() => archive(checkedList)} disabled={!checkedList.some(canArchive)}
-                  aria-label="Arquivar" title="Arquivar (E)"><Archive size={16} weight="bold" /></button>
-                <button className="icon-btn" onClick={() => remove(checkedList)} disabled={!checkedList.some(canTrash)}
-                  aria-label="Excluir" title="Excluir (Delete)"><Trash size={16} weight="bold" /></button>
-                <button className="icon-btn" onClick={() => markSeen(checkedList, true)}
-                  aria-label="Marcar como lida" title="Marcar como lida (Ctrl+Q)"><EnvelopeSimpleOpen size={16} weight="bold" /></button>
-                <button className="icon-btn" onClick={() => markSeen(checkedList, false)}
-                  aria-label="Marcar como não lida" title="Marcar como não lida (Ctrl+U)"><EnvelopeSimple size={16} weight="bold" /></button>
-                <button className="icon-btn" onClick={() => toggleStar(checkedList)}
-                  aria-label="Alternar estrela" title="Sinalizar (Insert)"><Star size={16} weight="bold" /></button>
-                <WhenMenu className="icon-btn" label="Adiar" onPick={(at) => snooze(checkedList, at)}><Clock size={16} weight="bold" /></WhenMenu>
-                <button className="icon-btn" onClick={() => togglePin(checkedList)}
-                  aria-label="Alternar fixar" title="Fixar no topo (P)"><PushPin size={16} weight="bold" /></button>
-                <CategoryPicker className="icon-btn" categories={categories} onPick={(id) => applyCategory(checkedList, id)}
-                  current={checkedList.every((m) => m.category === checkedList[0].category) ? checkedList[0].category ?? null : undefined} />
-              </span>
-            </div>
+            <BulkBar rows={rows} checkedRows={checkedRows} checked={checkedList} categories={categories}
+              canArchive={canArchive} canTrash={canTrash} onClear={() => setChecked(new Set())}
+              onAll={() => setChecked(new Set(rows.map((r) => r.head.id)))}
+              archive={archive} remove={remove} markSeen={markSeen} toggleStar={toggleStar} snooze={snooze}
+              togglePin={togglePin} applyCategory={applyCategory} />
           )}
           {results && inList && (
             <div className="result-meta">

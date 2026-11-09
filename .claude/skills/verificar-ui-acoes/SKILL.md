@@ -16,6 +16,9 @@ description: Verifica as ações em mensagens do Posta (lida/não lida, estrela,
    - Atalhos estilo Outlook com mensagem selecionada: `Delete` remove a linha e mostra toast com Desfazer, `Ctrl+Z` devolve; `Ctrl+R` / `Ctrl+Shift+R` / `Ctrl+F` abrem o Composer; `Ctrl+N` novo email; `Ctrl+Q` / `Ctrl+U` lida/não lida; `Insert` sinaliza; `j`/`k` e setas movem o foco (roving tabindex, anel de foco visível).
    - Menu de contexto (clique direito) na linha, numa pasta da Rail e no leitor: `role=menu`, itens Responder, Arquivar, Excluir, Mover para, Adiar, Categorias; Esc fecha; axe sem Critical/Serious com o menu aberto.
    - Ações no hover da linha (`.row-tools`): Excluir, Arquivar, Lida/Não lida, Fixar.
+   - Teclado no menu: ao abrir, o foco vai ao primeiro item (`activeElement` dentro de `role=menu`); setas/Home/End movem; → abre o submenu e ← devolve o foco ao item pai; Tab e Esc fecham, e Esc devolve o foco à linha.
+   - Atalhos inertes em campos (Delete/j/e no campo de busca não agem) e setas/Home/End só mudam a seleção com o foco na lista ou livre (não com o foco num botão da Rail).
+   - Altura das linhas por densidade (`.list-spacer`): Compacta 32, Média 56, Confortável 78 px, sem sobreposição com os cabeçalhos de data.
    - Console sem erro nem aviso.
 4. Print: sobrescreva `/home/renan/.t3/userdata/attachments/posta-acoes.png` (lista com seleção, estrelas e contadores). Encerre o vite.
 5. Backend: rode `verificar-mail-core` (inclui o cargo check do `posta` no Docker, pois os comandos novos de lib.rs não compilam no host).
