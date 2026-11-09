@@ -200,11 +200,18 @@ fn transport(acc: &ImapAccount) -> Result<SmtpTransport> {
 
 /// Testa o login no servidor SMTP (usado ao editar a conta, antes de salvar).
 pub fn check_smtp(acc: &ImapAccount) -> Result<()> {
-    if transport(acc)?.test_connection()? {
-        Ok(())
-    } else {
-        Err(Error::Invalid("o servidor SMTP recusou a conexão".into()))
-    }
+    crate::oauth::with_fresh_token_retry(acc, is_smtp_auth_error, |a| {
+        if transport(a)?.test_connection()? {
+            Ok(())
+        } else {
+            Err(Error::Invalid("o servidor SMTP recusou a conexão".into()))
+        }
+    })
+}
+
+/// 535 (credenciais recusadas), 530/534 (autenticação exigida ou fraca demais) e 454 (falha temporária de autenticação).
+fn is_smtp_auth_error(e: &Error) -> bool {
+    matches!(e, Error::Smtp(s) if s.status().is_some_and(|c| matches!(c.to_string().as_str(), "535" | "534" | "530" | "454")))
 }
 
 /// O Gmail já guarda no Enviados o que passa pelo SMTP; copiar duplicaria.
@@ -249,7 +256,10 @@ pub fn send_auto(acc: &ImapAccount, out: &Outgoing, reply: Option<&ReplyRef>) ->
 fn send_with(acc: &ImapAccount, out: &Outgoing, reply: Option<&ReplyRef>, auto: bool) -> Result<SendReport> {
     let msg = build_with(acc, out, reply, auto)?;
     let raw = msg.formatted();
-    transport(acc)?.send(&msg)?;
+    crate::oauth::with_fresh_token_retry(acc, is_smtp_auth_error, |a| {
+        transport(a)?.send(&msg)?;
+        Ok(())
+    })?;
     Ok(match after_send(acc, &raw, reply) {
         Ok(saved_to_sent) => SendReport { saved_to_sent, warning: None, queued: false },
         Err(e) => SendReport {
