@@ -103,7 +103,10 @@ let drafts: StoredDraft[] = [
   { id: "d-seed-1", account: accounts[0].id, reply_to: null, to: "marina@lumenarquitetura.com.br", subject: "Cronograma da obra", body: "Marina, segue o cronograma revisado. Podemos fechar na segunda?", updated: now - 2 * H },
   { id: "d-seed-2", account: accounts[0].id, reply_to: null, to: "", subject: "", body: "Lembrar de cobrar o orçamento do marceneiro.", updated: now - 30 * H },
 ];
+// As preferências sobrevivem ao reload (como no app, que grava no banco local).
+const SETTINGS_KEY = "posta-mock-settings";
 let settings: Settings = { [`signature:${accounts[0].id}`]: "Renan\nBetinhos Executive Service" };
+try { settings = { ...settings, ...JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? "{}") }; } catch { /* sem armazenamento */ }
 
 const norm = (s: string) => s.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase();
 const summary = ({ body_text: _b, body_html: _h, reply_addr: _r, attachments: _a, to_addrs: _t, cc_addrs: _c, ...s }: MockMessage): MessageSummary => s;
@@ -155,6 +158,7 @@ export const mockApi = {
   },
   async setSetting(key: string, value: string): Promise<void> {
     settings = { ...settings, [key]: value };
+    try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch { /* sem armazenamento */ }
   },
   async setFocused(_focused: boolean): Promise<void> {},
   async requestNotifyPermission(): Promise<boolean> {

@@ -1,0 +1,269 @@
+// Configurações em página inteira: menu de seções à esquerda; voltar (botão ou Esc) devolve a caixa de entrada.
+import { useEffect, useState } from "react";
+import { ArrowLeft, ArrowsClockwise, Bell, Gauge, Keyboard, PencilSimple, Plus, Trash, UserCircle, Layout } from "@phosphor-icons/react";
+import { api, type Account, type Settings } from "./api";
+import { autoCheck, checkUpdate, setAutoCheck, type Update } from "./updater";
+import { toast } from "./toast";
+import build from "./version.json";
+
+interface Props {
+  accounts: Account[];
+  settings: Settings;
+  onSetting: (key: string, value: string) => void;
+  /** Resolve quando a conta foi removida; rejeita com a mensagem de erro. */
+  onRemoveAccount: (id: string) => Promise<void>;
+  onAddAccount: () => void;
+  onClose: () => void;
+  onUpdate: (u: Update) => void;
+}
+
+const SECTIONS = [
+  { id: "accounts", label: "Contas", icon: UserCircle },
+  { id: "layout", label: "Leitura e layout", icon: Layout },
+  { id: "write", label: "Escrita", icon: PencilSimple },
+  { id: "notify", label: "Notificações", icon: Bell },
+  { id: "keys", label: "Atalhos", icon: Keyboard },
+  { id: "about", label: "Atualizações", icon: Gauge },
+] as const;
+type SectionId = (typeof SECTIONS)[number]["id"];
+
+const SHORTCUTS: [string, string][] = [
+  ["j / ↓", "Próxima mensagem"], ["k / ↑", "Mensagem anterior"], ["/", "Buscar"],
+  ["r", "Responder"], ["a", "Responder a todos"], ["f", "Encaminhar"], ["c", "Escrever"],
+  ["e", "Arquivar"], ["#", "Excluir"], ["s", "Estrela"], ["u", "Marcar como não lida"],
+  ["Shift + clique", "Marcar várias mensagens"], ["Clique duplo", "Abrir a mensagem em tela cheia"],
+  ["Esc", "Sair da tela cheia, limpar a busca ou a seleção"],
+];
+
+const UNDO_OPTIONS = ["4", "10", "20", "30"];
+
+/** Grupo de opções exclusivas; valor ausente ou desconhecido cai no `fallback`. */
+function Segmented({ label, value, fallback, options, onChange }: {
+  label: string; value: string | undefined; fallback: string; options: [string, string][]; onChange: (v: string) => void;
+}) {
+  const current = options.some(([v]) => v === value) ? value : fallback;
+  return (
+    <div className="seg" role="radiogroup" aria-label={label}>
+      {options.map(([v, text]) => (
+        <button key={v} type="button" role="radio" aria-checked={v === current} onClick={() => onChange(v)}>{text}</button>
+      ))}
+    </div>
+  );
+}
+
+function Row({ title, sub, children }: { title: string; sub?: string; children: React.ReactNode }) {
+  return (
+    <div className="settings-row">
+      <div>
+        <div className="settings-strong">{title}</div>
+        {sub && <div className="settings-sub">{sub}</div>}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+export function SettingsPage({ accounts, settings, onSetting, onRemoveAccount, onAddAccount, onClose, onUpdate }: Props) {
+  const [section, setSection] = useState<SectionId>("accounts");
+  const [auto, setAuto] = useState(autoCheck);
+  const [checking, setChecking] = useState(false);
+  const [sigAccount, setSigAccount] = useState(accounts[0]?.id ?? "");
+  const [removing, setRemoving] = useState<Account | null>(null);
+  const [removeBusy, setRemoveBusy] = useState(false);
+  const notify = settings.notify !== "0";
+  const sigId = accounts.some((a) => a.id === sigAccount) ? sigAccount : accounts[0]?.id ?? "";
+
+  async function confirmRemove() {
+    if (!removing || removeBusy) return;
+    setRemoveBusy(true);
+    try {
+      await onRemoveAccount(removing.id);
+    } catch (e) {
+      toast(`Não consegui remover a conta: ${e}`, "error");
+    } finally {
+      setRemoveBusy(false);
+      setRemoving(null);
+    }
+  }
+
+  async function toggleNotify(on: boolean) {
+    onSetting("notify", on ? "1" : "0");
+    if (!on) return;
+    try {
+      if (!(await api.requestNotifyPermission())) toast("O sistema bloqueou as notificações do Posta", "error");
+    } catch (e) {
+      toast(`Não consegui pedir permissão de notificações: ${e}`, "error");
+    }
+  }
+
+  async function check() {
+    setChecking(true);
+    try {
+      const found = await checkUpdate();
+      if (found) { onClose(); onUpdate(found); }
+      else toast("Você está na versão mais recente", "success");
+    } catch (e) {
+      toast(`Não consegui procurar atualizações: ${e}`, "error");
+    } finally {
+      setChecking(false);
+    }
+  }
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.stopPropagation();
+      if (removing) { if (!removeBusy) setRemoving(null); }
+      else onClose();
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  });
+
+  const title = SECTIONS.find((s) => s.id === section)!.label;
+
+  return (
+    <div className="settings-page">
+      <nav className="settings-nav" aria-label="Seções das configurações">
+        <button type="button" className="btn ghost small settings-back" onClick={onClose}>
+          <ArrowLeft size={14} weight="bold" /> Voltar <kbd>Esc</kbd>
+        </button>
+        {SECTIONS.map(({ id, label, icon: Icon }) => (
+          <button key={id} type="button" className="nav-item" aria-current={id === section ? "page" : undefined} onClick={() => setSection(id)}>
+            <Icon size={16} weight="bold" /> <span>{label}</span>
+          </button>
+        ))}
+      </nav>
+
+      <main className="settings-main">
+        <div className="settings-body" key={section}>
+          <h1>{title}</h1>
+
+          {section === "accounts" && (
+            <section className="settings-group" aria-label="Contas">
+              {accounts.length === 0 && <p className="settings-sub">Nenhuma conta conectada.</p>}
+              {accounts.map((a) => (
+                <div key={a.id} className="settings-row">
+                  <div className="settings-account">
+                    <div className="settings-strong">{a.username}</div>
+                    <div className="settings-sub">{a.host}</div>
+                  </div>
+                  <button type="button" className="btn" onClick={() => setRemoving(a)}>
+                    <Trash size={15} weight="bold" /> Remover
+                  </button>
+                </div>
+              ))}
+              <div className="settings-row">
+                <button type="button" className="btn" onClick={onAddAccount}><Plus size={15} weight="bold" /> Adicionar conta</button>
+              </div>
+            </section>
+          )}
+
+          {section === "layout" && (
+            <section className="settings-group" aria-label="Leitura e layout">
+              <Row title="Tema" sub="Sistema segue a aparência do aparelho">
+                <Segmented label="Tema" value={settings.theme} fallback="system" onChange={(v) => onSetting("theme", v)}
+                  options={[["system", "Sistema"], ["light", "Claro"], ["dark", "Escuro"]]} />
+              </Row>
+              <Row title="Tamanho da fonte" sub="Lista de mensagens e texto simples; emails em HTML mantêm o estilo de origem">
+                <Segmented label="Tamanho da fonte" value={settings.size} fallback="m" onChange={(v) => onSetting("size", v)}
+                  options={[["s", "P"], ["m", "M"], ["l", "G"]]} />
+              </Row>
+              <Row title="Densidade da lista">
+                <Segmented label="Densidade da lista" value={settings.density} fallback="comfortable" onChange={(v) => onSetting("density", v)}
+                  options={[["comfortable", "Confortável"], ["compact", "Compacta"]]} />
+              </Row>
+              <Row title="Prévia do texto na lista" sub="Primeira linha da mensagem sob o assunto">
+                <Segmented label="Prévia do texto" value={settings.preview} fallback="1" onChange={(v) => onSetting("preview", v)}
+                  options={[["1", "Mostrar"], ["0", "Ocultar"]]} />
+              </Row>
+              <Row title="Painel de leitura" sub="Desligado abre a mensagem em tela cheia ao clicar">
+                <Segmented label="Painel de leitura" value={settings.pane} fallback="right" onChange={(v) => onSetting("pane", v)}
+                  options={[["right", "Direita"], ["bottom", "Embaixo"], ["off", "Desligado"]]} />
+              </Row>
+              <Row title="Larguras das colunas" sub="Arraste a borda entre os painéis; clique duplo na borda restaura o padrão">
+                <button type="button" className="btn" onClick={() => ["w:rail", "w:list", "h:list"].forEach((k) => onSetting(k, ""))}>Restaurar padrão</button>
+              </Row>
+            </section>
+          )}
+
+          {section === "write" && (
+            <section className="settings-group" aria-label="Escrita">
+              <Row title="Desfazer envio" sub="Tempo para desfazer antes da mensagem sair de fato">
+                <Segmented label="Desfazer envio" value={settings.undoSend} fallback="4" onChange={(v) => onSetting("undoSend", v)}
+                  options={UNDO_OPTIONS.map((s): [string, string] => [s, `${s} s`])} />
+              </Row>
+              {accounts.length > 0 && (
+                <div className="settings-col">
+                  <div className="settings-strong">Assinatura</div>
+                  {accounts.length > 1 && (
+                    <select aria-label="Conta da assinatura" value={sigId} onChange={(e) => setSigAccount(e.target.value)}>
+                      {accounts.map((a) => <option key={a.id} value={a.id}>{a.username}</option>)}
+                    </select>
+                  )}
+                  <textarea className="signature-input" rows={4} aria-label="Assinatura" placeholder="Entra no fim das mensagens novas e das respostas"
+                    value={settings[`signature:${sigId}`] ?? ""} onChange={(e) => onSetting(`signature:${sigId}`, e.target.value)} />
+                </div>
+              )}
+            </section>
+          )}
+
+          {section === "notify" && (
+            <section className="settings-group" aria-label="Notificações">
+              <label className="settings-row switch-row">
+                <div>
+                  <div className="settings-strong">Avisar de email novo</div>
+                  <div className="settings-sub">Notificação do sistema com remetente e assunto, quando a janela não está em foco</div>
+                </div>
+                <input type="checkbox" role="switch" className="switch" checked={notify} onChange={(e) => toggleNotify(e.target.checked)} />
+              </label>
+            </section>
+          )}
+
+          {section === "keys" && (
+            <section className="settings-group" aria-label="Atalhos">
+              {SHORTCUTS.map(([keys, what]) => (
+                <div key={keys} className="settings-row">
+                  <div>{what}</div>
+                  <span className="keys">{keys.split(" / ").map((k) => <kbd key={k}>{k}</kbd>)}</span>
+                </div>
+              ))}
+            </section>
+          )}
+
+          {section === "about" && (
+            <section className="settings-group" aria-label="Atualizações">
+              <Row title={`Posta v${build.version}`} sub={`Compilado em ${build.builtAt}`}>
+                <button type="button" className="btn" onClick={check} disabled={checking} data-busy={checking || undefined}>
+                  <ArrowsClockwise size={15} weight="bold" className="sync-icon" />
+                  {checking ? "Procurando…" : "Procurar atualizações"}
+                </button>
+              </Row>
+              <label className="settings-row switch-row">
+                <div>
+                  <div className="settings-strong">Procurar automaticamente</div>
+                  <div className="settings-sub">Ao abrir o app e a cada 6 horas</div>
+                </div>
+                <input type="checkbox" role="switch" className="switch" checked={auto}
+                  onChange={(e) => { setAuto(e.target.checked); setAutoCheck(e.target.checked); }} />
+              </label>
+            </section>
+          )}
+        </div>
+      </main>
+
+      {removing && (
+        <div className="confirm scrim" onMouseDown={(e) => { if (e.target === e.currentTarget && !removeBusy) setRemoving(null); }}>
+          <div className="confirm-card" role="alertdialog" aria-labelledby="remove-title">
+            <p id="remove-title">Remover conta?</p>
+            <span>{removing.username} sai do Posta: a senha, as mensagens e os rascunhos desta conta apagam deste aparelho. Os emails continuam no servidor.</span>
+            <div className="confirm-actions">
+              <button type="button" className="btn" onClick={() => setRemoving(null)} disabled={removeBusy} autoFocus>Cancelar</button>
+              <button type="button" className="btn danger" onClick={confirmRemove} disabled={removeBusy}>Remover</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
