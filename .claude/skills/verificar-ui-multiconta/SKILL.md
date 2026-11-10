@@ -16,7 +16,7 @@ Spec: `docs/superpowers/specs/2026-11-10-navegacao-multiconta-design.md`.
    - `?contas=1`: sem faixa, sem seções e sem "Todas as contas" (Rail igual à anterior).
    - 390×844: ≡ "Pastas e contas" abre a gaveta; escolher pasta troca a conta e fecha; toque fora, X e Voltar fecham.
    - Console sem erro nem aviso.
-4. Olhe os prints `multiconta-desktop.png`, `multiconta-gaveta.png` e `multiconta-uma-conta.png`: a faixa fica numa linha e presa no topo ao rolar a Rail, os apelidos são curtos (parte local, ou o provedor quando a parte local se repete) e a listra de 3 px da conta aparece inteira em cada linha de "Todas as contas".
+4. Olhe os prints `multiconta-desktop.png`, `multiconta-gaveta.png` e `multiconta-uma-conta.png`: a faixa fica numa linha e presa no topo ao rolar a Rail, os apelidos são curtos (parte local, ou o provedor quando a parte local se repete) e a listra de 3 px da conta aparece inteira em cada linha de "Todas as contas". No celular (412x915) a conta vira um ponto de 7 px na cor dela logo depois do nome (`.from::after`), sem listra e sem etiqueta `.acct`.
 5. Apelido e cor: Configurações › Contas › Editar muda apelido e cor sem reconectar (só nome/apelido/cor fecha direto). A cor também vale no assistente (Personalizar, `ColorField`).
 6. Movimento: gaveta com translateX 220 ms `cubic-bezier(0.32,0.72,0,1)` e saída 180 ms; acordeão com `grid-template-rows` 200 ms; tudo desligado com `prefers-reduced-motion` (emule com `p.emulateMedia({ reducedMotion: 'reduce' })`).
 7. Não validável no mock: contagem real por conta no app instalado (IMAP) e o Voltar físico do Android (`verificar-android`).

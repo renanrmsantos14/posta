@@ -1,57 +1,16 @@
-import { Archive, Clock, EnvelopeSimple, EnvelopeSimpleOpen, FileText, PaperPlaneTilt, PushPin, Star, Trash, X } from "@phosphor-icons/react";
-import type { Category, MessageSummary, Role, UserFolder, View } from "./api";
+import { Archive, Clock, EnvelopeSimple, EnvelopeSimpleOpen, PushPin, Star, Trash, X } from "@phosphor-icons/react";
+import type { Category, MessageSummary } from "./api";
 import { CategoryPicker } from "./Categories";
 import { WhenMenu } from "./WhenMenu";
-import { FOLDERS, viewInfo, type FolderNode } from "./folders";
-import { boxView, catView } from "./views";
 import type { ListRow } from "./MessageList";
 
 type Tab = "focused" | "other";
-
-/** Grupo de pastas do layout estreito (a Rail some no celular). */
-export function FolderTabs(p: {
-  navFolders: (Role | "starred")[]; tree: FolderNode[]; categories: Category[]; userFolders: UserFolder[];
-  folder: View; inList: boolean; showDrafts: boolean; showScheduled: boolean; showOutbox: boolean; outbox: number;
-  onOpen: (v: View) => void; onDrafts: () => void; onScheduled: () => void; onOutbox: () => void;
-}) {
-  const views = [...p.tree.map((n) => boxView(n.account, n.name)), ...p.categories.map((c) => catView(c.id))];
-  return (
-    <div className="folder-tabs mobile-only" role="group" aria-label="Pastas">
-      {p.navFolders.map((r) => {
-        const Icon = FOLDERS[r].icon;
-        return (
-          <button key={r} className="btn ghost small" onClick={() => p.onOpen(r)} aria-current={r === p.folder && p.inList ? "page" : undefined}>
-            <Icon size={14} weight="bold" /> {FOLDERS[r].label}
-          </button>
-        );
-      })}
-      {views.map((v) => {
-        const { label, icon: Icon } = viewInfo(v, p.userFolders, p.categories);
-        return (
-          <button key={v} className="btn ghost small" onClick={() => p.onOpen(v)} aria-current={v === p.folder && p.inList ? "page" : undefined}>
-            <Icon size={14} weight="bold" /> {label}
-          </button>
-        );
-      })}
-      <button className="btn ghost small" onClick={p.onDrafts} aria-current={p.showDrafts && !p.showOutbox ? "page" : undefined}>
-        <FileText size={14} weight="bold" /> Rascunhos
-      </button>
-      <button className="btn ghost small" onClick={p.onScheduled} aria-current={p.showScheduled ? "page" : undefined}>
-        <Clock size={14} weight="bold" /> Agendados
-      </button>
-      {(p.outbox > 0 || p.showOutbox) && (
-        <button className="btn ghost small" onClick={p.onOutbox} aria-current={p.showOutbox ? "page" : undefined}>
-          <PaperPlaneTilt size={14} weight="bold" /> Caixa de saída
-        </button>
-      )}
-    </div>
-  );
-}
 
 /** Título da lista e abas Foco/Outros (setas esquerda/direita trocam de aba). */
 export function ListHead(p: {
   title: string; /** Conta/escopo antes do título: `Apelido › Pasta`. */ scope?: { label: string; color?: string };
   tabsOn: boolean; tab: Tab; unread: { focused: number; other: number }; onTab: (t: Tab) => void;
+  /** Indicador do puxar para sincronizar, preso à borda de baixo do título. */ children?: React.ReactNode;
 }) {
   const onKey = (e: React.KeyboardEvent) => {
     if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
@@ -80,6 +39,7 @@ export function ListHead(p: {
           </button>
         </div>
       )}
+      {p.children}
     </div>
   );
 }

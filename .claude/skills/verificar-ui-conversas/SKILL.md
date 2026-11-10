@@ -10,7 +10,7 @@ description: Verifica conversas agrupadas (fio) e a caixa unificada "Todas as ca
 3. Com playwright-core (`/home/renan/.codex/worktrees/3b95/Auto-Prime-Interno/node_modules/.pnpm/playwright-core@1.63.0/node_modules/playwright-core`), 1280x800, confirme:
    - Caixa de entrada: uma linha "Planta e orçamento" com chip `.thread-n` = 4; abrir mostra `.thread-msg` com mensagens antigas recolhidas (`.thread-fold`); clicar numa expande.
    - Estrela/arquivar/excluir no fio valem para todas as mensagens do fio (a linha fica com estrela).
-   - "Todas as caixas" (só com 2+ contas): linhas das duas contas por data, cada uma com etiqueta `.acct`; Responder numa mensagem da conta 2 abre o Composer com essa conta.
+   - "Todas as caixas" (só com 2+ contas): linhas das duas contas por data, cada uma com etiqueta `.acct` (no celular, ponto colorido depois do nome); Responder numa mensagem da conta 2 abre o Composer com essa conta.
    - Configurações > "Leitura e layout" > "Agrupar por conversa" = Não: `group` = "0" nas configurações e a caixa lista as mensagens soltas (3 linhas "Planta").
    - Console sem erro (403 de fonte fora do `fs.allow` do vite não conta).
 4. Prints: `/home/renan/.t3/userdata/attachments/posta-conversas.png` e `posta-unificada.png`. Encerre o vite pelo PID de `ss -ltnp`.

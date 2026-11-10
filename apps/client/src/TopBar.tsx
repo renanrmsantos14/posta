@@ -62,7 +62,7 @@ export function TopBar(p: Props) {
         ) : (
           <span className="scope-chip" data-static>{scopeLabel}</span>
         )}
-        <button type="button" className="icon-btn" aria-label="Filtros da busca" title="Filtros da busca" aria-haspopup="menu" aria-expanded={menu === "filter"}
+        <button type="button" className="icon-btn filter-btn" aria-label="Filtros da busca" title="Filtros da busca" aria-haspopup="menu" aria-expanded={menu === "filter"}
           onClick={() => setMenu(menu === "filter" ? null : "filter")}>
           <FunnelSimple size={16} weight="bold" />
         </button>
@@ -87,7 +87,7 @@ export function TopBar(p: Props) {
       </div>
       <div className="top-actions">
         <OfflineBadge status={p.net} />
-        <button type="button" className="icon-btn" onClick={p.onSync} aria-label="Sincronizar" title="Sincronizar" data-busy={p.syncing || undefined} disabled={!p.canSync}>
+        <button type="button" className="icon-btn sync-btn" onClick={p.onSync} aria-label="Sincronizar" title="Sincronizar" data-busy={p.syncing || undefined} disabled={!p.canSync}>
           <ArrowsClockwise size={16} weight="bold" className="sync-icon" />
         </button>
         <button type="button" className="icon-btn add-account" onClick={p.onAddAccount} aria-label="Adicionar conta" title="Adicionar conta">

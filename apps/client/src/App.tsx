@@ -33,7 +33,9 @@ import { buildCommands, hiddenTools } from "./commands";
 import { Rail } from "./Rail";
 import { MobileActions } from "./MobileActions";
 import { Fab, useHideOnScroll } from "./Fab";
-import { BulkBar, FolderTabs, ListHead } from "./ListParts";
+import { BulkBar, ListHead } from "./ListParts";
+import { usePullToRefresh } from "./PullToRefresh";
+import { useNarrow } from "./layout/narrow";
 import { ReaderPane, splitAddrs } from "./ReaderPane";
 import { MessageList, type Density, type ListHandle, type ListRow } from "./MessageList";
 import { PAGE, useMessageList } from "./useMessageList";
@@ -177,6 +179,7 @@ export default function App() {
   const [ghost, setGhost] = useState<{ count: number; copy: boolean; label: string } | null>(null);
   const ghostEl = useRef<HTMLDivElement | null>(null);
   const fab = useHideOnScroll();
+  const narrow = useNarrow();
   const ghostPos = useRef({ x: 0, y: 0 });
   /** Não lidas por pasta do usuário (chave de `folderKey`). */
   const [folderUnread, setFolderUnread] = useState<Map<string, number>>(new Map());
@@ -257,7 +260,8 @@ export default function App() {
   const fullTree = useMemo(() => folderTree(userFolders), [userFolders]);
   const tree = useMemo(() => (accountFilter ? fullTree.filter((f) => f.account === accountFilter) : fullTree), [fullTree, accountFilter]);
   const info = viewInfo(folder, userFolders, categories);
-  const density: Density = settings.density === "compact" || settings.density === "comfortable" ? settings.density : "medium";
+  // Celular: sempre remetente, hora e assunto (sem prévia), com altura boa para o dedo.
+  const density: Density = !narrow && (settings.density === "compact" || settings.density === "comfortable") ? settings.density : "medium";
   const favorites = useMemo<View[]>(() => {
     let raw: unknown = DEFAULT_FAVORITES;
     try { if (settings.favorites) raw = JSON.parse(settings.favorites); } catch { /* valor inválido: volta ao padrão */ }
@@ -1468,7 +1472,7 @@ export default function App() {
   const rowContext = (x: number, y: number, row: Row) => {
     const mine = checked.has(row.head.id);
     const ms = mine ? checkedList : withThread(row.members);
-    if (!mine && !window.matchMedia("(max-width: 720px)").matches && selectedId !== row.head.id) void select(row.head.id);
+    if (!mine && !narrow && selectedId !== row.head.id) void select(row.head.id);
     setMenu({ x, y, items: menuFor(ms, mine && checkedList.length > 1 ? null : row.head.id), label: "Ações da mensagem" });
   };
 
@@ -1597,11 +1601,6 @@ export default function App() {
   );
 
   const inList = !showDrafts && !showScheduled;
-  const folderTabs = (
-    <FolderTabs navFolders={folderList} tree={tree} categories={categories} userFolders={userFolders} folder={folder} inList={inList}
-      showDrafts={showDrafts} showScheduled={showScheduled} showOutbox={showOutbox} outbox={net.outbox}
-      onOpen={openFolder} onDrafts={openDrafts} onScheduled={openScheduled} onOutbox={openOutbox} />
-  );
   /** Rascunhos, Agendados e Caixa de saída são de todas as contas: abrem sem conta ativa. */
   const inAll = (run: () => void) => () => { setAccountFilter(null); run(); };
   /** A mesma Rail serve de barra lateral (desktop) e de gaveta (celular). */
@@ -1624,6 +1623,7 @@ export default function App() {
   const listScopeId = showDrafts || showScheduled ? accountFilter : scopeAccount;
   const listScope = multi ? (listScopeId ? { label: acctLabel(listScopeId), color: acctColor(listScopeId) } : { label: "Todas as contas" }) : undefined;
   const pickTab = (t: "focused" | "other") => changeSetting("inbox:tab", t);
+  const pull = usePullToRefresh(syncing, narrow && accounts?.length ? () => void sync(true) : undefined);
 
   return (
     <AppShell shellRef={appRef} data-reader={readerOpen || undefined} data-pane={pane === "right" ? undefined : pane}
@@ -1641,10 +1641,9 @@ export default function App() {
       <RouteLayout>
         {rail()}
 
-        <PageLayout area="list" aria-label="Lista de mensagens">
-          {folderTabs}
+        <PageLayout area="list" aria-label="Lista de mensagens" {...pull.bind}>
           <ListHead scope={listScope} title={showScheduled ? "Agendados" : showOutbox ? "Caixa de saída" : showDrafts ? "Rascunhos" : info.label}
-            tabsOn={tabsOn && inList} tab={tab} unread={tabUnread} onTab={pickTab} />
+            tabsOn={tabsOn && inList} tab={tab} unread={tabUnread} onTab={pickTab}>{pull.indicator}</ListHead>
           {checkedList.length > 0 && (
             <BulkBar rows={rows} checkedRows={checkedRows} checked={checkedList} categories={categories}
               canArchive={canArchive} canTrash={canTrash} onClear={() => setChecked(new Set())}
@@ -1780,7 +1779,7 @@ export default function App() {
       {menu && <ContextMenu menu={menu} onClose={() => setMenu(null)} />}
       {contact && (
         <ContactCard c={contact} onClose={() => setContact(null)} onNew={(addr) => writeNew(addr)}
-          onSearch={(addr) => { setQuery(`de:${addr}`); if (window.matchMedia("(max-width: 720px)").matches) setReaderOpen(false); }} />
+          onSearch={(addr) => { setQuery(`de:${addr}`); if (narrow) setReaderOpen(false); }} />
       )}
       {!compose && !dialog && !settingsOpen && !update && (
         <Fab fabRef={fab.ref} onClick={() => writeNew()} />
