@@ -2,3 +2,11 @@
 resolver = "2"
 members = ["crates/mail-core", "apps/client/src-tauri"]
 default-members = ["crates/mail-core", "apps/client/src-tauri"]
+
+# Compila e linka mais rápido em `cargo test`/dev: só tabelas de linha (backtrace com arquivo:linha)
+# no nosso código e nada de debuginfo nas dependências.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false

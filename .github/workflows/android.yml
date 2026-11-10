@@ -4,12 +4,23 @@ name: Android
 
 on:
   workflow_dispatch:
+    inputs:
+      todas_abis:
+        description: "Compilar também armv7 e x86_64 (emulador)"
+        type: boolean
+        default: true
   pull_request:
     paths:
       - ".github/workflows/android.yml"
       - "apps/client/**"
       - "crates/**"
       - "Cargo.*"
+      - "!**.md"
+
+# Novo push no mesmo PR cancela o build anterior.
+concurrency:
+  group: android-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -41,17 +52,24 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+      # Mesmo cache do job `android` do Release (master): o PR só lê, para não expulsar o cache bom.
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: android
+          save-if: ${{ github.ref == 'refs/heads/master' }}
 
       - uses: gradle/actions/setup-gradle@v4
 
       - run: pnpm install --frozen-lockfile
 
+      # No PR basta conferir que compila: só aarch64 (quase todo celular), um terço do tempo de Rust.
+      # Rodando à mão, compila as três ABIs por padrão.
       - name: Compila o APK (sem assinatura)
         env:
           NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/${{ env.NDK_VERSION }}
+          TARGETS: ${{ inputs.todas_abis && 'aarch64 armv7 x86_64' || 'aarch64' }}
         working-directory: apps/client
-        run: pnpm tauri android build --apk --target aarch64 armv7 x86_64
+        run: pnpm tauri android build --apk --target $TARGETS
 
       # Chave de debug só deste projeto, guardada no cache para que as próximas versões
       # continuem instalando por cima da anterior (se o cache expirar, desinstale antes).

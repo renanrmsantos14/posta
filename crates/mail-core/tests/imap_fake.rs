@@ -132,6 +132,8 @@ fn select(set: &str, msgs: &[Msg]) -> Vec<Msg> {
 }
 
 fn serve(conn: TcpStream, srv: Shared) {
+    // Respostas saem em várias escritas: sem isso, Nagle + ACK atrasado somam ~40 ms por comando.
+    conn.set_nodelay(true).ok();
     let mut out = conn.try_clone().unwrap();
     let mut input = BufReader::new(conn.try_clone().unwrap());
     out.write_all(b"* OK fake ready\r\n").unwrap();
