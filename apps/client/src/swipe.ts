@@ -6,7 +6,7 @@ export type SwipeAction = "archive" | "trash" | "read" | "none";
 export type SwipeDir = "left" | "right";
 
 const THRESHOLD = 88;
-const LOCK_PX = 10;
+export const LOCK_PX = 10;
 
 interface Gesture { el: HTMLElement; id: number; x: number; y: number; dx: number; lock: "h" | "v" | null }
 let g: Gesture | null = null;

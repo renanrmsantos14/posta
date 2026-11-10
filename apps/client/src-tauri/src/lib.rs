@@ -321,16 +321,23 @@ fn notify_new(app: &AppHandle, st: &AppState, account: &str, fetched: usize) {
     let Ok(store) = Store::open(st.db_path()) else { return };
     let Ok(new) = store.newest_unseen(account, "INBOX", fetched.min(50) as u32) else { return };
     let n = app.notification();
+    // No Android, sem ícone o plugin usa o "i" genérico do sistema na barra de status (res/drawable/ic_stat_posta.xml).
+    let note = || {
+        let b = n.builder();
+        #[cfg(target_os = "android")]
+        let b = b.icon("ic_stat_posta");
+        b
+    };
     if new.len() > 3 {
         let target = OpenTarget::folder(account, "inbox");
-        n.builder().title("Posta").body(format!("{} mensagens novas em {account}", new.len())).extra(open_target::EXTRA, target).show().ok();
+        note().title("Posta").body(format!("{} mensagens novas em {account}", new.len())).extra(open_target::EXTRA, target).show().ok();
         return;
     }
     for m in new {
         let who = if m.from_name.is_empty() { m.from_addr } else { m.from_name };
         let subject = if m.subject.is_empty() { "(sem assunto)".to_string() } else { m.subject };
         let target = OpenTarget::message(account, "inbox", m.id);
-        n.builder().title(who).body(subject).extra(open_target::EXTRA, target).show().ok();
+        note().title(who).body(subject).extra(open_target::EXTRA, target).show().ok();
     }
 }
 

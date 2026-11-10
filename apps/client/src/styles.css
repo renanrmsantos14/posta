@@ -636,10 +636,12 @@ kbd {
   background: var(--btn); color: var(--btn-text);
   box-shadow: 0 6px 24px rgba(0, 0, 0, 0.12);
   cursor: pointer;
-  transition: transform 160ms var(--ease-out);
+  transition: transform 200ms var(--ease-out), opacity 200ms var(--ease-out);
   @starting-style { transform: scale(0.9); opacity: 0; }
 }
 .fab:active { transform: scale(0.95); }
+/* Some ao descer a lista para não cobrir a última linha; volta ao subir. */
+.fab[data-hidden] { transform: translateY(calc(100% + 28px + var(--sa-bottom))); opacity: 0; pointer-events: none; }
 
 /* ---------- Toasts ---------- */
 .toaster {
@@ -690,6 +692,17 @@ kbd {
 @keyframes drain { from { transform: scaleX(1); } to { transform: scaleX(0); } }
 
 .mobile-only { display: none; }
+/* Indicador do puxar para sincronizar: desce do título para o topo da lista e gira enquanto sincroniza. */
+.ptr {
+  position: absolute; top: 100%; left: 50%; z-index: 3; display: grid; place-items: center;
+  width: 40px; height: 40px; margin-left: -20px; border-radius: 50%;
+  border: 1px solid var(--line); background: var(--surface); color: var(--blue); box-shadow: 0 2px 10px rgba(0, 0, 0, 0.16);
+  transform: translateY(-52px); opacity: 0; pointer-events: none;
+  transition: transform 220ms var(--ease-out), opacity 220ms var(--ease-out);
+}
+.ptr[data-drag] { transition: none; }
+.ptr[data-busy] { transform: translateY(12px); opacity: 1; }
+.ptr[data-busy] svg { animation: spin 700ms linear infinite; }
 
 .version {
   position: fixed; right: calc(10px + var(--sa-right)); bottom: calc(4px + var(--sa-bottom)); z-index: 40;
@@ -698,10 +711,6 @@ kbd {
 }
 
 /* ---------- Pastas e ações ---------- */
-.folder-tabs { gap: 4px; overflow-x: auto; scrollbar-width: none; padding: 0 14px 8px; }
-.folder-tabs::-webkit-scrollbar { display: none; }
-.folder-tabs .btn { flex: none; white-space: nowrap; }
-.folder-tabs .btn[aria-current="page"] { background: var(--selected); color: var(--strong); }
 .actions { flex-wrap: wrap; }
 .actions.mobile-actions { display: none; }
 /* Leitor estreito: atalhos saem dos botões para as ações caberem numa linha. */
@@ -796,7 +805,6 @@ kbd {
   .meta-date { display: none; }
   .search kbd { display: none; }
   .mobile-only { display: inline-flex; }
-  .folder-tabs.mobile-only { display: flex; }
   /* Escrever vira folha de tela cheia, subindo de baixo. */
   .composer {
     inset: 0; width: auto; height: auto;
@@ -809,8 +817,47 @@ kbd {
   .composer .confirm { border-radius: 0; }
   .composer-fields, .composer-body { padding-left: 16px; padding-right: 16px; }
   .hint-keys { display: none; }
-  /* Espaço para o selo de versão não cobrir a última linha. */
-  .list { padding-bottom: calc(24px + var(--sa-bottom)); }
+  /* Espaço para o Escrever e o selo de versão não cobrirem a última linha. */
+  .list { padding-bottom: calc(88px + var(--sa-bottom)); }
+  /* Ações do leitor: barra presa no rodapé, na zona do polegar, numa linha só (8 + 44 + 8). */
+  :root { --bar-h: 60px; }
+  .actions.mobile-actions {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 2;
+    flex-wrap: nowrap; align-items: center; gap: 4px; margin: 0;
+    padding: 8px max(12px, var(--sa-right)) calc(8px + var(--sa-bottom)) max(12px, var(--sa-left));
+    background: var(--surface); border-top: 1px solid var(--line);
+  }
+  /* Ao fechar a leitura a barra some na hora, em vez de saltar com a rolagem durante a saída. */
+  .app:not([data-reader]) .actions.mobile-actions { visibility: hidden; }
+  .mobile-actions .reply-btn { flex: 1 1 auto; justify-content: center; min-width: 0; height: 44px; }
+  .mobile-actions .icon-only { flex: none; width: 44px; height: 44px; border-color: transparent; background: transparent; }
+  .actions.mobile-actions .cat-menu { left: auto; right: 0; top: auto; bottom: calc(100% + 8px); transform-origin: bottom right; }
+  /* O .reader já desconta a faixa de gestos (--sa-bottom). */
+  .message { padding-bottom: calc(var(--bar-h) + 36px); }
+  /* Avisos acima da barra de ações quando a leitura está aberta. */
+  .app[data-reader] .toaster { bottom: calc(var(--bar-h) + 16px + var(--sa-bottom)); }
+  /* Busca respira: Adicionar conta continua no menu lateral. */
+  .topbar .add-account { display: none; }
+  /* Topo da lista: pastas ficam na gaveta (☰); título grande e Foco/Outros, que desce em vez de cortar o título quando falta espaço. */
+  .list-head { position: relative; flex-wrap: wrap; align-items: flex-end; padding: 14px 12px 10px 16px; }
+  .list-title { flex: 1 1 auto; font: 700 24px/1.15 var(--sans); letter-spacing: -0.01em; }
+  .list-head .list-title .list-scope { font-size: 12px; letter-spacing: 0; }
+  .focus-tabs { padding: 3px; border-radius: 999px; background: var(--hover); }
+  .focus-tabs [role="tab"] { min-height: 34px; padding: 0 8px; font-size: 14px; border-radius: 999px; box-shadow: none; transition: color 150ms ease, background-color 150ms ease; }
+  .focus-tabs [aria-selected="true"] { background: var(--surface); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12); }
+  /* Linha compacta: remetente e hora, depois o assunto. A conta vira um ponto colorido depois do nome. */
+  .list-spacer > .row { padding: 8px 16px 8px 10px; }
+  .list-spacer > .row[data-acct-color]:not([data-swipe])::after, .row .acct { display: none; }
+  .row[data-acct-color] .from::after { content: ""; flex: none; align-self: center; width: 7px; height: 7px; border-radius: 50%; background: var(--acct); }
+  .row .thread-n { order: 1; }
+  .row .from { font-size: calc(var(--fs-list) + 1px); }
+  /* Estrela só quando marcada; marcar fica no leitor e no deslizar. */
+  .star:not([data-on]) { display: none; }
+  /* Barra superior: busca na largura toda com o filtro dentro; sincronizar é puxar a lista (o botão fica só para leitor de tela). */
+  .topbar .sync-btn { position: absolute; clip-path: inset(50%); }
+  .topbar .searchbox .search { padding-right: 44px; }
+  .topbar .searchbox .filter-btn { position: absolute; right: 2px; top: 2px; width: 40px; height: 40px; }
+  .list { overscroll-behavior-y: contain; }
   /* Selo de versão dentro da faixa da barra de gestos (Android), sem cobrir a lista, a leitura ou o Enviar. */
   .version { bottom: max(2px, calc(var(--sa-bottom) - 13px)); font-size: 9px; }
 }
@@ -820,9 +867,9 @@ kbd {
     animation-duration: 1ms !important;
     animation-iteration-count: 1 !important;
   }
-  .reader, .dialog, .toast, .btn-label, .dot, .composer, .fab { transition-property: opacity !important; }
+  .reader, .dialog, .toast, .btn-label, .dot, .composer, .fab, .ptr { transition-property: opacity !important; }
   .toast-timer { animation: none !important; }
-  .icon-btn[data-busy] .sync-icon, .spinner { animation: pulse 1s ease infinite !important; animation-duration: 1s !important; animation-iteration-count: infinite !important; }
+  .icon-btn[data-busy] .sync-icon, .ptr[data-busy] svg, .spinner { animation: pulse 1s ease infinite !important; animation-duration: 1s !important; animation-iteration-count: infinite !important; }
   @keyframes pulse { 50% { opacity: 0.4; } }
 }
 
@@ -1000,6 +1047,11 @@ kbd {
 }
 .cat-menu button svg { margin-left: auto; }
 .cat-menu button:hover, .cat-menu button:focus-visible { background: var(--hover); outline: 0; }
+.more-menu { min-width: 220px; max-height: min(70vh, 480px); overflow-y: auto; }
+.more-menu > button > svg { margin-left: 0; }
+@media (pointer: coarse) { .more-menu button { min-height: 44px; } }
+.more-group { display: flex; flex-direction: column; margin-top: 4px; padding-top: 4px; border-top: 1px solid var(--line); }
+.more-label { margin: 4px 8px 2px; font-size: 11px; font-weight: 600; color: var(--faint); text-transform: uppercase; letter-spacing: 0.04em; }
 .cat-menu .cat-none { color: var(--muted); border-top: 1px solid var(--line); border-radius: 0 0 6px 6px; margin-top: 4px; }
 .cat-empty { margin: 4px 8px; font-size: 12px; color: var(--faint); }
 .cat-row { gap: 10px; }
@@ -1342,6 +1394,8 @@ button.scope-chip { cursor: pointer; }
 .rail-panel .acct-head .count { margin-left: 0; }
 .rail-panel .account { justify-content: flex-start; padding: 5px 8px; }
 .rail-panel .rail-section + .rail-section { padding-top: 0; border-top: 0; }
+/* Toque: a linha responde ao dedo, já que não há hover. */
+@media (hover: none) { .row:active { background: var(--hover); } }
 @media (pointer: coarse) {
   .rail-panel .nav-item, .rail-panel .acct-head { min-height: 44px; }
   .acct-chip { width: 44px; height: 44px; }
@@ -1365,8 +1419,8 @@ button.scope-chip { cursor: pointer; }
   }
   .drawer-panel .rail-panel { flex: 1 1 auto; min-height: 0; }
   .drawer-close { align-self: flex-end; flex: none; margin: 6px 8px 0 0; }
-  .drawer[data-leaving] { opacity: 0; transition: opacity 180ms ease-in; }
-  .drawer[data-leaving] .drawer-panel { transform: translateX(-100%); transition: transform 180ms ease-in; }
+  .drawer[data-leaving] { opacity: 0; transition: opacity 180ms var(--ease-drawer); }
+  .drawer[data-leaving] .drawer-panel { transform: translateX(-100%); transition: transform 180ms var(--ease-drawer); }
 }
 
 /* Barra estreita: faixa em coluna e seções só com o ponto e o contador. */

@@ -74,17 +74,26 @@ export function CategoryPicker({ categories, current, onPick, className }: Picke
       </button>
       {open && (
         <div className="cat-menu" role="menu" aria-label="Categoria">
-          {categories.map((c) => (
-            <button key={c.id} type="button" role="menuitemradio" aria-checked={current === c.id} onClick={() => { onPick(c.id); setOpen(false); }}>
-              <CategoryDot color={c.color} />
-              <span>{c.name}</span>
-              {current === c.id && <Check size={13} weight="bold" />}
-            </button>
-          ))}
-          {categories.length === 0 && <p className="cat-empty">Crie categorias em Configurações.</p>}
-          <button type="button" role="menuitem" className="cat-none" onClick={() => { onPick(null); setOpen(false); }}>Nenhuma</button>
+          <CategoryItems categories={categories} current={current} onPick={(id) => { onPick(id); setOpen(false); }} />
         </div>
       )}
     </span>
+  );
+}
+
+/** Itens do menu de categoria (também usados no menu "Mais" do celular). */
+export function CategoryItems({ categories, current, onPick }: Omit<PickerProps, "className">) {
+  return (
+    <>
+      {categories.map((c) => (
+        <button key={c.id} type="button" role="menuitemradio" aria-checked={current === c.id} onClick={() => onPick(c.id)}>
+          <CategoryDot color={c.color} />
+          <span>{c.name}</span>
+          {current === c.id && <Check size={13} weight="bold" />}
+        </button>
+      ))}
+      {categories.length === 0 && <p className="cat-empty">Crie categorias em Configurações.</p>}
+      <button type="button" role="menuitem" className="cat-none" onClick={() => onPick(null)}>Nenhuma</button>
+    </>
   );
 }
