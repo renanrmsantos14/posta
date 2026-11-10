@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_notification::NotificationExt;
 
-use crate::AppState;
+use crate::{AppState, Lock};
 
 /// Chave do payload em `extra` da notificação.
 pub const EXTRA: &str = "open";
@@ -59,14 +59,14 @@ fn request(app: &AppHandle, target: Option<OpenTarget>) {
     #[cfg(desktop)]
     crate::tray::show_main(app);
     let Some(target) = target else { return };
-    *app.state::<AppState>().pending_open.lock().unwrap() = Some(target);
+    *app.state::<AppState>().pending_open.lk() = Some(target);
     app.emit("open-target", ()).ok();
 }
 
 /// O pedido de abertura guardado pelo clique, uma única vez.
 #[tauri::command]
 pub fn take_pending_open(state: State<'_, AppState>) -> Option<OpenTarget> {
-    state.pending_open.lock().unwrap().take()
+    state.pending_open.lk().take()
 }
 
 #[cfg(test)]

@@ -40,6 +40,45 @@ struct AppState {
     pending_open: Mutex<Option<OpenTarget>>,
 }
 
+/// Travas que sobrevivem ao pânico de outra thread. Com `lock().unwrap()`, um pânico segurando o `store` (num sync em
+/// segundo plano, por exemplo) envenenava o Mutex e todo comando seguinte entrava em pânico também, inclusive na thread
+/// do laço de eventos. No Android isso fechava o app e deixava o processo quebrado, e o app não abria mais até ser
+/// forçado a parar. Os dados ficam no SQLite (transações), então seguir com o guard é seguro.
+pub(crate) trait Lock<T> {
+    fn lk(&self) -> std::sync::MutexGuard<'_, T>;
+    /// `None` só quando outra thread segura a trava agora; trava envenenada também é devolvida.
+    fn try_lk(&self) -> Option<std::sync::MutexGuard<'_, T>>;
+}
+
+impl<T> Lock<T> for Mutex<T> {
+    fn lk(&self) -> std::sync::MutexGuard<'_, T> {
+        self.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    fn try_lk(&self) -> Option<std::sync::MutexGuard<'_, T>> {
+        match self.try_lock() {
+            Ok(g) => Some(g),
+            Err(std::sync::TryLockError::Poisoned(p)) => Some(p.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => None,
+        }
+    }
+}
+
+/// No Android o `run()` roda numa thread do tao, não na principal do processo: se ela entra em pânico, o processo
+/// continua vivo (o WorkManager também o segura) sem laço de eventos, e tocar no ícone reabre a Activity nesse processo
+/// morto, com a tela travada ou fechando na hora. Encerrar o processo faz o próximo toque começar do zero.
+#[cfg(target_os = "android")]
+fn abort_if_event_loop_panics() {
+    let event_loop = std::thread::current().id();
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        default(info);
+        if std::thread::current().id() == event_loop {
+            std::process::abort();
+        }
+    }));
+}
+
 impl AppState {
     fn new(dir: PathBuf, store: Store) -> Self {
         AppState {
@@ -107,7 +146,7 @@ impl AppState {
         // Senha ou servidor podem ter mudado: a sessão guardada não vale mais.
         self.hub.drop_account(&account.id);
         if let Ok(f) = imap_sync::discover_folders(account) {
-            self.store.lock().unwrap().set_folders(&account.id, &f).ok();
+            self.store.lk().set_folders(&account.id, &f).ok();
         }
         Ok(())
     }
@@ -124,8 +163,7 @@ impl AppState {
     /// Conta, pasta e UID de uma mensagem local.
     fn locate(&self, id: i64) -> CmdResult<ReplyRef> {
         self.store
-            .lock()
-            .unwrap()
+            .lk()
             .reply_ref(id)
             .map_err(err)?
             .ok_or_else(|| "mensagem não encontrada".to_string())
@@ -154,7 +192,7 @@ const BACKOFF_MAX: Duration = Duration::from_secs(5 * 60);
 
 /// Quantas mensagens recentes da Entrada têm o corpo baixado para leitura offline (opção `offlineN`, padrão 200).
 fn offline_keep(st: &AppState) -> usize {
-    st.store.lock().unwrap().setting("offlineN").ok().flatten().and_then(|v| v.parse().ok()).unwrap_or(200)
+    st.store.lk().setting("offlineN").ok().flatten().and_then(|v| v.parse().ok()).unwrap_or(200)
 }
 
 /// O servidor da conta responde a uma conexão TCP? Distingue "sem rede" de "o servidor recusou".
@@ -169,7 +207,7 @@ fn reachable(st: &AppState, account: &str) -> bool {
 
 /// Reaplica a fila offline (ações e Caixa de saída). Sem nada pendente é só uma leitura do banco.
 fn flush_pending(st: &AppState) -> FlushReport {
-    let Ok(_guard) = st.flushing.try_lock() else { return FlushReport::default() };
+    let Some(_guard) = st.flushing.try_lk() else { return FlushReport::default() };
     let Ok(store) = Store::open(st.db_path()) else { return FlushReport::default() };
     let accounts = st.accounts().unwrap_or_default();
     outbox::flush_via(&st.hub, &store, &mut |id| {
@@ -185,7 +223,7 @@ fn flush_pending(st: &AppState) -> FlushReport {
 /// Aplica a ação no servidor. Sem rede (servidor inalcançável) ou com fila pendente, guarda na fila para manter a
 /// ordem e devolve `false`; recusa do servidor com rede é erro. A cópia local é sempre atualizada pelo chamador.
 fn run_op(st: &AppState, account: &str, mailbox: &str, uids: &[u32], kind: OpKind, arg: &str) -> CmdResult<bool> {
-    let pending = || st.store.lock().unwrap().pending_count().map_err(err);
+    let pending = || st.store.lk().pending_count().map_err(err);
     if pending()? > 0 {
         flush_pending(st);
     }
@@ -199,7 +237,7 @@ fn run_op(st: &AppState, account: &str, mailbox: &str, uids: &[u32], kind: OpKin
             Err(_) => {}
         }
     }
-    let store = st.store.lock().unwrap();
+    let store = st.store.lk();
     for &uid in uids {
         store.enqueue_op(account, mailbox, uid, kind, arg).map_err(err)?;
     }
@@ -238,7 +276,7 @@ const PREFETCH_BODIES: u32 = 200;
 /// Baixa em segundo plano os corpos das mensagens recentes da Entrada, para abrirem sem rede. Uma por conta por vez.
 fn prefetch_inbox(app: &AppHandle, id: &str) {
     let st = app.state::<AppState>();
-    if !st.prefetching.lock().unwrap().insert(id.to_string()) {
+    if !st.prefetching.lk().insert(id.to_string()) {
         return;
     }
     let (app, id) = (app.clone(), id.to_string());
@@ -249,7 +287,7 @@ fn prefetch_inbox(app: &AppHandle, id: &str) {
             let mut store = Store::open(st.db_path()).map_err(err)?;
             st.hub.with(&acc, Kind::Cmd, |live| imap_sync::prefetch_bodies_on(live, &acc, &mut store, "INBOX", PREFETCH_BODIES)).map_err(err)
         })();
-        st.prefetching.lock().unwrap().remove(&id);
+        st.prefetching.lk().remove(&id);
         match r {
             Ok(ids) if !ids.is_empty() => {
                 app.emit("mail-delta", DeltaEvent { account: &id, mailbox: "INBOX", delta: &Delta { changed: ids, ..Default::default() } }).ok();
@@ -264,7 +302,7 @@ fn prefetch_inbox(app: &AppHandle, id: &str) {
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 fn sync_account_inbox(st: &AppState, id: &str) -> CmdResult<usize> {
     let acc = st.account_with_password(id)?;
-    let _guard = st.syncing.lock().unwrap_or_else(|p| p.into_inner());
+    let _guard = st.syncing.lk();
     let mut store = Store::open(st.db_path()).map_err(err)?;
     st.ensure_folders(&mut store, &acc)?;
     Ok(sync_inbox_hooked(st, &mut store, &acc)?.fetched)
@@ -276,7 +314,7 @@ fn notify_new(app: &AppHandle, st: &AppState, account: &str, fetched: usize) {
     if fetched == 0 || st.focused.load(Ordering::Relaxed) {
         return;
     }
-    let enabled = st.store.lock().unwrap().setting("notify").ok().flatten().as_deref() != Some("0");
+    let enabled = st.store.lk().setting("notify").ok().flatten().as_deref() != Some("0");
     if !enabled {
         return;
     }
@@ -314,7 +352,7 @@ fn idle_cycle(app: &AppHandle, id: &str) -> CmdResult<()> {
         }
     };
     let (fetched, delta) = {
-        let _guard = st.syncing.lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = st.syncing.lk();
         let mut store = Store::open(st.db_path()).map_err(err)?;
         st.ensure_folders(&mut store, &acc)?;
         let r = sync_inbox_hooked(&st, &mut store, &acc)?;
@@ -333,7 +371,7 @@ fn idle_cycle(app: &AppHandle, id: &str) -> CmdResult<()> {
 
 /// Uma thread por conta: mantém IDLE na INBOX e avisa a UI (`mail-changed`) quando algo muda.
 fn watch_inbox(app: &AppHandle, id: String) {
-    if !app.state::<AppState>().watching.lock().unwrap().insert(id.clone()) {
+    if !app.state::<AppState>().watching.lk().insert(id.clone()) {
         return;
     }
     let app = app.clone();
@@ -345,7 +383,7 @@ fn watch_inbox(app: &AppHandle, id: String) {
                 Err(e) => {
                     // Conta removida: encerra a thread (e libera o id, caso a conta volte).
                     if !app.state::<AppState>().accounts().map_or(true, |l| l.iter().any(|a| a.id == id)) {
-                        app.state::<AppState>().watching.lock().unwrap().remove(&id);
+                        app.state::<AppState>().watching.lk().remove(&id);
                         return;
                     }
                     eprintln!("IDLE de {id}: {e}");
@@ -418,7 +456,7 @@ struct SyncResult {
 async fn sync_inbox(app: AppHandle) -> CmdResult<SyncResult> {
     let handle = app.clone();
     blocking(app, move |st| {
-        let Ok(_guard) = st.syncing.try_lock() else {
+        let Some(_guard) = st.syncing.try_lk() else {
             return Ok(SyncResult { skipped: true, ..Default::default() });
         };
         flush_pending(st);
@@ -453,7 +491,7 @@ async fn sync_inbox(app: AppHandle) -> CmdResult<SyncResult> {
 #[tauri::command]
 fn list_folders(state: State<'_, AppState>) -> CmdResult<Vec<Role>> {
     let accounts = state.accounts()?;
-    let store = state.store.lock().unwrap();
+    let store = state.store.lk();
     let mut present = vec![Role::Inbox];
     for acc in accounts {
         for f in store.folders(&acc.id).map_err(err)? {
@@ -470,7 +508,7 @@ fn list_folders(state: State<'_, AppState>) -> CmdResult<Vec<Role>> {
 async fn sync_folder(app: AppHandle, role: Role, keep: usize) -> CmdResult<SyncResult> {
     let handle = app.clone();
     blocking(app, move |st| {
-        let Ok(_guard) = st.syncing.try_lock() else {
+        let Some(_guard) = st.syncing.try_lk() else {
             return Ok(SyncResult { skipped: true, ..Default::default() });
         };
         let mut store = Store::open(st.db_path()).map_err(err)?;
@@ -497,42 +535,42 @@ async fn sync_folder(app: AppHandle, role: Role, keep: usize) -> CmdResult<SyncR
 
 #[tauri::command]
 fn list_messages(state: State<'_, AppState>, role: Role, limit: u32, offset: u32) -> CmdResult<Vec<MessageSummary>> {
-    state.store.lock().unwrap().list_folder(role, limit, offset).map_err(err)
+    state.store.lk().list_folder(role, limit, offset).map_err(err)
 }
 
 /// Página por cursor (custo O(limit), estável com chegada de mensagens). `cursor` vem do `next` da página anterior.
 #[tauri::command]
 fn list_messages_page(state: State<'_, AppState>, folder: Role, cursor: Option<String>, limit: u32) -> CmdResult<Page> {
-    state.store.lock().unwrap().list_folder_page(folder, cursor.as_deref(), limit).map_err(err)
+    state.store.lk().list_folder_page(folder, cursor.as_deref(), limit).map_err(err)
 }
 
 /// Resumos por id (aplica o `mail-delta` sem recarregar a lista). Ids ausentes ou adiados não voltam.
 #[tauri::command]
 fn get_summaries(state: State<'_, AppState>, ids: Vec<i64>) -> CmdResult<Vec<MessageSummary>> {
-    state.store.lock().unwrap().summaries(&ids).map_err(err)
+    state.store.lk().summaries(&ids).map_err(err)
 }
 
 /// Pasta virtual "Com estrela": todas as contas, fora Lixeira e Spam.
 #[tauri::command]
 fn list_starred(state: State<'_, AppState>, limit: u32, offset: u32) -> CmdResult<Vec<MessageSummary>> {
-    state.store.lock().unwrap().list_starred(limit, offset).map_err(err)
+    state.store.lk().list_starred(limit, offset).map_err(err)
 }
 
 /// Mensagens do mesmo fio (conversa) da mensagem `id`, da mais antiga à mais nova.
 #[tauri::command]
 fn thread_messages(state: State<'_, AppState>, id: i64) -> CmdResult<Vec<MessageSummary>> {
-    state.store.lock().unwrap().thread(id).map_err(err)
+    state.store.lk().thread(id).map_err(err)
 }
 
 #[tauri::command]
 fn search_starred(state: State<'_, AppState>, query: String) -> CmdResult<Vec<MessageSummary>> {
-    state.store.lock().unwrap().search_starred(&query, 200).map_err(err)
+    state.store.lk().search_starred(&query, 200).map_err(err)
 }
 
 /// Não lidas por id de conta e papel de pasta (chaves `inbox`, `sent`...); a bandeja recebe a soma da Entrada.
 #[tauri::command]
 fn unread_counts(app: AppHandle, state: State<'_, AppState>) -> CmdResult<HashMap<String, HashMap<String, u32>>> {
-    let by = state.store.lock().unwrap().unread_by_account().map_err(err)?;
+    let by = state.store.lk().unread_by_account().map_err(err)?;
     #[cfg(desktop)]
     tray::show_unread(&app, by.iter().filter(|(_, r, _)| *r == Role::Inbox).map(|(_, _, n)| n).sum());
     #[cfg(not(desktop))]
@@ -555,7 +593,7 @@ fn set_flag_many(st: &AppState, ids: &[i64], flag: MsgFlag, on: bool) -> CmdResu
             (MsgFlag::Flagged, false) => OpKind::Unstar,
         };
         run_op(st, &account, &mailbox, &uids, kind, "")?;
-        let store = st.store.lock().unwrap();
+        let store = st.store.lk();
         for (id, _) in items {
             match flag {
                 MsgFlag::Seen => store.set_seen(id, on),
@@ -587,14 +625,13 @@ fn move_to_role(st: &AppState, ids: &[i64], role: Role) -> CmdResult<()> {
     for ((account, mailbox), items) in st.locate_groups(ids)? {
         let to = st
             .store
-            .lock()
-            .unwrap()
+            .lk()
             .folder_name(&account, role)
             .map_err(err)?
             .ok_or_else(|| "esta conta não tem essa pasta".to_string())?;
         let uids: Vec<u32> = items.iter().map(|(_, u)| *u).collect();
         run_op(st, &account, &mailbox, &uids, OpKind::Move, &to)?;
-        let store = st.store.lock().unwrap();
+        let store = st.store.lk();
         for (id, _) in items {
             store.remove(id).map_err(err)?;
         }
@@ -607,13 +644,13 @@ fn move_to_role(st: &AppState, ids: &[i64], role: Role) -> CmdResult<()> {
 async fn delete_forever_many(app: AppHandle, ids: Vec<i64>) -> CmdResult<()> {
     blocking(app, move |st| {
         for ((account, mailbox), items) in st.locate_groups(&ids)? {
-            let trash = st.store.lock().unwrap().folder_name(&account, Role::Trash).map_err(err)?;
+            let trash = st.store.lk().folder_name(&account, Role::Trash).map_err(err)?;
             if trash.as_deref() != Some(mailbox.as_str()) {
                 return Err("só dá para excluir de vez dentro da Lixeira".to_string());
             }
             let uids: Vec<u32> = items.iter().map(|(_, u)| *u).collect();
             run_op(st, &account, &mailbox, &uids, OpKind::Delete, "")?;
-            let store = st.store.lock().unwrap();
+            let store = st.store.lk();
             for (id, _) in items {
                 store.remove(id).map_err(err)?;
             }
@@ -625,7 +662,7 @@ async fn delete_forever_many(app: AppHandle, ids: Vec<i64>) -> CmdResult<()> {
 
 #[tauri::command]
 fn search_messages(state: State<'_, AppState>, query: String, role: Role) -> CmdResult<Vec<MessageSummary>> {
-    state.store.lock().unwrap().search_folder(&query, role, 200).map_err(err)
+    state.store.lk().search_folder(&query, role, 200).map_err(err)
 }
 
 /// Move para a pasta do papel na mesma conta. A cópia local sai só depois do OK do servidor.
@@ -635,13 +672,12 @@ async fn move_message(app: AppHandle, id: i64, role: Role) -> CmdResult<()> {
         let loc = st.locate(id)?;
         let to = st
             .store
-            .lock()
-            .unwrap()
+            .lk()
             .folder_name(&loc.account, role)
             .map_err(err)?
             .ok_or_else(|| "esta conta não tem essa pasta".to_string())?;
         run_op(st, &loc.account, &loc.mailbox, &[loc.uid], OpKind::Move, &to)?;
-        st.store.lock().unwrap().remove(id).map_err(err)
+        st.store.lk().remove(id).map_err(err)
     })
     .await
 }
@@ -651,12 +687,12 @@ async fn delete_forever(app: AppHandle, id: i64) -> CmdResult<()> {
     blocking(app, move |st| {
         let loc = st.locate(id)?;
         // Só a Lixeira apaga de vez; em qualquer outra pasta o caminho é mover para a Lixeira.
-        let trash = st.store.lock().unwrap().folder_name(&loc.account, Role::Trash).map_err(err)?;
+        let trash = st.store.lk().folder_name(&loc.account, Role::Trash).map_err(err)?;
         if trash.as_deref() != Some(loc.mailbox.as_str()) {
             return Err("só dá para excluir de vez dentro da Lixeira".to_string());
         }
         run_op(st, &loc.account, &loc.mailbox, &[loc.uid], OpKind::Delete, "")?;
-        st.store.lock().unwrap().remove(id).map_err(err)
+        st.store.lk().remove(id).map_err(err)
     })
     .await
 }
@@ -670,7 +706,7 @@ async fn load_body_now(app: &AppHandle, id: i64) -> CmdResult<MessageDetail> {
         let acc = st.account_with_password(&loc.account)?;
         let mut store = Store::open(st.db_path()).map_err(err)?;
         match imap_sync::load_body(&st.hub, &acc, &mut store, id) {
-            Ok(_) => st.store.lock().unwrap().get(id).map_err(err),
+            Ok(_) => st.store.lk().get(id).map_err(err),
             Err(_) if !reachable(&st, &loc.account) => Err("Sem conexão: o corpo desta mensagem ainda não foi baixado.".to_string()),
             Err(e) => Err(format!("Não consegui baixar o corpo da mensagem: {e}")),
         }
@@ -687,13 +723,13 @@ async fn load_body_now(app: &AppHandle, id: i64) -> CmdResult<MessageDetail> {
 #[tauri::command]
 async fn open_message(app: AppHandle, id: i64) -> CmdResult<Option<MessageDetail>> {
     let st = app.state::<AppState>();
-    let cached = st.store.lock().unwrap().get(id).map_err(err)?;
+    let cached = st.store.lk().get(id).map_err(err)?;
     let Some(cached) = cached else { return Ok(None) };
     // Só cabeçalho no cache: baixa o corpo agora, pela sessão persistente. Sem corpo e sem como baixar,
     // o erro é explícito (a mensagem continua não lida) em vez de abrir uma tela vazia.
     let cached = if cached.body_loaded { cached } else { load_body_now(&app, id).await? };
     let (mut detail, loc) = {
-        let store = st.store.lock().unwrap();
+        let store = st.store.lk();
         let mut d = cached;
         let was_seen = d.summary.seen;
         if !was_seen {
@@ -719,7 +755,7 @@ async fn open_message(app: AppHandle, id: i64) -> CmdResult<Option<MessageDetail
             .map_err(err)?;
         match to {
             Ok(Some(to)) => {
-                st.store.lock().unwrap().set_reply_addr(id, &to).map_err(err)?;
+                st.store.lk().set_reply_addr(id, &to).map_err(err)?;
                 detail.reply_addr = to;
             }
             Ok(None) => {}
@@ -801,7 +837,7 @@ async fn save_attachment(app: AppHandle, id: i64, index: u32, open: bool) -> Cmd
 async fn save_eml(app: AppHandle, id: i64) -> CmdResult<String> {
     let dir = download_dir(&app)?;
     let path = blocking(app, move |st| {
-        let subject = st.store.lock().unwrap().get(id).map_err(err)?.map(|d| d.summary.subject).unwrap_or_default();
+        let subject = st.store.lk().get(id).map_err(err)?.map(|d| d.summary.subject).unwrap_or_default();
         let loc = st.locate(id)?;
         let acc = st.account_with_password(&loc.account)?;
         let raw = st
@@ -854,7 +890,7 @@ async fn prepare_drag_eml(app: AppHandle, ids: Vec<i64>) -> CmdResult<DragFiles>
         let dir = drag_dir()?;
         let mut files = Vec::new();
         for id in ids {
-            let subject = st.store.lock().unwrap().get(id).map_err(err)?.map(|d| d.summary.subject).unwrap_or_default();
+            let subject = st.store.lk().get(id).map_err(err)?.map(|d| d.summary.subject).unwrap_or_default();
             let raw = fetch_raw_online(st, id)?;
             // Nome de arquivo tem limite em bytes (255): 80 caracteres de 4 bytes estouram.
             let mut title = String::new();
@@ -892,7 +928,7 @@ async fn prepare_drag_attachment(app: AppHandle, id: i64, index: u32) -> CmdResu
 #[tauri::command]
 async fn forward_attachments(app: AppHandle, id: i64) -> CmdResult<Vec<mail_core::OutAttachment>> {
     blocking(app, move |st| {
-        let listed = match st.store.lock().unwrap().get(id).map_err(err)? {
+        let listed = match st.store.lk().get(id).map_err(err)? {
             Some(d) if !d.attachments.is_empty() => d.attachments,
             _ => return Ok(vec![]),
         };
@@ -915,14 +951,14 @@ struct Draft {
 async fn send_message(app: AppHandle, draft: Draft) -> CmdResult<SendReport> {
     blocking(app, move |st| {
         let reply = match draft.reply_to {
-            Some(id) => st.store.lock().unwrap().reply_ref(id).map_err(err)?,
+            Some(id) => st.store.lk().reply_ref(id).map_err(err)?,
             None => None,
         };
         let acc = st.account_with_password(&draft.account)?;
         check_from(st, &acc, &draft)?;
         match send::send(&acc, &draft.message, reply.as_ref()).map_err(err) {
             Err(_) if !reachable(st, &draft.account) => {
-                st.store.lock().unwrap().enqueue_send(&draft.account, &draft.message, reply.as_ref()).map_err(err)?;
+                st.store.lk().enqueue_send(&draft.account, &draft.message, reply.as_ref()).map_err(err)?;
                 Ok(SendReport { queued: true, ..Default::default() })
             }
             other => other,
@@ -937,7 +973,7 @@ async fn send_message(app: AppHandle, draft: Draft) -> CmdResult<SendReport> {
 async fn remove_account(app: AppHandle, id: String) -> CmdResult<()> {
     blocking(app, move |st| {
         // Espera um sync em andamento terminar: senão ele regravaria mensagens da conta já apagada.
-        let _guard = st.syncing.lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = st.syncing.lk();
         let mut accounts = st.accounts()?;
         let Some(acc) = accounts.iter().find(|a| a.id == id).cloned() else {
             return Err(format!("conta {id} não encontrada"));
@@ -948,10 +984,10 @@ async fn remove_account(app: AppHandle, id: String) -> CmdResult<()> {
         }
         accounts.retain(|a| a.id != id);
         st.save_accounts(&accounts)?;
-        st.tokens.lock().unwrap().remove(&id);
+        st.tokens.lk().remove(&id);
         st.hub.drop_account(&id);
         send::forget(&id);
-        st.store.lock().unwrap().remove_account(&id).map_err(err)
+        st.store.lk().remove_account(&id).map_err(err)
     })
     .await
 }
@@ -960,12 +996,12 @@ async fn remove_account(app: AppHandle, id: String) -> CmdResult<()> {
 fn refresh_user_folders(st: &AppState, acc: &ImapAccount) -> CmdResult<String> {
     let (names, delimiter) = imap_sync::list_user_folders(acc).map_err(err)?;
     let delimiter = delimiter.unwrap_or_default();
-    st.store.lock().unwrap().set_user_folders(&acc.id, &names, &delimiter).map_err(err)?;
+    st.store.lk().set_user_folders(&acc.id, &names, &delimiter).map_err(err)?;
     Ok(delimiter)
 }
 
 fn all_user_folders(st: &AppState) -> CmdResult<Vec<UserFolder>> {
-    st.store.lock().unwrap().user_folders().map_err(err)
+    st.store.lk().user_folders().map_err(err)
 }
 
 /// Pastas criadas pelo usuário, de todas as contas (cópia local; o sync as atualiza).
@@ -991,11 +1027,11 @@ async fn create_folder(app: AppHandle, account: String, parent: Option<String>, 
 async fn rename_folder(app: AppHandle, account: String, folder: String, name: String) -> CmdResult<Vec<UserFolder>> {
     blocking(app, move |st| {
         // Um sync no meio regravaria mensagens com o nome antigo.
-        let _guard = st.syncing.lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = st.syncing.lk();
         let acc = st.account_with_password(&account)?;
         let delimiter = refresh_user_folders(st, &acc)?;
         let new = imap_sync::rename_folder(&acc, &folder, &name).map_err(err)?;
-        st.store.lock().unwrap().rename_box(&account, &folder, &new, &delimiter).map_err(err)?;
+        st.store.lk().rename_box(&account, &folder, &new, &delimiter).map_err(err)?;
         refresh_user_folders(st, &acc)?;
         all_user_folders(st)
     })
@@ -1016,10 +1052,10 @@ async fn count_folder(app: AppHandle, account: String, folder: String) -> CmdRes
 #[tauri::command]
 async fn delete_folder(app: AppHandle, account: String, folder: String) -> CmdResult<Vec<UserFolder>> {
     blocking(app, move |st| {
-        let _guard = st.syncing.lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = st.syncing.lk();
         let acc = st.account_with_password(&account)?;
         let gone = imap_sync::delete_folder(&acc, &folder).map_err(err)?;
-        st.store.lock().unwrap().drop_boxes(&account, &gone).map_err(err)?;
+        st.store.lk().drop_boxes(&account, &gone).map_err(err)?;
         refresh_user_folders(st, &acc)?;
         all_user_folders(st)
     })
@@ -1031,7 +1067,7 @@ async fn delete_folder(app: AppHandle, account: String, folder: String) -> CmdRe
 async fn sync_user_folder(app: AppHandle, account: String, folder: String, keep: usize) -> CmdResult<SyncResult> {
     let handle = app.clone();
     blocking(app, move |st| {
-        let Ok(_guard) = st.syncing.try_lock() else {
+        let Some(_guard) = st.syncing.try_lk() else {
             return Ok(SyncResult { skipped: true, ..Default::default() });
         };
         let mut store = Store::open(st.db_path()).map_err(err)?;
@@ -1050,17 +1086,17 @@ async fn sync_user_folder(app: AppHandle, account: String, folder: String, keep:
 /// Não lidas por pasta do usuário (para o contador da árvore de pastas).
 #[tauri::command]
 fn user_folder_unread(state: State<'_, AppState>) -> CmdResult<Vec<mail_core::FolderUnread>> {
-    state.store.lock().unwrap().user_folder_unread().map_err(err)
+    state.store.lk().user_folder_unread().map_err(err)
 }
 
 #[tauri::command]
 fn list_user_folder(state: State<'_, AppState>, account: String, folder: String, limit: u32, offset: u32) -> CmdResult<Vec<MessageSummary>> {
-    state.store.lock().unwrap().list_box(&account, &folder, limit, offset).map_err(err)
+    state.store.lk().list_box(&account, &folder, limit, offset).map_err(err)
 }
 
 #[tauri::command]
 fn search_user_folder(state: State<'_, AppState>, account: String, folder: String, query: String) -> CmdResult<Vec<MessageSummary>> {
-    state.store.lock().unwrap().search_box(&account, &folder, &query, 200).map_err(err)
+    state.store.lk().search_box(&account, &folder, &query, 200).map_err(err)
 }
 
 /// Move para uma pasta do usuário. Só mensagens da mesma conta da pasta; devolve quantas foram movidas.
@@ -1077,7 +1113,7 @@ fn move_to_user_folder(st: &AppState, ids: &[i64], account: &str, folder: &str) 
         }
         let uids: Vec<u32> = items.iter().map(|(_, u)| *u).collect();
         run_op(st, &acc_id, &mailbox, &uids, OpKind::Move, folder)?;
-        let store = st.store.lock().unwrap();
+        let store = st.store.lk();
         for (id, _) in &items {
             store.remove(*id).map_err(err)?;
         }
@@ -1092,7 +1128,7 @@ async fn copy_messages(app: AppHandle, ids: Vec<i64>, role: Role) -> CmdResult<u
     blocking(app, move |st| {
         let mut copied = 0;
         for ((account, mailbox), items) in st.locate_groups(&ids)? {
-            let to = st.store.lock().unwrap().folder_name(&account, role).map_err(err)?.ok_or_else(|| "esta conta não tem essa pasta".to_string())?;
+            let to = st.store.lk().folder_name(&account, role).map_err(err)?.ok_or_else(|| "esta conta não tem essa pasta".to_string())?;
             if to == mailbox {
                 continue;
             }
@@ -1126,17 +1162,17 @@ async fn copy_to_folder(app: AppHandle, ids: Vec<i64>, account: String, folder: 
 /// Aplica (ou tira, com `None`) a categoria colorida. Só local.
 #[tauri::command]
 fn set_category(state: State<'_, AppState>, ids: Vec<i64>, category: Option<String>) -> CmdResult<()> {
-    state.store.lock().unwrap().set_category(&ids, category.as_deref()).map_err(err)
+    state.store.lk().set_category(&ids, category.as_deref()).map_err(err)
 }
 
 #[tauri::command]
 fn list_category(state: State<'_, AppState>, category: String, limit: u32, offset: u32) -> CmdResult<Vec<MessageSummary>> {
-    state.store.lock().unwrap().list_category(&category, limit, offset).map_err(err)
+    state.store.lk().list_category(&category, limit, offset).map_err(err)
 }
 
 #[tauri::command]
 fn search_category(state: State<'_, AppState>, category: String, query: String) -> CmdResult<Vec<MessageSummary>> {
-    state.store.lock().unwrap().search_category(&category, &query, 200).map_err(err)
+    state.store.lk().search_category(&category, &query, 200).map_err(err)
 }
 
 /// Edita a conta: nome, senha (só se vier uma nova), servidores e portas. IMAP e SMTP são testados antes de gravar;
@@ -1182,33 +1218,33 @@ async fn update_account(app: AppHandle, account: ImapAccount, password: Option<S
 
 #[tauri::command]
 fn save_draft(state: State<'_, AppState>, draft: DraftRecord) -> CmdResult<()> {
-    state.store.lock().unwrap().save_draft(&draft).map_err(err)
+    state.store.lk().save_draft(&draft).map_err(err)
 }
 
 #[tauri::command]
 fn list_drafts(state: State<'_, AppState>) -> CmdResult<Vec<DraftRecord>> {
-    state.store.lock().unwrap().list_drafts().map_err(err)
+    state.store.lk().list_drafts().map_err(err)
 }
 
 #[tauri::command]
 fn suggest_contacts(state: State<'_, AppState>, query: String, limit: Option<usize>) -> CmdResult<Vec<Contact>> {
-    state.store.lock().unwrap().suggest_contacts(&query, limit.unwrap_or(8).min(50)).map_err(err)
+    state.store.lk().suggest_contacts(&query, limit.unwrap_or(8).min(50)).map_err(err)
 }
 
 #[tauri::command]
 fn delete_draft(state: State<'_, AppState>, id: String) -> CmdResult<()> {
-    state.store.lock().unwrap().delete_draft(&id).map_err(err)
+    state.store.lk().delete_draft(&id).map_err(err)
 }
 
 /// Assinaturas por conta (`signature:<id>`) e `notify` ("0" desliga as notificações).
 #[tauri::command]
 fn get_settings(state: State<'_, AppState>) -> CmdResult<HashMap<String, String>> {
-    state.store.lock().unwrap().settings().map_err(err)
+    state.store.lk().settings().map_err(err)
 }
 
 #[tauri::command]
 fn set_setting(state: State<'_, AppState>, key: String, value: String) -> CmdResult<()> {
-    state.store.lock().unwrap().set_setting(&key, &value).map_err(err)
+    state.store.lk().set_setting(&key, &value).map_err(err)
 }
 
 #[derive(Serialize)]
@@ -1228,7 +1264,7 @@ async fn queue_status(app: AppHandle) -> CmdResult<QueueStatus> {
             Some(a) => reachable(st, &a.id),
             None => true,
         };
-        let store = st.store.lock().unwrap();
+        let store = st.store.lk();
         Ok(QueueStatus { online, pending: store.pending_count().map_err(err)?, outbox: store.outbox_count().map_err(err)? })
     })
     .await
@@ -1242,19 +1278,19 @@ async fn flush_queue(app: AppHandle) -> CmdResult<FlushReport> {
 
 #[tauri::command]
 fn list_outbox(state: State<'_, AppState>) -> CmdResult<Vec<OutboxItem>> {
-    state.store.lock().unwrap().outbox().map_err(err)
+    state.store.lk().outbox().map_err(err)
 }
 
 #[tauri::command]
 fn discard_outbox(state: State<'_, AppState>, id: i64) -> CmdResult<()> {
-    state.store.lock().unwrap().drop_outbox(id).map_err(err)
+    state.store.lk().drop_outbox(id).map_err(err)
 }
 
 /// Limpa o erro de um envio recusado e tenta de novo.
 #[tauri::command]
 async fn retry_outbox(app: AppHandle, id: i64) -> CmdResult<FlushReport> {
     blocking(app, move |st| {
-        st.store.lock().unwrap().retry_outbox(id).map_err(err)?;
+        st.store.lk().retry_outbox(id).map_err(err)?;
         Ok(flush_pending(st))
     })
     .await
@@ -1309,7 +1345,7 @@ fn now_ts() -> i64 {
 }
 
 fn setting_of(st: &AppState, key: &str) -> Option<String> {
-    st.store.lock().unwrap().setting(key).ok().flatten()
+    st.store.lk().setting(key).ok().flatten()
 }
 
 /// Sincroniza a Entrada e, se chegou algo, roda o que depende de mensagem nova: férias e regras.
@@ -1317,7 +1353,7 @@ fn sync_inbox_hooked(st: &AppState, store: &mut Store, acc: &ImapAccount) -> Cmd
     let mark = store.max_id().map_err(err)?;
     let report = sync_via_hub(st, store, acc, "INBOX", Some(offline_keep(st)))?;
     if report.fetched > 0 {
-        let new = st.store.lock().unwrap().inbox_after(&acc.id, mark).map_err(err)?;
+        let new = st.store.lk().inbox_after(&acc.id, mark).map_err(err)?;
         auto_reply(st, acc, &new);
         apply_rules(st, &new);
     }
@@ -1336,19 +1372,19 @@ fn auto_reply(st: &AppState, acc: &ImapAccount, new: &[Candidate]) {
         if c.date < since || vacation::is_noreply(addr) || addr.eq_ignore_ascii_case(&acc.username) {
             continue;
         }
-        if st.store.lock().unwrap().vacation_replied(&acc.id, addr, since).unwrap_or(true) {
+        if st.store.lk().vacation_replied(&acc.id, addr, since).unwrap_or(true) {
             continue;
         }
         let Ok(Some(raw)) = st.hub.with(acc, Kind::Cmd, |l| imap_sync::fetch_raw_on(l, "INBOX", c.uid)) else { continue };
         if vacation::is_automatic(&raw) {
             continue;
         }
-        let reply = st.store.lock().unwrap().reply_ref(c.id).ok().flatten();
+        let reply = st.store.lk().reply_ref(c.id).ok().flatten();
         let subject = if vac.subject.trim().is_empty() { format!("Resposta automática: {}", c.subject) } else { vac.subject.clone() };
         let out = Outgoing { to: addr.to_string(), subject, body: vac.body.clone(), html: None, cc: String::new(), bcc: String::new(), attachments: Vec::new(), from: None };
         match send::send_auto(acc, &out, reply.as_ref()) {
             Ok(_) => {
-                st.store.lock().unwrap().mark_vacation_replied(&acc.id, addr, now_ts()).ok();
+                st.store.lk().mark_vacation_replied(&acc.id, addr, now_ts()).ok();
             }
             Err(e) => eprintln!("resposta de férias falhou ({}): {e}", acc.id),
         }
@@ -1362,7 +1398,7 @@ fn apply_rules(st: &AppState, msgs: &[Candidate]) -> usize {
     let mut cats: HashMap<String, Vec<i64>> = HashMap::new();
     let mut moves: HashMap<(String, String), Vec<i64>> = HashMap::new();
     let mut touched: HashSet<i64> = HashSet::new();
-    let user_folders = st.store.lock().unwrap().user_folders().unwrap_or_default();
+    let user_folders = st.store.lk().user_folders().unwrap_or_default();
     for c in msgs {
         let plan = rules::plan(&rules, c);
         if plan.is_empty() {
@@ -1396,7 +1432,7 @@ fn apply_rules(st: &AppState, msgs: &[Candidate]) -> usize {
         log("estrela", set_flag_many(st, &star, MsgFlag::Flagged, true));
     }
     for (cat, ids) in cats {
-        log("categoria", st.store.lock().unwrap().set_category(&ids, Some(&cat)).map_err(err));
+        log("categoria", st.store.lk().set_category(&ids, Some(&cat)).map_err(err));
     }
     // Mover por último: depois disso a mensagem sai da Entrada.
     for ((account, folder), ids) in moves {
@@ -1414,7 +1450,7 @@ async fn apply_rules_now(app: AppHandle) -> CmdResult<usize> {
     blocking(app, move |st| {
         let mut changed = 0;
         for acc in st.accounts()? {
-            let msgs = st.store.lock().unwrap().inbox_after(&acc.id, 0).map_err(err)?;
+            let msgs = st.store.lk().inbox_after(&acc.id, 0).map_err(err)?;
             changed += apply_rules(st, &msgs);
         }
         Ok(changed)
@@ -1426,7 +1462,7 @@ async fn apply_rules_now(app: AppHandle) -> CmdResult<usize> {
 #[tauri::command]
 fn search_filtered(state: State<'_, AppState>, scope: search::Scope, query: String) -> CmdResult<Vec<MessageSummary>> {
     let f = search::parse(&query);
-    state.store.lock().unwrap().search_filtered(&scope, &f, 200).map_err(err)
+    state.store.lk().search_filtered(&scope, &f, 200).map_err(err)
 }
 
 /// "Buscar no servidor": IMAP SEARCH nas pastas do escopo; o que ainda não estava no banco é baixado.
@@ -1441,7 +1477,7 @@ async fn search_server(app: AppHandle, scope: search::Scope, query: String) -> C
             search::Scope::Role { role } => {
                 let mut v = Vec::new();
                 for a in st.accounts()? {
-                    let name = st.store.lock().unwrap().folder_name(&a.id, *role).map_err(err)?;
+                    let name = st.store.lk().folder_name(&a.id, *role).map_err(err)?;
                     match (name, role) {
                         (Some(n), _) => v.push((a.id, n)),
                         (None, Role::Inbox) => v.push((a.id, "INBOX".to_string())),
@@ -1453,13 +1489,13 @@ async fn search_server(app: AppHandle, scope: search::Scope, query: String) -> C
             search::Scope::Box { account, mailbox } => vec![(account.clone(), mailbox.clone())],
             _ => return Err("A busca no servidor vale para pastas, não para Com estrela ou categorias.".to_string()),
         };
-        let _guard = st.syncing.lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = st.syncing.lk();
         let mut store = Store::open(st.db_path()).map_err(err)?;
         let mut found: Vec<MessageSummary> = Vec::new();
         for (account, mailbox) in targets {
             let acc = st.account_with_password(&account)?;
             let uids = imap_sync::search_server(&acc, &mut store, &mailbox, &f).map_err(err)?;
-            found.extend(st.store.lock().unwrap().by_uids(&account, &mailbox, &uids).map_err(err)?);
+            found.extend(st.store.lk().by_uids(&account, &mailbox, &uids).map_err(err)?);
         }
         found.sort_by(|a, b| b.date.cmp(&a.date));
         found.truncate(200);
@@ -1471,23 +1507,23 @@ async fn search_server(app: AppHandle, scope: search::Scope, query: String) -> C
 /// Esconde as mensagens até `until` (Unix, segundos); depois voltam ao topo como não lidas.
 #[tauri::command]
 fn snooze_messages(state: State<'_, AppState>, ids: Vec<i64>, until: i64) -> CmdResult<()> {
-    state.store.lock().unwrap().snooze(&ids, until).map_err(err)
+    state.store.lk().snooze(&ids, until).map_err(err)
 }
 
 #[tauri::command]
 fn unsnooze_messages(state: State<'_, AppState>, ids: Vec<i64>) -> CmdResult<()> {
-    state.store.lock().unwrap().unsnooze(&ids).map_err(err)
+    state.store.lk().unsnooze(&ids).map_err(err)
 }
 
 #[tauri::command]
 fn set_pinned(state: State<'_, AppState>, ids: Vec<i64>, pinned: bool) -> CmdResult<()> {
-    state.store.lock().unwrap().set_pinned(&ids, pinned).map_err(err)
+    state.store.lk().set_pinned(&ids, pinned).map_err(err)
 }
 
 /// O remetente alternativo só vale se for o endereço da conta ou um alias cadastrado.
 fn check_from(st: &AppState, acc: &ImapAccount, draft: &Draft) -> CmdResult<()> {
     if let Some(from) = draft.message.from.as_deref().filter(|f| !f.trim().is_empty()) {
-        let aliases = st.store.lock().unwrap().setting(&format!("aliases:{}", draft.account)).map_err(err)?.unwrap_or_default();
+        let aliases = st.store.lk().setting(&format!("aliases:{}", draft.account)).map_err(err)?.unwrap_or_default();
         if !send::from_allowed(&acc.username, &aliases, from) {
             return Err(format!("{from} não é um remetente cadastrado nesta conta"));
         }
@@ -1500,20 +1536,20 @@ fn check_from(st: &AppState, acc: &ImapAccount, draft: &Draft) -> CmdResult<()> 
 async fn schedule_send(app: AppHandle, id: String, send_at: i64, draft: Draft) -> CmdResult<()> {
     blocking(app, move |st| {
         let reply = match draft.reply_to {
-            Some(r) => st.store.lock().unwrap().reply_ref(r).map_err(err)?,
+            Some(r) => st.store.lk().reply_ref(r).map_err(err)?,
             None => None,
         };
         let acc = st.account_with_password(&draft.account)?;
         check_from(st, &acc, &draft)?;
         send::build(&acc, &draft.message, reply.as_ref()).map_err(err)?;
-        st.store.lock().unwrap().schedule_send(&id, &draft.account, draft.reply_to, send_at, &draft.message).map_err(err)
+        st.store.lk().schedule_send(&id, &draft.account, draft.reply_to, send_at, &draft.message).map_err(err)
     })
     .await
 }
 
 #[tauri::command]
 fn list_scheduled(state: State<'_, AppState>) -> CmdResult<Vec<mail_core::later::ScheduledItem>> {
-    state.store.lock().unwrap().list_scheduled().map_err(err)
+    state.store.lk().list_scheduled().map_err(err)
 }
 
 #[derive(Serialize)]
@@ -1529,13 +1565,13 @@ struct ScheduledEdit {
 /// Tira da fila e devolve o conteúdo: serve para cancelar e para editar (a UI reabre no Composer).
 #[tauri::command]
 fn take_scheduled(state: State<'_, AppState>, id: String) -> CmdResult<Option<ScheduledEdit>> {
-    let taken = state.store.lock().unwrap().take_scheduled(&id).map_err(err)?;
+    let taken = state.store.lk().take_scheduled(&id).map_err(err)?;
     Ok(taken.map(|s| ScheduledEdit { id: s.id, account: s.account, reply_to: s.reply_to, send_at: s.send_at, message: s.out }))
 }
 
 /// Adiadas que venceram voltam não lidas (a marca de lida também sai no servidor); devolve se algo mudou.
 fn wake_snoozed(st: &AppState) -> bool {
-    let ids = st.store.lock().unwrap().wake_due(now_ts()).unwrap_or_default();
+    let ids = st.store.lk().wake_due(now_ts()).unwrap_or_default();
     if ids.is_empty() {
         return false;
     }
@@ -1548,11 +1584,11 @@ fn wake_snoozed(st: &AppState) -> bool {
 /// Envia o que está agendado e venceu. Falha tenta de novo em 2 min; na terceira fica como falha na lista.
 fn send_due(st: &AppState) -> bool {
     let now = now_ts();
-    let due = st.store.lock().unwrap().claim_due(now).unwrap_or_default();
+    let due = st.store.lk().claim_due(now).unwrap_or_default();
     for s in &due {
         let sent = (|| -> CmdResult<()> {
             let reply = match s.reply_to {
-                Some(r) => st.store.lock().unwrap().reply_ref(r).map_err(err)?,
+                Some(r) => st.store.lk().reply_ref(r).map_err(err)?,
                 None => None,
             };
             let acc = st.account_with_password(&s.account)?;
@@ -1560,12 +1596,12 @@ fn send_due(st: &AppState) -> bool {
                 Ok(_) => Ok(()),
                 // Sem rede: passa para a Caixa de saída offline, que envia quando a conexão volta (um único caminho, sem duplicar).
                 Err(e) if e.is_network() && !reachable(st, &s.account) => {
-                    st.store.lock().unwrap().enqueue_send(&s.account, &s.out, reply.as_ref()).map(|_| ()).map_err(err)
+                    st.store.lk().enqueue_send(&s.account, &s.out, reply.as_ref()).map(|_| ()).map_err(err)
                 }
                 Err(e) => Err(err(e)),
             }
         })();
-        let store = st.store.lock().unwrap();
+        let store = st.store.lk();
         match sent {
             Ok(()) => store.scheduled_done(&s.id).ok(),
             Err(e) => store.scheduled_failed(&s.id, &e, now).ok(),
@@ -1576,7 +1612,7 @@ fn send_due(st: &AppState) -> bool {
 
 /// Relógio do app: a cada 20 s acorda adiadas e envia agendados (só roda com o app aberto).
 fn start_scheduler(app: AppHandle) {
-    app.state::<AppState>().store.lock().unwrap().requeue_sending().ok();
+    app.state::<AppState>().store.lk().requeue_sending().ok();
     std::thread::spawn(move || loop {
         std::thread::sleep(Duration::from_secs(20));
         let st = app.state::<AppState>();
@@ -1602,7 +1638,10 @@ pub(crate) fn android_cert_dir() {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[cfg(target_os = "android")]
-    android_cert_dir();
+    {
+        abort_if_event_loop_panics();
+        android_cert_dir();
+    }
     tauri::Builder::default()
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_opener::init())
