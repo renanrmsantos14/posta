@@ -46,7 +46,6 @@ export function UpdateDialog({ update, onLater }: Props) {
     return () => window.removeEventListener("keydown", onKey, true);
   });
 
-  const notes = update.notes.split("\n").map((l) => l.replace(/^\s*[-*•]\s*/, "").trim()).filter(Boolean);
   const pct = progress === null ? null : Math.round(progress * 100);
 
   return (
@@ -61,10 +60,15 @@ export function UpdateDialog({ update, onLater }: Props) {
         <p className="update-versions">
           <span>v{build.version}</span> <span aria-hidden>→</span> <strong>v{update.version}</strong>
         </p>
-        {notes.length > 0 && (
-          <ul className="update-notes" aria-label="Novidades">
-            {notes.map((n, i) => <li key={i} style={{ "--i": i } as React.CSSProperties}>{n}</li>)}
-          </ul>
+        {update.releases.length > 0 && (
+          <div className="update-notes">
+            {update.releases.map((r, i) => (
+              <section key={r.version} style={{ "--i": i } as React.CSSProperties}>
+                <h3>v{r.version}</h3>
+                <ul>{r.changes.map((c, j) => <li key={j}>{c}</li>)}</ul>
+              </section>
+            ))}
+          </div>
         )}
 
         {busy && (
