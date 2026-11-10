@@ -253,6 +253,11 @@ export function SettingsPage({ accounts, settings, onSetting, onRemoveAccount, o
               <Row title="Deslizar para a esquerda">
                 <Segmented label="Deslizar para a esquerda" value={settings.swipeLeft} fallback="trash" onChange={(v) => onSetting("swipeLeft", v)} options={SWIPE_OPTIONS} />
               </Row>
+              <label className="settings-sub alias-field">Remetentes com imagens sempre liberadas (um endereço por linha; os demais continuam bloqueados)
+                <textarea className="signature-input" rows={Math.max(2, aliasLines(settings["images:trusted"]).length + 1)} aria-label="Remetentes com imagens sempre liberadas"
+                  placeholder="newsletter@exemplo.com" value={settings["images:trusted"] ?? ""}
+                  onChange={(e) => onSetting("images:trusted", e.target.value)} />
+              </label>
               <Row title="Larguras das colunas" sub="Arraste a borda entre os painéis; clique duplo na borda restaura o padrão">
                 <button type="button" className="btn" onClick={() => ["w:rail", "w:list", "h:list"].forEach((k) => onSetting(k, ""))}>Restaurar padrão</button>
               </Row>
