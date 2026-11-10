@@ -9,6 +9,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_notification::NotificationExt;
 use open_target::OpenTarget;
 
+mod diag;
 mod oauth_app;
 mod open_target;
 mod secret;
@@ -1644,6 +1645,7 @@ pub(crate) fn android_cert_dir() {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    diag::log("run: início");
     #[cfg(target_os = "android")]
     {
         abort_if_event_loop_panics();
@@ -1654,6 +1656,8 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .setup(|app| {
+            let t0 = Instant::now();
+            diag::log("setup: início");
             // Atualização pelo próprio app: só no desktop (no Android, reinstala-se o APK).
             #[cfg(desktop)]
             {
@@ -1664,6 +1668,7 @@ pub fn run() {
             let dir = app.path().app_data_dir()?;
             fs::create_dir_all(&dir)?;
             let store = Store::open(dir.join("mail.sqlite"))?;
+            diag::log(&format!("setup: banco aberto em {} ms", t0.elapsed().as_millis()));
             app.manage(AppState::new(dir, store));
             #[cfg(desktop)]
             tray::init(app.handle());
@@ -1683,6 +1688,8 @@ pub fn run() {
                     handle.emit("queue-changed", ()).ok();
                 }
             });
+            diag::watch(app.handle().clone());
+            diag::log(&format!("setup: fim em {} ms", t0.elapsed().as_millis()));
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -1697,7 +1704,7 @@ pub fn run() {
             #[cfg(not(desktop))]
             let _ = (window, event);
         })
-        .invoke_handler(tauri::generate_handler![
+        .invoke_handler(diag::timed(tauri::generate_handler![
             add_imap_account,
             detect_provider,
             check_account,
@@ -1773,7 +1780,7 @@ pub fn run() {
             schedule_send,
             list_scheduled,
             take_scheduled
-        ])
+        ]))
         .run(tauri::generate_context!())
         .expect("erro ao iniciar o Posta");
 }
