@@ -5,6 +5,8 @@ import android.os.Bundle
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import androidx.activity.enableEdgeToEdge
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import org.json.JSONObject
 
 class MainActivity : TauriActivity() {
@@ -32,6 +34,20 @@ class MainActivity : TauriActivity() {
     super.onWebViewCreate(webView)
     this.webView = webView
     webView.addJavascriptInterface(NotificationOpen, "PostaNative")
+    webView.addJavascriptInterface(SafeArea, "PostaInsets")
+    // Edge-to-edge: a WebView do Android devolve 0 em env(safe-area-inset-*), então a UI recebe as barras do sistema
+    // (e o teclado, embaixo) em px CSS por `window.PostaInsets.get()` e pelo evento "posta-insets".
+    ViewCompat.setOnApplyWindowInsetsListener(webView) { view, insets ->
+      val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
+      val ime = insets.getInsets(WindowInsetsCompat.Type.ime())
+      val d = view.resources.displayMetrics.density
+      SafeArea.json = JSONObject()
+        .put("top", bars.top / d).put("right", bars.right / d)
+        .put("bottom", maxOf(bars.bottom, ime.bottom) / d).put("left", bars.left / d)
+        .toString()
+      view.post { (view as WebView).evaluateJavascript("window.dispatchEvent(new Event('posta-insets'))", null) }
+      insets
+    }
   }
 
   override fun onStart() {
@@ -43,6 +59,14 @@ class MainActivity : TauriActivity() {
     SyncWorker.appVisible = false
     super.onStop()
   }
+}
+
+/** Margens das barras do sistema (e do teclado, em `bottom`) em px CSS; lidas pela UI (`src/safeArea.ts`). */
+object SafeArea {
+  @Volatile var json: String = ""
+
+  @JavascriptInterface
+  fun get(): String = json
 }
 
 /** Destino do toque numa notificação de email novo: conta, pasta e, se for um só email, o id local. */
