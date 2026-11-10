@@ -21,3 +21,7 @@ A permissão `POST_NOTIFICATIONS` (Android 13+) é pedida pelo app ao ativar avi
 ## Para validar
 
 Instale o APK assinado, abra o app, adicione uma conta, feche-o e envie um e-mail para a conta. Aguarde ~15 minutos ou force: `adb shell cmd jobscheduler run -f br.com.renan.posta <jobId>` (`adb shell dumpsys jobscheduler | grep posta`). Logs: `adb logcat -s PostaSync`.
+
+## Tela branca ao abrir
+
+A UI fica invisível até as configurações chegarem do núcleo (`.app[data-ready]`). Se isso não acontece em 8 s, `public/boot-guard.js` mostra "O Posta está demorando para abrir" com o botão Recarregar. Para saber onde a abertura parou, com o cabo ligado logo depois de reproduzir: `adb logcat -d -s Posta PostaUI PostaSync`. `Posta` vem do Rust (`src/diag.rs`: etapas do `setup`, comandos lentos ou presos, laço de eventos sem resposta); `PostaUI` traz o ciclo da Activity e as etapas da página (`html carregado`, `bundle iniciou`, `pronta`).

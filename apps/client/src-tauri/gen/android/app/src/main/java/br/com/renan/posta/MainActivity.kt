@@ -2,6 +2,7 @@ package br.com.renan.posta
 
 import android.content.Intent
 import android.os.Bundle
+import android.util.Log
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import androidx.activity.enableEdgeToEdge
@@ -13,9 +14,11 @@ class MainActivity : TauriActivity() {
   private var webView: WebView? = null
 
   override fun onCreate(savedInstanceState: Bundle?) {
+    Log.i(UiLog.TAG, "activity: onCreate (estado salvo: ${savedInstanceState != null})")
     enableEdgeToEdge()
     // O tao registra o ndk-context aqui dentro; o Worker não pode registrar o dele ao mesmo tempo (assert derruba o app).
     synchronized(SyncWorker.CONTEXT_LOCK) { super.onCreate(savedInstanceState) }
+    Log.i(UiLog.TAG, "activity: onCreate fim")
     SyncWorker.schedule(applicationContext)
     // Girar a tela recria a Activity com o mesmo Intent: só o toque novo (sem estado salvo) abre o email.
     if (savedInstanceState == null) NotificationOpen.take(intent)
@@ -35,6 +38,8 @@ class MainActivity : TauriActivity() {
     this.webView = webView
     webView.addJavascriptInterface(NotificationOpen, "PostaNative")
     webView.addJavascriptInterface(SafeArea, "PostaInsets")
+    webView.addJavascriptInterface(UiLog, "PostaLog")
+    Log.i(UiLog.TAG, "activity: WebView criada")
     // Edge-to-edge: a WebView do Android devolve 0 em env(safe-area-inset-*), então a UI recebe as barras do sistema
     // (e o teclado, embaixo) em px CSS por `window.PostaInsets.get()` e pelo evento "posta-insets".
     ViewCompat.setOnApplyWindowInsetsListener(webView) { view, insets ->
@@ -53,11 +58,28 @@ class MainActivity : TauriActivity() {
   override fun onStart() {
     super.onStart()
     SyncWorker.appVisible = true
+    Log.i(UiLog.TAG, "activity: onStart")
   }
 
   override fun onStop() {
     SyncWorker.appVisible = false
+    Log.i(UiLog.TAG, "activity: onStop")
     super.onStop()
+  }
+
+  override fun onDestroy() {
+    Log.i(UiLog.TAG, "activity: onDestroy (mudança de configuração: $isChangingConfigurations)")
+    super.onDestroy()
+  }
+}
+
+/** Etapas da abertura vindas da UI (`window.PostaLog.log`), no logcat com a tag "PostaUI". */
+object UiLog {
+  const val TAG = "PostaUI"
+
+  @JavascriptInterface
+  fun log(msg: String) {
+    Log.i(TAG, msg)
   }
 }
 

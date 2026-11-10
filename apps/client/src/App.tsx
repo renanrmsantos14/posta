@@ -353,7 +353,7 @@ export default function App() {
   const refreshScheduled = useCallback(() => api.listScheduled().then(setScheduled).catch(() => {}), []);
 
   useEffect(() => {
-    api.listAccounts().then(setAccounts);
+    api.listAccounts().then(setAccounts).catch((e) => window.postaBootLog?.(`ui: list_accounts falhou: ${e}`));
     api.folders().then((r) => setFolderList(withStarred(r))).catch(() => {});
     api.userFolders().then(setUserFolders).catch(() => {});
     refreshDrafts();
@@ -362,7 +362,7 @@ export default function App() {
       setSettings(s);
       // Android 13+ só mostra notificações depois do aceite; no desktop a chamada é inofensiva.
       if (s.notify !== "0") api.listAccounts().then((a) => (a.length ? api.requestNotifyPermission() : false)).catch(() => {});
-    }).catch(() => {}).finally(() => setPrefsReady(true));
+    }).catch((e) => window.postaBootLog?.(`ui: get_settings falhou: ${e}`)).finally(() => setPrefsReady(true));
   }, [refreshDrafts, refreshScheduled]);
 
   // Fechar ou enviar o painel muda os rascunhos salvos e a fila de agendados.
