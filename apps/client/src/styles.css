@@ -368,6 +368,7 @@ kbd {
 .img-banner { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
   margin: 0 0 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--yellow-bg);
   color: var(--text); font-size: 13px; }
+.img-banner-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .back { display: none; margin: -8px 0 16px -8px; }
 
 /* ---------- Vazio ---------- */

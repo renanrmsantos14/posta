@@ -4,6 +4,7 @@ import { ArrowLeft, ArrowsIn, ArrowsOut, CaretUp, Paperclip, WarningCircle, Wifi
 import { HtmlBody, hasRemoteImages } from "./HtmlBody";
 import { PageLayout } from "./layout/primitives";
 import { parseContact } from "./ContactCard";
+import { addrOf } from "./aliases";
 import { fmtLong, shortDate } from "./dates";
 import { fmtSize } from "./format";
 import type { Attachment, MessageDetail, MessageSummary } from "./api";
@@ -26,6 +27,8 @@ export interface ReaderPaneProps {
   folderLabel: string;
   hasMessages: boolean;
   imagesOk: Set<number>;
+  /** Remetentes com imagens remotas sempre liberadas (setting `images:trusted`). */
+  imagesFrom: Set<string>;
   savingAtt: string | null;
   /** Barra de ações do celular (a faixa de comandos cobre o desktop). */
   mobileActions: ReactNode;
@@ -37,6 +40,7 @@ export interface ReaderPaneProps {
   onReaderContext: (x: number, y: number, selection: string) => void;
   onToggleThread: (id: number) => void;
   onShowImages: (id: number) => void;
+  onTrustSender: (addr: string) => void;
   onSaveAttachment: (id: number, a: Attachment) => void;
   /** Botão pressionado no anexo: arrastar para fora da janela entrega o arquivo ao sistema. */
   onDragAttachment: (e: React.PointerEvent, id: number, a: Attachment) => void;
@@ -58,6 +62,8 @@ function Recipients({ label, v, onContact }: { label: string; v: string; onConta
 }
 
 function MessageView({ d, fold, p }: { d: MessageDetail; fold: boolean; p: ReaderPaneProps }) {
+  const fromAddr = addrOf(d.from_addr);
+  const remote = p.imagesOk.has(d.id) || p.imagesFrom.has(fromAddr);
   const sender = d.from_name ? `${d.from_name} <${d.from_addr}>` : d.from_addr;
   return (
     <>
@@ -100,15 +106,22 @@ function MessageView({ d, fold, p }: { d: MessageDetail; fold: boolean; p: Reade
       )}
       {d.body_html ? (
         <>
-          {!p.imagesOk.has(d.id) && hasRemoteImages(d.body_html) && (
+          {!remote && hasRemoteImages(d.body_html) && (
             <div className="img-banner" role="status">
               <span>Imagens remotas bloqueadas para proteger sua privacidade.</span>
-              <button type="button" className="btn" onClick={() => p.onShowImages(d.id)}>
-                Mostrar imagens
-              </button>
+              <span className="img-banner-actions">
+                <button type="button" className="btn" onClick={() => p.onShowImages(d.id)}>
+                  Mostrar imagens
+                </button>
+                {fromAddr && (
+                  <button type="button" className="btn" onClick={() => p.onTrustSender(fromAddr)}>
+                    Sempre mostrar de {fromAddr}
+                  </button>
+                )}
+              </span>
             </div>
           )}
-          <HtmlBody html={d.body_html} remote={p.imagesOk.has(d.id)} onContext={p.onReaderContext} />
+          <HtmlBody html={d.body_html} remote={remote} onContext={p.onReaderContext} />
         </>
       ) : (
         <div className="body">{d.body_text}</div>

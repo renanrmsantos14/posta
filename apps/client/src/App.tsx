@@ -765,6 +765,13 @@ export default function App() {
     api.setSetting(key, value).catch((e) => toast(`Não consegui salvar a configuração: ${e}`, "error"));
   }
 
+  const imagesFrom = useMemo(() => new Set(aliasLines(settings["images:trusted"]).map(addrOf)), [settings["images:trusted"]]);
+  function trustSender(addr: string) {
+    const before = settings["images:trusted"] ?? "";
+    changeSetting("images:trusted", [...aliasLines(before), addr].join("\n"));
+    toast(`Imagens de ${addr} serão sempre mostradas`, "info", { action: { label: "Desfazer", onClick: () => changeSetting("images:trusted", before) } });
+  }
+
   function accountSaved(a: Account) {
     setAccounts((l) => (l ?? []).map((x) => (x.id === a.id ? a : x)));
   }
@@ -1698,10 +1705,10 @@ export default function App() {
 
         <ReaderPane detail={detail && detail.id === selectedId ? detail : null} error={openError && openError.id === selectedId ? openError.msg : null}
           onRetry={() => selectedId !== null && void select(selectedId)} selectedId={selectedId} threaded={threaded} thread={thread} bodies={bodies}
-          expanded={expanded} full={full} viaKeyboard={viaKeyboard} folderLabel={info.label} hasMessages={messages.length > 0} imagesOk={imagesOk}
+          expanded={expanded} full={full} viaKeyboard={viaKeyboard} folderLabel={info.label} hasMessages={messages.length > 0} imagesOk={imagesOk} imagesFrom={imagesFrom}
           savingAtt={savingAtt} mobileActions={mobileActions} onFull={setFull} onBack={() => (full ? setFull(false) : setReaderOpen(false))}
           onContact={openContact} onReaderContext={readerContext} onToggleThread={(id) => void toggleThreadMsg(id)}
-          onShowImages={(id) => setImagesOk((s) => new Set(s).add(id))} onSaveAttachment={(id, att) => void saveAttachment(id, att)} onDragAttachment={dragAttachment}>
+          onShowImages={(id) => setImagesOk((s) => new Set(s).add(id))} onTrustSender={trustSender} onSaveAttachment={(id, att) => void saveAttachment(id, att)} onDragAttachment={dragAttachment}>
           {confirmDelete && (
             <div className="confirm scrim" onMouseDown={(e) => { if (e.target === e.currentTarget && !deleting) setConfirmDelete(null); }}>
               <div className="confirm-card" role="alertdialog" aria-labelledby="delete-title">
