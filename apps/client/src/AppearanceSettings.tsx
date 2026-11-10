@@ -4,6 +4,7 @@ import { Check } from "@phosphor-icons/react";
 import type { Settings } from "./api";
 import { Row, Segmented } from "./SettingsParts";
 import { ACCENTS, THEMES, themePref } from "./themes";
+import { TOOLBAR_ITEMS, hiddenTools } from "./commands";
 import { toast } from "./toast";
 
 interface Props {
@@ -76,6 +77,13 @@ export function AppearanceSection({ settings, onSetting, onPreview, accentAdjust
     toast(value ? "Cor de destaque aplicada" : "Cor de destaque do tema restaurada", "success");
   }
 
+  const hidden = hiddenTools(settings.toolbarHidden);
+  function toggleTool(id: string, on: boolean) {
+    const next = new Set(hidden);
+    if (on) next.delete(id); else next.add(id);
+    onSetting("toolbarHidden", [...next].join(","));
+  }
+
   const cards = [{ id: "system", name: "Seguir o sistema", dark: false }, ...THEMES];
   return (
     <section className="settings-group" aria-label="Aparência">
@@ -118,6 +126,25 @@ export function AppearanceSection({ settings, onSetting, onPreview, accentAdjust
         <Segmented label="Tamanho da fonte" value={settings.size} fallback="m" onChange={(v) => onSetting("size", v)}
           options={[["s", "P"], ["m", "M"], ["l", "G"]]} />
       </Row>
+      <Row title="Barra de ferramentas" sub="Altura dos botões e dos ícones">
+        <Segmented label="Tamanho da barra de ferramentas" value={settings.toolbar} fallback="m" onChange={(v) => onSetting("toolbar", v)}
+          options={[["s", "Compacta"], ["m", "Média"], ["l", "Grande"]]} />
+      </Row>
+      <Row title="Rótulos da barra" sub="Automático mostra os nomes conforme a largura da janela">
+        <Segmented label="Rótulos da barra" value={settings.toolbarLabels} fallback="auto" onChange={(v) => onSetting("toolbarLabels", v)}
+          options={[["auto", "Automático"], ["always", "Sempre"], ["icons", "Só ícones"]]} />
+      </Row>
+      <div className="settings-col">
+        <div className="settings-strong">Botões da barra</div>
+        <div className="settings-sub">Desmarque o que você não usa; continua disponível no menu de contexto e nos atalhos</div>
+        <div className="tool-picks">
+          {TOOLBAR_ITEMS.map(([id, label]) => (
+            <label key={id} className="tool-pick">
+              <input type="checkbox" checked={!hidden.has(id)} onChange={(e) => toggleTool(id, e.target.checked)} /> {label}
+            </label>
+          ))}
+        </div>
+      </div>
     </section>
   );
 }

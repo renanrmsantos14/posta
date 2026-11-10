@@ -23,7 +23,12 @@ export interface Cmd {
   menu?: () => MenuItem[];
 }
 
-export function CommandBar({ cmds }: { cmds: Cmd[] }) {
+type ToolbarSize = "s" | "m" | "l";
+type ToolbarLabels = "auto" | "always" | "icons";
+const ICON = { s: 16, m: 18, l: 20 } as const;
+
+export function CommandBar({ cmds: all, size = "m", labels = "auto", hidden }: { cmds: Cmd[]; size?: ToolbarSize; labels?: ToolbarLabels; hidden?: Set<string> }) {
+  const cmds = hidden?.size ? all.filter((c) => !hidden.has(c.id)) : all;
   const bar = useRef<HTMLDivElement>(null);
   const [menu, setMenu] = useState<MenuState | null>(null);
 
@@ -32,10 +37,17 @@ export function CommandBar({ cmds }: { cmds: Cmd[] }) {
     setMenu({ x: r.left, y: r.bottom + 4, items, label });
   };
 
+  /** Escondidos pela largura (display: none) ou cortados pela borda da faixa (rótulos "Sempre" com rolagem). */
   const hiddenIds = () => {
     const out = new Set<string>();
-    bar.current?.querySelectorAll<HTMLElement>("[data-cmd]").forEach((el) => {
-      if (el.getClientRects().length === 0) out.add(el.dataset.cmd!);
+    const host = bar.current;
+    if (!host) return out;
+    const edge = host.getBoundingClientRect();
+    const moreEl = host.querySelector<HTMLElement>(".cmd-more");
+    const right = moreEl?.getClientRects().length ? moreEl.getBoundingClientRect().left : edge.right;
+    host.querySelectorAll<HTMLElement>("[data-cmd]").forEach((el) => {
+      const r = el.getBoundingClientRect();
+      if (el.getClientRects().length === 0 || r.right > right + 1 || r.left < edge.left - 1) out.add(el.dataset.cmd!);
     });
     return out;
   };
@@ -51,7 +63,7 @@ export function CommandBar({ cmds }: { cmds: Cmd[] }) {
   };
 
   return (
-    <div className="cmdbar-host" role="region" aria-label="Barra de comandos">
+    <div className="cmdbar-host" role="region" aria-label="Barra de comandos" data-size={size} data-labels={labels}>
       <div ref={bar} className="cmdbar" role="toolbar" aria-label="Comandos">
         {cmds.map((c, i) => (
           <span key={c.id} className="cmd-slot" data-cmd={c.id} data-pri={c.pri}>
@@ -59,13 +71,13 @@ export function CommandBar({ cmds }: { cmds: Cmd[] }) {
             <button type="button" className="cmd" data-primary={c.primary || undefined} aria-label={c.label} title={c.kbd ? `${c.label} (${c.kbd})` : c.label}
               aria-pressed={c.pressed} aria-haspopup={c.menu ? "menu" : undefined} disabled={c.disabled}
               onClick={(e) => (c.menu ? open(c.menu(), c.label, e.currentTarget) : c.run?.())}>
-              <c.icon size={16} weight={c.pressed ? "fill" : "bold"} aria-hidden />
+              <c.icon size={ICON[size]} weight={c.pressed ? "fill" : "bold"} aria-hidden />
               <span className="cmd-label">{c.label}</span>
             </button>
           </span>
         ))}
         <button type="button" className="cmd cmd-more" aria-label="Mais ações" title="Mais ações" aria-haspopup="menu" onClick={(e) => more(e.currentTarget)}>
-          <DotsThree size={18} weight="bold" aria-hidden />
+          <DotsThree size={ICON[size] + 2} weight="bold" aria-hidden />
         </button>
       </div>
       {menu && <ContextMenu menu={menu} onClose={() => setMenu(null)} />}

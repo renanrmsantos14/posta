@@ -27,6 +27,14 @@ export interface CommandContext {
   saveEml: (id: number) => unknown;
 }
 
+/** Botões que o usuário pode esconder da faixa (Configurações > Aparência). */
+export const TOOLBAR_ITEMS: [string, string][] = [
+  ["new", "Novo email"], ["delete", "Excluir"], ["archive", "Arquivar"], ["reply", "Responder"], ["replyAll", "Responder a todos"],
+  ["forward", "Encaminhar"], ["move", "Mover"], ["read", "Marcar lida/não lida"], ["flag", "Sinalizar"], ["pin", "Fixar"],
+  ["snooze", "Adiar"], ["cats", "Categorias"], ...(!ANDROID ? [["print", "Imprimir"] as [string, string]] : []), ["eml", "Salvar .eml"],
+];
+export const hiddenTools = (v: string | undefined) => new Set((v ?? "").split(",").filter(Boolean));
+
 export function buildCommands(c: CommandContext): Cmd[] {
   const { targets, current, canArchive, canTrash, archiveTo, writeNew, act, remove, archive, markSeen, toggleStar, togglePin, moveItems, snoozeItems, categoryItems, saveEml } = c;
   const none = targets.length === 0;

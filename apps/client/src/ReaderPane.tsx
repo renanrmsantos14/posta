@@ -1,7 +1,7 @@
 // Painel de leitura: cabeçalho, destinatários (com cartão de contato), anexos, corpo (HtmlBody) e a conversa dobrável.
 import type { ReactNode } from "react";
 import { ArrowLeft, ArrowsIn, ArrowsOut, CaretUp, Paperclip, WarningCircle, WifiSlash } from "@phosphor-icons/react";
-import { HtmlBody, hasRemoteImages } from "./HtmlBody";
+import { HtmlBody, ZoomControls, hasRemoteImages } from "./HtmlBody";
 import { PageLayout } from "./layout/primitives";
 import { parseContact } from "./ContactCard";
 import { addrOf } from "./aliases";
@@ -74,6 +74,7 @@ function MessageView({ d, fold, p }: { d: MessageDetail; fold: boolean; p: Reade
           {d.from_name && <div className="meta-addr">{d.from_addr}</div>}
         </div>
         <time className="meta-date">{fmtLong.format(new Date(d.date * 1000))}</time>
+        {d.body_html && !fold && <ZoomControls />}
         {fold ? (
           <button type="button" className="icon-btn expand-btn" onClick={() => p.onToggleThread(d.id)}
             aria-label="Recolher mensagem" title="Recolher">
