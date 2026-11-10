@@ -16,7 +16,8 @@ export interface Update {
   install: (progress: (p: number | null) => void) => Promise<void>;
 }
 
-export const CHECK_EVERY_MS = 6 * 60 * 60 * 1000;
+/** Procura sozinho a cada 2 min (60 chamadas/h é o limite da API do GitHub sem login). */
+export const CHECK_EVERY_MS = 2 * 60 * 1000;
 const AUTO_KEY = "posta.update.auto";
 const SKIP_KEY = "posta.update.skip";
 

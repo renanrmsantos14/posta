@@ -356,7 +356,7 @@ export function SettingsPage({ accounts, settings, onSetting, onRemoveAccount, o
               <label className="settings-row switch-row">
                 <div>
                   <div className="settings-strong">Procurar automaticamente</div>
-                  <div className="settings-sub">Ao abrir o app e a cada 6 horas</div>
+                  <div className="settings-sub">Ao abrir o app e a cada 2 minutos</div>
                 </div>
                 <input type="checkbox" role="switch" className="switch" checked={auto}
                   onChange={(e) => { setAuto(e.target.checked); setAutoCheck(e.target.checked); }} />
