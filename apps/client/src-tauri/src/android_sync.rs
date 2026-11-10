@@ -2,7 +2,7 @@
 //! `nativeSync`; aqui reaplica a fila offline, sincroniza a Entrada de cada conta e devolve o que notificar.
 //! Não passa pelo Tauri: monta um `AppState` próprio sobre a mesma pasta de dados (SQLite em WAL aguenta os dois).
 
-use super::{flush_pending, sync_account_inbox, AppState};
+use super::{flush_pending, sync_account_inbox, AppState, Lock};
 use jni::{
     objects::{JClass, JObject, JString},
     sys::jstring,
@@ -24,7 +24,7 @@ fn run(dir: PathBuf) -> Result<String, String> {
     let store = Store::open(dir.join("mail.sqlite")).map_err(|e| e.to_string())?;
     let st = AppState::new(dir, store);
     flush_pending(&st);
-    if st.store.lock().unwrap().setting("notify").ok().flatten().as_deref() == Some("0") {
+    if st.store.lk().setting("notify").ok().flatten().as_deref() == Some("0") {
         // Ainda sincroniza (o cache fica em dia), só não avisa.
         for acc in st.accounts()? {
             sync_account_inbox(&st, &acc.id).ok();

@@ -589,9 +589,11 @@ impl Store {
     /// Ajustes por conexão (não persistem no arquivo, exceto o modo WAL): cache e mmap grandes, WAL e fsync relaxado.
     fn tune(conn: &Connection) -> Result<()> {
         conn.execute_batch(
-            "PRAGMA journal_mode = WAL;
+            // busy_timeout primeiro: trocar o journal_mode pode esbarrar na conexão do sync em segundo plano (o Worker
+            // do Android) e, sem espera, falha na hora com "database is locked", derrubando a abertura do app.
+            "PRAGMA busy_timeout = 5000;
+             PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;
-             PRAGMA busy_timeout = 5000;
              PRAGMA cache_size = -65536;
              PRAGMA mmap_size = 268435456;
              PRAGMA wal_autocheckpoint = 262144;

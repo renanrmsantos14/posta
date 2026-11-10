@@ -6,7 +6,7 @@ use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::AppState;
+use crate::{AppState, Lock};
 
 const ID: &str = "posta-tray";
 
@@ -102,5 +102,5 @@ pub fn refresh(app: &AppHandle) {
 pub fn hide_on_close(app: &AppHandle) -> bool {
     let st = app.state::<AppState>();
     st.tray.load(Ordering::Relaxed)
-        && st.store.lock().unwrap().setting("closeToTray").ok().flatten().as_deref() != Some("0")
+        && st.store.lk().setting("closeToTray").ok().flatten().as_deref() != Some("0")
 }
