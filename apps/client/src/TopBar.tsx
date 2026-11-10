@@ -1,6 +1,6 @@
 // Barra superior: marca, busca central (com escopo e filtros) e ações globais (sincronizar, conta, configurações).
 import { useRef, useState } from "react";
-import { ArrowsClockwise, Check, FunnelSimple, GearSix, MagnifyingGlass, Plus, X } from "@phosphor-icons/react";
+import { ArrowsClockwise, Check, FunnelSimple, GearSix, List, MagnifyingGlass, Plus, X } from "@phosphor-icons/react";
 import { OfflineBadge } from "./Offline";
 import type { QueueStatus } from "./api";
 import { SEARCH_FILTERS } from "./productivity";
@@ -23,6 +23,10 @@ interface Props {
   canSync: boolean;
   onSync: () => void;
   onAddAccount: () => void;
+  /** Celular: abre a gaveta de pastas e contas. */
+  onMenu: () => void;
+  menuRef: React.RefObject<HTMLButtonElement | null>;
+  menuOpen: boolean;
   onSettings: () => void;
 }
 
@@ -34,6 +38,10 @@ export function TopBar(p: Props) {
 
   return (
     <header className="topbar" role="banner">
+      <button ref={p.menuRef} type="button" className="icon-btn mobile-only menu-btn" aria-label="Pastas e contas" title="Pastas e contas"
+        aria-haspopup="dialog" aria-expanded={p.menuOpen} onClick={p.onMenu}>
+        <List size={18} weight="bold" />
+      </button>
       <div className="brand">Posta</div>
       <div className="searchbox" ref={root}>
         <label className="search">

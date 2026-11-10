@@ -1,5 +1,5 @@
 // Dados de exemplo para rodar a UI no navegador (pnpm dev), sem Tauri e sem rede.
-import type { Account, CheckFailure, CheckStep, Detection, FailKind, Contact, Draft, FlushReport, MailDelta, MessagePage, OutboxItem, QueueStatus, Provider, OauthConfig, OauthConfigView, MessageDetail, MessageSummary, NewAccount, OutAttachment, Role, ScheduledEdit, SendReport, Settings, StoredDraft, SyncResult, UnreadCounts, UserFolder, View, DragFiles, FolderUnread } from "./api";
+import type { Account, CheckFailure, CheckStep, Detection, FailKind, Contact, Draft, FlushReport, MailDelta, MessagePage, OutboxItem, QueueStatus, Provider, OauthConfig, OauthConfigView, MessageDetail, MessageSummary, NewAccount, OutAttachment, Role, ScheduledEdit, SendReport, Settings, StoredDraft, SyncResult, UnreadAll, UserFolder, View, DragFiles, FolderUnread } from "./api";
 import { parseRules, type ScheduledItem } from "./productivity";
 import { parseBox, parseCat } from "./views";
 
@@ -139,6 +139,34 @@ try { settings = { ...settings, ...JSON.parse(localStorage.getItem(SETTINGS_KEY)
 
 // Pastas do usuário de exemplo (separador "/"), com duas mensagens na subpasta.
 let userFolders: UserFolder[] = ["Clientes", "Clientes/Lumen", "Clientes/Lumen/Obras", "Projetos"].map((name) => ({ account: accounts[0].id, name, delimiter: "/" }));
+
+/** `?contas=5` no endereço acrescenta 3 contas (com mensagens e pastas) e `?contas=1` deixa só a primeira, para testar a navegação; o padrão segue com 2. */
+const mockContas = typeof location !== "undefined" ? new URLSearchParams(location.search).get("contas") : null;
+if (mockContas === "1") {
+  accounts = accounts.slice(0, 1);
+  messages = messages.filter((m) => m.account === accounts[0].id);
+}
+if (mockContas === "5") {
+  const more: [string, string, string, string][] = [
+    ["imap.gmail.com", "renan@gmail.com", "Renan (Gmail)", "Pessoal"],
+    ["imap.betinhos.com.br", "financeiro@betinhos.com.br", "Financeiro", "Boletos"],
+    ["imap.betinhos.com.br", "marketing@betinhos.com.br", "Marketing", "Campanhas"],
+  ];
+  more.forEach(([host, username, name, folder], k) => {
+    const id = `${username.split("@")[0]}@${host}`;
+    accounts.push({ id, host, port: 993, security: "tls", username, name });
+    userFolders.push({ account: id, name: folder, delimiter: "/" });
+    for (let i = 0; i < 4; i++) {
+      const [from_name, from_addr, subject, body, hoursAgo] = seed[(k * 3 + i) % seed.length];
+      const mid = 5000 + k * 10 + i;
+      messages.push({
+        id: mid, account: id, uid: mid, from_name, from_addr, subject, date: now - Math.round((hoursAgo + k) * H),
+        snippet: body.slice(0, 200), body_text: `${body}\n\n${from_name.split(" ")[0]}`, body_html: "",
+        seen: i === 3, flagged: i === 1, reply_addr: from_addr, attachments: [], to_addrs: username, cc_addrs: "", role: "inbox", thread_id: 0,
+      });
+    }
+  });
+}
 messages.filter((m) => m.id === 1 || m.id === 5).forEach((m) => { m.role = null; m.box = "Clientes/Lumen"; });
 const inTree = (m: MockMessage, name: string) => !!m.box && (m.box === name || m.box.startsWith(`${name}/`));
 const leaf = (name: string) => {
@@ -665,9 +693,13 @@ export const mockApi = {
     messages.forEach((m) => { if (ids.includes(m.id)) m.flagged = flagged; });
     queue(ids.length);
   },
-  async unreadCounts(): Promise<UnreadCounts> {
-    const out: UnreadCounts = {};
-    for (const m of messages) if (!m.seen && m.role && !snoozed(m)) out[m.role] = (out[m.role] ?? 0) + 1;
+  async unreadCounts(): Promise<UnreadAll> {
+    const out: UnreadAll = {};
+    for (const m of messages) {
+      if (m.seen || !m.role || snoozed(m)) continue;
+      const own = (out[m.account] ??= {});
+      own[m.role] = (own[m.role] ?? 0) + 1;
+    }
     return out;
   },
   async forwardAttachments(id: number): Promise<OutAttachment[]> {

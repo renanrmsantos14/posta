@@ -3,6 +3,8 @@ import { ArrowBendUpLeft, ArrowBendDoubleUpLeft, ArrowBendUpRight, ArrowsClockwi
 import { api, isTauri, type Account, type Attachment, type MailDelta, type MessageDetail, type MessageSummary, type OutAttachment, type OutboxItem, type Role, type Settings, type StoredDraft, type UnreadCounts, type UserFolder, type View } from "./api";
 import { AccountDialog } from "./AccountDialog";
 import { colorKey } from "./accountColors";
+import { accountColor, accountLabel, labelKey } from "./accountMeta";
+import { NavDrawer, useDrawer } from "./NavDrawer";
 import { parseCategories } from "./Categories";
 import { FolderDialog, type FolderDialogState } from "./FolderDialog";
 import { OutboxPane, useQueue } from "./Offline";
@@ -124,7 +126,13 @@ export default function App() {
   const [keep, setKeep] = useState(KEEP);
   const [serverTotal, setServerTotal] = useState<number | null>(null);
   const [loadingFolder, setLoadingFolder] = useState(true);
-  const [counts, setCounts] = useState<UnreadCounts>({});
+  /** Não lidas por conta (id) e papel de pasta: fonte única; o total por papel deriva daqui. */
+  const [acctCounts, setAcctCounts] = useState<Record<string, UnreadCounts>>({});
+  const counts = useMemo(() => {
+    const total: UnreadCounts = {};
+    for (const own of Object.values(acctCounts)) for (const [role, n] of Object.entries(own)) total[role as Role] = (total[role as Role] ?? 0) + (n ?? 0);
+    return total;
+  }, [acctCounts]);
   /** Seleção múltipla (checkbox / Shift+clique). */
   const [checked, setChecked] = useState<Set<number>>(new Set());
   const anchor = useRef<number | null>(null);
@@ -148,7 +156,7 @@ export default function App() {
   /** Caixa de saída: usa o mesmo painel dos rascunhos (`showDrafts` junto) para mostrar outra lista. */
   const [showOutbox, setShowOutbox] = useState(false);
   const [outbox, setOutbox] = useState<OutboxItem[]>([]);
-  /** Conta escolhida na barra lateral; null = todas as caixas juntas. */
+  /** Conta ativa: as pastas da seção de uma conta abrem só ela; null = visões de "Todas as contas". */
   const [accountFilter, setAccountFilter] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
   /** Mensagens do fio aberto (da mais antiga à mais nova), as já abertas por expansão e quais estão expandidas. */
@@ -185,7 +193,7 @@ export default function App() {
   const selectedRef = useRef<number | null>(null);
 
   const refreshCounts = useCallback(() => {
-    api.unreadCounts().then(setCounts).catch(() => {});
+    api.unreadCounts().then(setAcctCounts).catch(() => {});
     api.userFolderUnread().then((l) => setFolderUnread(new Map(l.map((x) => [folderKey(x), x.unread])))).catch(() => {});
   }, []);
   const { messages, setMessages, results, setResults, hasMore, freshIds, reload, loadPage, applyDelta, resetKnown } = useMessageList(folder, pendingMove, refreshCounts);
@@ -195,8 +203,9 @@ export default function App() {
 
   const grouped = settings.group !== "0";
   const shown = results ?? messages;
-  // "Todas as caixas" ignora o filtro de conta: é justamente a Entrada de todas juntas.
-  const byAccount = useMemo(() => (accountFilter && folder !== "all" ? shown.filter((m) => m.account === accountFilter) : shown), [shown, accountFilter, folder]);
+  /** Busca em "Todas as caixas": junta as contas mesmo com uma conta ativa. */
+  const searchAll = !!results && scope === "all" && (accounts?.length ?? 0) > 1;
+  const byAccount = useMemo(() => (accountFilter && !searchAll ? shown.filter((m) => m.account === accountFilter) : shown), [shown, accountFilter, searchAll]);
   /** Foco/Outros só na Caixa de entrada sem busca; a escolha da aba fica salva. */
   const tabsOn = folder === "inbox" && settings.focusTabs !== "0" && !results;
   const tab = settings["inbox:tab"] === "other" ? "other" : "focused";
@@ -228,21 +237,23 @@ export default function App() {
   const withThread = (ms: MessageSummary[]) => [...new Map(ms.flatMap((m) => rowOf.get(m.id)?.members ?? [m]).map((m) => [m.id, m])).values()];
   const checkedRows = useMemo(() => rows.filter((r) => checked.has(r.head.id)), [rows, checked]);
   const checkedList = useMemo(() => checkedRows.flatMap((r) => r.members), [checkedRows]);
-  /** Só a pasta real sincroniza com o servidor; "Com estrela", "Todas as caixas" e categorias são visões do banco local. */
+  /** Só a pasta real sincroniza com o servidor; "Com estrela", "all" (busca em todas as caixas) e categorias são visões do banco local. */
   const remote = !LOCAL_VIEWS.includes(folder) && !parseCat(folder);
-  /** "Todas as caixas" só existe com 2+ contas. */
-  const navFolders: (Role | "starred" | "all")[] = accounts && accounts.length > 1 ? ["all", ...folderList] : folderList;
-  const unreadOf = (r: Role | "starred" | "all") => (r === "all" ? counts.inbox : r !== "starred" && SHOWS_UNREAD.includes(r) ? counts[r] : 0);
-  /** Rótulo curto da conta na linha: a parte antes do @, ou o endereço inteiro se duas contas começam igual. */
-  const acctLabel = (id: string) => {
-    const a = accounts?.find((x) => x.id === id);
-    if (!a) return id;
-    const local = a.username.split("@")[0];
-    return accounts!.some((x) => x.id !== id && x.username.split("@")[0] === local) ? a.username : local;
-  };
+  const unreadOf = (r: Role | "starred") => (r !== "starred" && SHOWS_UNREAD.includes(r) ? counts[r] : 0);
+  const multi = (accounts?.length ?? 0) > 1;
+  /** Apelido da conta (configuração `label:<id>`) ou o padrão; cor própria ou da paleta. */
+  const acctMeta = useMemo(
+    () => new Map((accounts ?? []).map((a) => [a.id, { label: accountLabel(accounts, a.id, settings), color: accountColor(accounts, a.id, settings) }])),
+    [accounts, settings],
+  );
+  const acctLabel = (id: string) => acctMeta.get(id)?.label ?? id;
+  const acctColor = (id: string) => acctMeta.get(id)?.color ?? accountColor(accounts, id, settings);
+  /** Conta de que a visão aberta faz parte: pastas do usuário pertencem a uma; as demais seguem a conta ativa. */
+  const scopeAccount = multi ? parseBox(folder)?.account ?? accountFilter : null;
   const categories = useMemo(() => parseCategories(settings.categories), [settings.categories]);
   const templates = useMemo(() => parseTemplates(settings.templates), [settings.templates]);
-  const tree = useMemo(() => folderTree(userFolders.filter((f) => !accountFilter || f.account === accountFilter)), [userFolders, accountFilter]);
+  const fullTree = useMemo(() => folderTree(userFolders), [userFolders]);
+  const tree = useMemo(() => (accountFilter ? fullTree.filter((f) => f.account === accountFilter) : fullTree), [fullTree, accountFilter]);
   const info = viewInfo(folder, userFolders, categories);
   const density: Density = settings.density === "compact" || settings.density === "comfortable" ? settings.density : "medium";
   const favorites = useMemo<View[]>(() => {
@@ -250,10 +261,10 @@ export default function App() {
     try { if (settings.favorites) raw = JSON.parse(settings.favorites); } catch { /* valor inválido: volta ao padrão */ }
     const list = Array.isArray(raw) ? (raw.filter((v) => typeof v === "string") as View[]) : DEFAULT_FAVORITES;
     return list.filter((v) =>
-      Object.hasOwn(FOLDERS, v) ? navFolders.includes(v as Role | "starred" | "all")
+      Object.hasOwn(FOLDERS, v) ? folderList.includes(v as Role | "starred")
         : parseBox(v) ? userFolders.some((f) => boxView(f.account, f.name) === v)
         : parseCat(v) ? categories.some((c) => catView(c.id) === v) : false);
-  }, [settings.favorites, navFolders, userFolders, categories]);
+  }, [settings.favorites, folderList, userFolders, categories]);
 
   const current = visible.find((m) => m.id === selectedId) ?? null;
   const pane = settings.pane === "bottom" || settings.pane === "off" ? settings.pane : "right";
@@ -273,12 +284,20 @@ export default function App() {
   const canTrash = (m: MessageSummary) => m.role === "trash" || folderList.includes("trash");
 
   /** Ajusta o contador na hora; `refreshCounts` confere com o banco depois. */
-  const bumpCounts = (ms: MessageSummary[], delta: number) =>
-    setCounts((c) => {
+  const bumpCounts = (ms: MessageSummary[], delta: number) => {
+    // Soma os deltas por conta e papel antes de copiar o estado: um único setState por lote.
+    const by = new Map<string, number>();
+    for (const m of ms) if (m.role) by.set(`${m.account}\u0000${m.role}`, (by.get(`${m.account}\u0000${m.role}`) ?? 0) + delta);
+    setAcctCounts((c) => {
       const next = { ...c };
-      for (const m of ms) if (m.role) next[m.role] = Math.max(0, (next[m.role] ?? 0) + delta);
+      for (const [k, d] of by) {
+        const [account, role] = k.split("\u0000") as [string, Role];
+        const own = (next[account] = { ...next[account] });
+        own[role] = Math.max(0, (own[role] ?? 0) + d);
+      }
       return next;
     });
+  };
 
   const syncFolder = useCallback(async (view: View, window: number) => {
     const r = await api.syncFolder(view, window);
@@ -488,8 +507,7 @@ export default function App() {
   openTarget.current = async (t) => {
     setQuery("");
     setResults(null);
-    setAccountFilter((accounts?.length ?? 0) > 1 ? t.account : null);
-    openFolder(t.folder);
+    navigate(t.folder, t.account);
     if (t.id == null) return;
     const d = await api.open(t.id).catch(() => null);
     if (d && d.account === t.account && d.role === roleOf(t.folder)) return select(t.id);
@@ -534,10 +552,12 @@ export default function App() {
   }, [selectedId, grouped, threadCount]);
   useEffect(() => { setBodies({}); setExpanded(new Set()); }, [selectedId]);
 
-  // Com a conta removida só resta uma caixa: a visão unificada deixa de existir.
-  useEffect(() => { if (folder === "all" && accounts && accounts.length < 2) openFolder("inbox"); });
+  // Com a conta removida só resta uma caixa: não há mais conta ativa.
+  useEffect(() => { if (accounts && accounts.length < 2 && accountFilter) setAccountFilter(null); }, [accounts, accountFilter]);
 
   function openFolder(role: View) {
+    // "all" (visão antiga de todas as caixas) agora é a Entrada sem conta ativa.
+    if (role === "all") role = "inbox";
     setShowDrafts(false);
     setShowScheduled(false);
     setShowOutbox(false);
@@ -554,6 +574,18 @@ export default function App() {
     setLoadingFolder(true);
     setFolder(role);
   }
+
+  /** Abre a visão na conta ativa `account` (null = todas as contas). Pastas do usuário trazem a própria conta. */
+  function navigate(view: View, account: string | null = null) {
+    const acc = multi ? parseBox(view)?.account ?? account : null;
+    setAccountFilter(acc);
+    if (acc && settings["rail:account"] !== acc) changeSetting("rail:account", acc);
+    openFolder(view);
+  }
+  /** Seção de conta aberta na barra lateral (uma por vez, guardada como as outras preferências). */
+  const openAccount = accounts?.some((a) => a.id === settings["rail:account"]) ? settings["rail:account"] : null;
+  const drawer = useDrawer();
+  const menuRef = useRef<HTMLButtonElement>(null);
 
   const remember = (d: MessageDetail) => {
     const c = detailCache.current;
@@ -811,13 +843,16 @@ export default function App() {
   }
 
   /** Alvo de soltar mensagens arrastadas da lista; a pasta aberta não é alvo (o hit-test lê `data-drop-view`). */
-  function dropProps(key: string, view: View): Record<string, unknown> {
+  function dropProps(key: string, view: string): Record<string, unknown> {
     if (view === folder || showDrafts || showScheduled) return {};
     return { "data-drop-view": view, "data-drop": dropKey === key || undefined };
   }
 
   /** Destino de soltar sobre `view`, ou null quando nenhuma das mensagens arrastadas poderia ir para lá. */
   function destOf(view: string, ms: MessageSummary[]): Dest | null {
+    // Pasta da seção de uma conta (`papel|conta`): só recebe mensagens daquela conta.
+    const sep = view.indexOf("|");
+    if (sep >= 0) return ms.every((m) => m.account === view.slice(sep + 1)) ? destOf(view.slice(0, sep), ms) : null;
     const box = parseBox(view as View);
     if (box) return ms.some((m) => m.account === box.account) ? { account: box.account, name: box.name, label: viewInfo(view as View, userFolders, categories).label } : null;
     return Object.hasOwn(FOLDERS, view) && view !== "starred" && view !== "all" && ms.some((m) => m.role !== view) ? (view as Role) : null;
@@ -897,7 +932,7 @@ export default function App() {
   async function removeAccount(id: string) {
     await api.removeAccount(id);
     setAccounts((l) => (l ?? []).filter((a) => a.id !== id));
-    setSettings((s) => Object.fromEntries(Object.entries(s).filter(([k]) => k !== `signature:${id}` && k !== colorKey(id))));
+    setSettings((s) => Object.fromEntries(Object.entries(s).filter(([k]) => k !== `signature:${id}` && k !== colorKey(id) && k !== labelKey(id))));
     setAccountFilter((f) => (f === id ? null : f));
     setSelectedId(null);
     setDetail(null);
@@ -1548,10 +1583,31 @@ export default function App() {
 
   const inList = !showDrafts && !showScheduled;
   const folderTabs = (
-    <FolderTabs navFolders={navFolders} tree={tree} categories={categories} userFolders={userFolders} folder={folder} inList={inList}
+    <FolderTabs navFolders={folderList} tree={tree} categories={categories} userFolders={userFolders} folder={folder} inList={inList}
       showDrafts={showDrafts} showScheduled={showScheduled} showOutbox={showOutbox} outbox={net.outbox}
       onOpen={openFolder} onDrafts={openDrafts} onScheduled={openScheduled} onOutbox={openOutbox} />
   );
+  /** Rascunhos, Agendados e Caixa de saída são de todas as contas: abrem sem conta ativa. */
+  const inAll = (run: () => void) => () => { setAccountFilter(null); run(); };
+  /** A mesma Rail serve de barra lateral (desktop) e de gaveta (celular). */
+  const rail = (variant?: "drawer") => (
+    <Rail variant={variant} onNavigate={variant ? drawer.hide : undefined}
+      navFolders={folderList} favorites={favorites} folder={folder} inList={inList}
+      unread={(v) => (Object.hasOwn(FOLDERS, v) ? (unreadOf(v as Role | "starred") ?? 0) : 0)}
+      unreadIn={(account, v) => (SHOWS_UNREAD.includes(v as Role) ? acctCounts[account]?.[v as Role] ?? 0 : 0)}
+      open={navigate} drop={dropProps} openMap={openMap} onToggleFolder={toggleFolder} folderUnread={folderUnread} hoverView={dropKey}
+      onContext={folderContext} userFolders={userFolders} categories={categories} tree={fullTree} accounts={accounts}
+      accountFilter={accountFilter} acctLabel={acctLabel} acctColor={acctColor}
+      openAccount={openAccount} onOpenAccount={(id) => changeSetting("rail:account", id ?? "")}
+      drafts={drafts.length} scheduled={scheduled.length} outbox={net.outbox} showDrafts={showDrafts} showScheduled={showScheduled} showOutbox={showOutbox}
+      openDrafts={inAll(openDrafts)} openScheduled={inAll(openScheduled)} openOutbox={inAll(openOutbox)}
+      onNewFolder={(parent, account) => setFolderDialog({ mode: "create", account: parent?.account ?? account ?? accountFilter ?? undefined, parent: parent?.name })}
+      onRenameFolder={(node) => setFolderDialog({ mode: "rename", node })} onDeleteFolder={askDeleteFolder}
+      onAddAccount={() => setDialog(true)} />
+  );
+  /** Antes do título da lista: `Apelido ›` ou `Todas as contas ›` (só com várias contas). */
+  const listScopeId = showDrafts || showScheduled ? accountFilter : scopeAccount;
+  const listScope = multi ? (listScopeId ? { label: acctLabel(listScopeId), color: acctColor(listScopeId) } : { label: "Todas as contas" }) : undefined;
   const pickTab = (t: "focused" | "other") => changeSetting("inbox:tab", t);
 
   return (
@@ -1561,24 +1617,16 @@ export default function App() {
       <TopBar query={query} onQuery={setQuery} searchRef={searchRef} folderLabel={info.label} scope={scope}
         canScopeAll={(accounts?.length ?? 0) > 1} onScope={setScope} onFilter={(token) => setQuery(addFilter(query, token))}
         net={net} syncing={syncing} canSync={!!accounts?.length} onSync={() => void sync(true)}
+        onMenu={drawer.show} menuRef={menuRef} menuOpen={drawer.open}
         onAddAccount={() => setDialog(true)} onSettings={() => setSettingsOpen(true)} />
       <CommandBar cmds={cmds} />
 
       <RouteLayout>
-        <Rail navFolders={navFolders} favorites={favorites} folder={folder} inList={inList} unread={(v) => (Object.hasOwn(FOLDERS, v) ? (unreadOf(v as Role | "starred" | "all") ?? 0) : 0)}
-          open={openFolder}
-          drop={dropProps} openMap={openMap} onToggleFolder={toggleFolder} folderUnread={folderUnread} hoverView={dropKey}
-          onContext={folderContext} userFolders={userFolders} categories={categories} tree={tree} accounts={accounts} settings={settings}
-          accountFilter={accountFilter} onAccountFilter={(id) => { setAccountFilter(id); if (id && folder === "all") openFolder("inbox"); }}
-          drafts={drafts.length} scheduled={scheduled.length} outbox={net.outbox} showDrafts={showDrafts} showScheduled={showScheduled} showOutbox={showOutbox}
-          openDrafts={openDrafts} openScheduled={openScheduled} openOutbox={openOutbox}
-          onNewFolder={(parent) => setFolderDialog({ mode: "create", account: parent?.account ?? accountFilter ?? undefined, parent: parent?.name })}
-          onRenameFolder={(node) => setFolderDialog({ mode: "rename", node })} onDeleteFolder={askDeleteFolder}
-          onAddAccount={() => setDialog(true)} />
+        {rail()}
 
         <PageLayout area="list" aria-label="Lista de mensagens">
           {folderTabs}
-          <ListHead title={showScheduled ? "Agendados" : showOutbox ? "Caixa de saída" : showDrafts ? "Rascunhos" : info.label}
+          <ListHead scope={listScope} title={showScheduled ? "Agendados" : showOutbox ? "Caixa de saída" : showDrafts ? "Rascunhos" : info.label}
             tabsOn={tabsOn && inList} tab={tab} unread={tabUnread} onTab={pickTab} />
           {checkedList.length > 0 && (
             <BulkBar rows={rows} checkedRows={checkedRows} checked={checkedList} categories={categories}
@@ -1615,7 +1663,7 @@ export default function App() {
             <div className="empty quiet"><p>{loadingFolder ? "Carregando…" : tabsOn ? (tab === "focused" ? "Nada em Foco. Veja a aba Outros." : "Nada em Outros.") : info.empty}</p></div>
           ) : (
             <MessageList ref={listRef} rows={rows} grouped={grouped} density={density} selectedId={selectedId} checked={checked}
-              fresh={freshIds} dragIds={dragIds} popId={popId} showAcct={folder === "all"} acctLabel={acctLabel} categories={categories}
+              fresh={freshIds} dragIds={dragIds} popId={popId} showAcct={multi && (!scopeAccount || searchAll)} acctLabel={acctLabel} acctColor={acctColor} categories={categories}
               intro={intro} byDate={!results} label="Mensagens" canArchive={canArchive} canTrash={canTrash}
               onOpen={(e, m) => { if (!justSwiped()) onRowClick(e, m); }} onCheck={toggleCheck} onStar={(row) => toggleStar(row.members)}
               onContext={rowContext}
@@ -1668,6 +1716,7 @@ export default function App() {
           )}
         </ReaderPane>
       </RouteLayout>
+      <NavDrawer open={drawer.open} onClose={drawer.hide} returnFocus={menuRef}>{() => rail("drawer")}</NavDrawer>
 
       {dialog && (
         <AccountDialog
@@ -1682,8 +1731,7 @@ export default function App() {
           }}
           onDone={(a) => {
             setSettingsOpen(false);
-            setAccountFilter((accounts?.length ?? 0) > 1 ? a.id : null);
-            openFolder("inbox");
+            navigate("inbox", a.id);
           }}
         />
       )}

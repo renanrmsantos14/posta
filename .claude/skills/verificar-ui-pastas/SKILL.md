@@ -12,7 +12,7 @@ description: Verifica a UI de pastas (criar, renomear, excluir, arrastar), categ
    - `#` na entrada manda para Lixeira; `#` na Lixeira abre "Excluir de vez?" (foco em Cancelar, Esc fecha, Excluir remove).
    - Mover mensagem com assunto "fatura" falha no mock: ela volta e aparece toast de erro.
    - Faixa `.cmdbar` em uma linha a 1280 px; a 390 px a faixa some e `.actions.mobile-actions` fica em uma linha, sem divisória curva solta (na Lixeira).
-   - Rail: o contador `.count` não cruza o ícone (compare `getBoundingClientRect` de `.count` e do `svg` em 1280 e em 1024, modo estreito) e fica dentro da `.rail`; Favoritos e contas aparecem.
+   - Rail: o contador `.count` não cruza o ícone (compare `getBoundingClientRect` de `.count` e do `svg` em 1280 e em 1024, modo estreito) e fica dentro da `.rail`; Favoritos e contas aparecem. Com 2+ contas as pastas ficam dentro da seção de cada conta (acordeão); navegação multiconta em `verificar-ui-multiconta`.
    - Console sem erro nem aviso.
 4. Pastas, categorias e conta (1360x860), no mock:
    - Barra mostra Pastas (Clientes, subpasta Lumen) e Categorias (Trabalho, Pessoal, Importante).

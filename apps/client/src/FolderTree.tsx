@@ -1,7 +1,7 @@
 // Barra lateral: pastas do usuário (com subpastas, ações e alvo de soltar) e categorias.
 import { Fragment, useEffect } from "react";
 import { CaretDown, CaretRight, FolderSimple, PencilSimple, Plus, Trash } from "@phosphor-icons/react";
-import type { Account, Category, View } from "./api";
+import type { Category, View } from "./api";
 import { descendants, folderKey, isFolderOpen, visibleFolders, type FolderNode, type OpenMap } from "./folders";
 import { boxView, catView } from "./views";
 import { CategoryDot } from "./Categories";
@@ -10,9 +10,6 @@ export type DropProps = Record<string, unknown>;
 
 interface Props {
   nodes: FolderNode[];
-  accounts: Account[];
-  /** Mostra o nome da conta acima das pastas dela (várias contas, sem filtro). */
-  byAccount: boolean;
   categories: Category[];
   folder: View;
   inList: boolean;
@@ -30,12 +27,14 @@ interface Props {
   unread: Map<string, number>;
   /** Pasta sob o ponteiro durante um arrasto: se estiver fechada, abre depois de um instante. */
   hoverView: string | null;
+  /** Só as pastas ou só as categorias (a Rail com várias contas repete as pastas por conta e mostra as categorias uma vez). */
+  section?: "folders" | "categories";
 }
 
 /** Quanto o ponteiro precisa ficar sobre uma pasta fechada, arrastando, para ela abrir. */
 const HOVER_OPEN_MS = 600;
 
-export function FolderTree({ nodes, accounts, byAccount, categories, folder, inList, open, drop, onContext, onNew, onRename, onDelete, openMap, onToggle, unread, hoverView }: Props) {
+export function FolderTree({ nodes, categories, folder, inList, open, drop, onContext, onNew, onRename, onDelete, openMap, onToggle, unread, hoverView, section }: Props) {
   useEffect(() => {
     if (!hoverView) return;
     const i = nodes.findIndex((n) => boxView(n.account, n.name) === hoverView);
@@ -46,7 +45,7 @@ export function FolderTree({ nodes, accounts, byAccount, categories, folder, inL
 
   return (
     <>
-      <div className="rail-section" aria-label="Pastas">
+      {section !== "categories" && <div className="rail-section" aria-label="Pastas">
         <div className="rail-head">
           <div className="rail-label">Pastas</div>
           <button type="button" className="icon-btn" aria-label="Nova pasta" title="Nova pasta" onClick={() => onNew()}>
@@ -62,12 +61,8 @@ export function FolderTree({ nodes, accounts, byAccount, categories, folder, inL
           // Fechada, a pasta mostra o total dela e de tudo que está dentro.
           let count = unread.get(folderKey(n)) ?? 0;
           if (kids && !isOpen) for (let j = i + 1; j <= i + kids; j++) count += unread.get(folderKey(nodes[j])) ?? 0;
-          const prev = nodes[i - 1];
           return (
             <Fragment key={folderKey(n)}>
-              {byAccount && n.account !== prev?.account && (
-                <div className="rail-sub">{accounts.find((a) => a.id === n.account)?.username ?? n.account}</div>
-              )}
               <div className="folder-row" style={{ "--depth": n.depth } as React.CSSProperties}>
                 {kids > 0 && (
                   <button type="button" className="folder-caret" tabIndex={-1} aria-label={`${isOpen ? "Recolher" : "Expandir"} ${n.leaf}`}
@@ -103,9 +98,9 @@ export function FolderTree({ nodes, accounts, byAccount, categories, folder, inL
             </Fragment>
           );
         })}
-      </div>
+      </div>}
 
-      {categories.length > 0 && (
+      {section !== "folders" && categories.length > 0 && (
         <div className="rail-section" aria-label="Categorias">
           <div className="rail-label">Categorias</div>
           {categories.map((c) => {

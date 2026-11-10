@@ -33,6 +33,7 @@ interface Props {
   popId: number | null;
   showAcct: boolean;
   acctLabel: (id: string) => string;
+  acctColor: (id: string) => string;
   categories: Category[];
   intro: boolean;
   /** Agrupar por data (some em busca ou ordenação por relevância). */
@@ -71,11 +72,13 @@ interface RowProps {
   pop: boolean;
   /** Rótulo da conta (visão "todas as contas") ou null. */
   acct: string | null;
+  /** Cor da conta (faixa lateral) junto do rótulo. */
+  acctColor: string | undefined;
   category: Category | undefined;
 }
 
 /** Uma linha. Memoizada: ao rolar, as linhas que continuam na janela não são recriadas (só entram as novas). */
-const RowView = memo(function RowView({ item: it, rowH, live, setFocusId, grouped, tab0, open, fresh, checked, dragging, pop, acct, category }: RowProps) {
+const RowView = memo(function RowView({ item: it, rowH, live, setFocusId, grouped, tab0, open, fresh, checked, dragging, pop, acct, acctColor, category }: RowProps) {
   const { row } = it;
   const m = row.head;
   const unread = row.members.some((x) => !x.seen);
@@ -91,7 +94,7 @@ const RowView = memo(function RowView({ item: it, rowH, live, setFocusId, groupe
     <div id={`opt-${m.id}`} data-rid={m.id} role="option" aria-selected={open} tabIndex={tab0 ? 0 : -1}
       className="row" style={{ top: it.top, height: rowH, "--i": Math.min(it.index, 12) } as React.CSSProperties}
       data-unread={unread || undefined} data-fresh={fresh || undefined} data-checked={checked || undefined}
-      data-dragging={dragging || undefined}
+      data-dragging={dragging || undefined} data-acct-color={acctColor}
       onFocus={() => setFocusId(m.id)}
       onContextMenu={(e) => { e.preventDefault(); live.current!.onContext(e.clientX, e.clientY, row); }}
       onKeyDown={(e) => {
@@ -265,7 +268,7 @@ export const MessageList = forwardRef<ListHandle, Props>(function MessageList(p,
             <RowView key={it.key} item={it} rowH={rowH} live={live} setFocusId={setFocusId} grouped={p.grouped}
               tab0={zeroId === id} open={row.members.some((x) => x.id === p.selectedId)} fresh={p.fresh.has(id)} checked={p.checked.has(id)}
               dragging={row.members.some((x) => p.dragIds.has(x.id))} pop={p.popId === id}
-              acct={p.showAcct ? p.acctLabel(row.head.account) : null} category={p.categories.find((c) => c.id === row.head.category)} />
+              acct={p.showAcct ? p.acctLabel(row.head.account) : null} acctColor={p.showAcct ? p.acctColor(row.head.account) : undefined} category={p.categories.find((c) => c.id === row.head.category)} />
           );
         })}
       </div>
