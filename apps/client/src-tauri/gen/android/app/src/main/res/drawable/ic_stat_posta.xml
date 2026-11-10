@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Ícone da barra de status para as notificações (só a opacidade conta; o Android pinta). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24">
+    <group android:scaleX="0.0347" android:scaleY="0.0347" android:translateX="-6.5992" android:translateY="-5.2112">
+        <path android:pathData="M272,368h480v304H272z" android:strokeColor="#FFFFFF" android:strokeWidth="56" android:strokeLineJoin="round" />
+        <path android:pathData="M272,368l240,176 240,-176" android:strokeColor="#FFFFFF" android:strokeWidth="56" android:strokeLineJoin="round" android:strokeLineCap="round" />
+        <path android:pathData="M680,368a72,72 0,1 0,144 0a72,72 0,1 0,-144 0z" android:fillColor="#FFFFFF" />
+    </group>
+</vector>

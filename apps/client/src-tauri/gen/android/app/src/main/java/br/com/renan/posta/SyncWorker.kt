@@ -80,7 +80,7 @@ class SyncWorker(context: Context, params: WorkerParameters) : Worker(context, p
     }
     val pending = PendingIntent.getActivity(ctx, 0, open, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
     val notification = NotificationCompat.Builder(ctx, CHANNEL)
-      .setSmallIcon(ctx.applicationInfo.icon)
+      .setSmallIcon(R.drawable.ic_stat_posta)
       .setContentTitle(title)
       .setContentText(body)
       .setContentIntent(pending)

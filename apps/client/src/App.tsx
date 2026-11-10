@@ -32,6 +32,7 @@ import { CommandBar } from "./CommandBar";
 import { buildCommands, hiddenTools } from "./commands";
 import { Rail } from "./Rail";
 import { MobileActions } from "./MobileActions";
+import { Fab, useHideOnScroll } from "./Fab";
 import { BulkBar, FolderTabs, ListHead } from "./ListParts";
 import { ReaderPane, splitAddrs } from "./ReaderPane";
 import { MessageList, type Density, type ListHandle, type ListRow } from "./MessageList";
@@ -175,6 +176,7 @@ export default function App() {
   /** Fantasma que segue o ponteiro (contagem; "+" quando Ctrl copia) e a posição dele, fora do estado. */
   const [ghost, setGhost] = useState<{ count: number; copy: boolean; label: string } | null>(null);
   const ghostEl = useRef<HTMLDivElement | null>(null);
+  const fab = useHideOnScroll();
   const ghostPos = useRef({ x: 0, y: 0 });
   /** Não lidas por pasta do usuário (chave de `folderKey`). */
   const [folderUnread, setFolderUnread] = useState<Map<string, number>>(new Map());
@@ -1682,7 +1684,7 @@ export default function App() {
               intro={intro} byDate={!results} label="Mensagens" canArchive={canArchive} canTrash={canTrash}
               onOpen={(e, m) => { if (!justSwiped()) onRowClick(e, m); }} onCheck={toggleCheck} onStar={(row) => toggleStar(row.members)}
               onContext={rowContext}
-              onDragStart={startRowDrag} onDouble={() => setFull(true)} onNearEnd={() => void loadMore()}
+              onDragStart={startRowDrag} onDouble={() => setFull(true)} onNearEnd={() => void loadMore()} onScrollTop={fab.onScroll}
               swipe={(row) => swipeProps(swipeAction, (dir) => swipeRow(row, dir))}
               tools={{
                 archive: (row) => archive(withThread(row.members)),
@@ -1781,9 +1783,7 @@ export default function App() {
           onSearch={(addr) => { setQuery(`de:${addr}`); if (window.matchMedia("(max-width: 720px)").matches) setReaderOpen(false); }} />
       )}
       {!compose && !dialog && !settingsOpen && !update && (
-        <button className="fab mobile-only" onClick={() => writeNew()} aria-label="Escrever">
-          <NotePencil size={22} weight="bold" />
-        </button>
+        <Fab fabRef={fab.ref} onClick={() => writeNew()} />
       )}
       {ghost && <DragGhost elRef={ghostEl} pos={ghostPos} count={ghost.count} copy={ghost.copy} label={ghost.label} />}
       <Toaster />

@@ -49,6 +49,7 @@ interface Props {
   onDragStart: (e: React.PointerEvent, row: ListRow) => void;
   onDouble: () => void;
   onNearEnd: () => void;
+  onScrollTop: (y: number) => void;
   swipe: (row: ListRow) => Record<string, unknown>;
   tools: { archive: (row: ListRow) => void; remove: (row: ListRow) => void; toggleRead: (row: ListRow) => void; pin: (row: ListRow) => void };
   /** Quantas linhas aparecem de cada vez (para os testes de carga). */
@@ -199,10 +200,14 @@ export const MessageList = forwardRef<ListHandle, Props>(function MessageList(p,
   useEffect(() => { p.onRendered?.(visible.length); });
 
   const raf = useRef(0);
+  // Sem lista (pasta vazia, Rascunhos, Agendados) não há rolagem para trazer o Escrever de volta.
+  const { onScrollTop } = p;
+  useEffect(() => () => onScrollTop(0), [onScrollTop]);
   const onScroll = (e: React.UIEvent<HTMLDivElement>) => {
     const el = e.currentTarget;
     cancelAnimationFrame(raf.current);
     raf.current = requestAnimationFrame(() => setScroll(el.scrollTop));
+    p.onScrollTop(el.scrollTop);
     if (el.scrollHeight - el.scrollTop - el.clientHeight < 600) p.onNearEnd();
   };
 

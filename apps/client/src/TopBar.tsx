@@ -90,7 +90,7 @@ export function TopBar(p: Props) {
         <button type="button" className="icon-btn" onClick={p.onSync} aria-label="Sincronizar" title="Sincronizar" data-busy={p.syncing || undefined} disabled={!p.canSync}>
           <ArrowsClockwise size={16} weight="bold" className="sync-icon" />
         </button>
-        <button type="button" className="icon-btn" onClick={p.onAddAccount} aria-label="Adicionar conta" title="Adicionar conta">
+        <button type="button" className="icon-btn add-account" onClick={p.onAddAccount} aria-label="Adicionar conta" title="Adicionar conta">
           <Plus size={16} weight="bold" />
         </button>
         <button type="button" className="icon-btn" onClick={p.onSettings} aria-label="Configurações" title="Configurações">
