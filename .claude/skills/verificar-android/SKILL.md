@@ -14,7 +14,8 @@ Sem Android SDK local: a prova do build é o CI.
 5. Segredo: `src-tauri/src/secret.rs` usa `keyring` fora do Android e `android-native-keyring-store` no Android. Nunca imprima senhas.
 6. R8 (release): construtores usados por reflexão precisam de keep em `gen/android/app/proguard-rules.pro`. Prova no APK do CI: `unzip -o <apk> 'classes*.dex'`, `~/Android/Sdk/build-tools/34.0.0/dexdump classes*.dex` e confira que `Landroidx/work/impl/WorkDatabase_Impl;` tem método `<init>` (sem ele o app fecha ao abrir com `NoSuchMethodException`).
 7. TLS: `SSL_CERT_DIR` precisa ser uma pasta só (`android_cert_dir()` em `lib.rs`, chamada no `run()` e no `SyncWorker`). O `imap` usa `rustls-native-certs` 0.7, que não aceita lista com `:`; com lista, o IMAP fica sem raiz e toda conta falha em "Conectando ao servidor" com certificado não confiável.
-8. `ndk-context` é global e só aceita uma inicialização por processo (`assert` fecha o app). Só a Activity (tao) e `nativeInit` do `SyncWorker` registram, sempre sob `SyncWorker.CONTEXT_LOCK`; não volte a segurar o contexto durante a sincronização.
+8. Área segura: a WebView do Android devolve 0 em `env(safe-area-inset-*)` com edge-to-edge. A `MainActivity` mede as barras do sistema e o teclado (`ViewCompat.setOnApplyWindowInsetsListener`) e expõe `window.PostaInsets.get()` + evento `posta-insets`; `src/safeArea.ts` grava `--sa-top/right/bottom/left`. No aparelho: a busca não fica sob a barra de status e o Enviar não fica sob o teclado.
+9. `ndk-context` é global e só aceita uma inicialização por processo (`assert` fecha o app). Só a Activity (tao) e `nativeInit` do `SyncWorker` registram, sempre sob `SyncWorker.CONTEXT_LOCK`; não volte a segurar o contexto durante a sincronização.
 
 Limites: instalar o APK e testar o Keystore/TLS exige aparelho ou emulador (não disponível no CI); registre como não validado em dispositivo.
 

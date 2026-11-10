@@ -5,6 +5,7 @@ import "@fontsource-variable/geist-mono";
 import "@fontsource-variable/newsreader";
 import "./themes.css";
 import "./styles.css";
+import "./safeArea";
 import App from "./App";
 
 createRoot(document.getElementById("root")!).render(
