@@ -1,0 +1,48 @@
+# Retorno rápido em PR: testes do mail-core e typecheck do front, em paralelo.
+# O build do APK (bem mais lento) fica no workflow Android.
+name: CI
+
+on:
+  pull_request:
+    paths-ignore: ["**.md", "docs/**", ".claude/**"]
+  # No master só para gravar o cache que os PRs reaproveitam (cache de um PR não serve a outro).
+  push:
+    branches: [master]
+    paths-ignore: ["**.md", "docs/**", ".claude/**"]
+  workflow_dispatch:
+
+# Novo push no mesmo PR cancela a rodada anterior.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  mail-core:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: mail-core
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+      # Compila antes, para o tempo de teste aparecer separado no log.
+      - run: cargo test -p mail-core --no-run --locked
+      - run: cargo test -p mail-core --locked
+
+  front:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter client typecheck
