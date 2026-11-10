@@ -24,6 +24,8 @@ tauri-plugin-updater = "2.14.1"
 # Arrastar mensagens e anexos para fora da janela (arrasto nativo do sistema, arquivos reais).
 tauri-plugin-drag = "2"
 tauri-plugin-autostart = "2"
+# Uma só instância: abrir de novo traz a janela existente (sem ícones duplicados na bandeja).
+tauri-plugin-single-instance = "2"
 # Bandeja do sistema (ícone, menu e contagem de não lidas).
 tauri = { version = "2.12", features = ["tray-icon"] }
 

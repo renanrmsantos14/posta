@@ -1651,7 +1651,11 @@ pub fn run() {
         abort_if_event_loop_panics();
         android_cert_dir();
     }
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // Precisa ser o primeiro plugin: uma segunda abertura só mostra a janela da instância que já roda.
+    #[cfg(desktop)]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| tray::show_main(app)));
+    builder
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
