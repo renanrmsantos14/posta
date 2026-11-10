@@ -1377,7 +1377,7 @@ export default function App() {
   }
 
   // No desktop abre o diálogo com as novidades; no Android (APK) só um aviso discreto com "Atualizar".
-  const notified = useRef(""); // o aviso do APK é um toast: não repete a mesma versão (nem no StrictMode)
+  const notified = useRef(""); // a checagem roda a cada 2 min: não repete o aviso da mesma versão (nem no StrictMode)
   const showUpdate = useCallback((u: Update) => {
     if (!u.apkUrl) return setUpdate(u);
     toast(`Nova versão v${u.version} disponível`, "info", {
@@ -1389,21 +1389,27 @@ export default function App() {
     });
   }, []);
 
-  // Atualização: procura ao abrir e a cada 6 h, em silêncio; só avisa se houver versão nova não adiada.
+  // Atualização: procura ao abrir e a cada 2 min, em silêncio; só avisa se houver versão nova não adiada.
   useEffect(() => {
     const run = () => {
-      if (!autoCheck()) return;
+      // Em segundo plano não procura (poupa a cota da API do GitHub); ao voltar, procura na hora.
+      if (!autoCheck() || document.visibilityState === "hidden") return;
       checkUpdate()
         .then((u) => {
-          if (!u || u.version === skipped() || (u.apkUrl && u.version === notified.current)) return;
-          if (u.apkUrl) notified.current = u.version;
+          if (!u || u.version === skipped() || u.version === notified.current) return;
+          notified.current = u.version;
           showUpdate(u);
         })
         .catch((e) => console.warn("procurar atualização falhou:", e));
     };
     run();
     const timer = setInterval(run, CHECK_EVERY_MS);
-    return () => clearInterval(timer);
+    const onVisible = () => document.visibilityState === "visible" && run();
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
   }, [showUpdate]);
 
   // ---- Favoritos, menus de contexto e contato ----
