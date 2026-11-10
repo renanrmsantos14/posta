@@ -16,6 +16,7 @@
         "title": "Posta",
         "width": 1280,
         "height": 820,
+        "maximized": true,
         "minWidth": 360,
         "minHeight": 480,
         "dragDropEnabled": false
