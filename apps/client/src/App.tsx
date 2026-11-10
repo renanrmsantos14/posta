@@ -29,7 +29,7 @@ import { addFilter, hasFilters, parseTemplates, whenLabel, whenPresets, type Sch
 import { AppShell, RouteLayout, PageLayout } from "./layout/primitives";
 import { TopBar, type SearchScope } from "./TopBar";
 import { CommandBar } from "./CommandBar";
-import { buildCommands } from "./commands";
+import { buildCommands, hiddenTools } from "./commands";
 import { Rail } from "./Rail";
 import { MobileActions } from "./MobileActions";
 import { BulkBar, FolderTabs, ListHead } from "./ListParts";
@@ -1632,7 +1632,9 @@ export default function App() {
         net={net} syncing={syncing} canSync={!!accounts?.length} onSync={() => void sync(true)}
         onMenu={drawer.show} menuRef={menuRef} menuOpen={drawer.open}
         onAddAccount={() => setDialog(true)} onSettings={() => setSettingsOpen(true)} />
-      <CommandBar cmds={cmds} />
+      <CommandBar cmds={cmds} hidden={hiddenTools(settings.toolbarHidden)}
+        size={settings.toolbar === "s" || settings.toolbar === "l" ? settings.toolbar : "m"}
+        labels={settings.toolbarLabels === "always" || settings.toolbarLabels === "icons" ? settings.toolbarLabels : "auto"} />
 
       <RouteLayout>
         {rail()}

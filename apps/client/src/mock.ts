@@ -52,13 +52,15 @@ let messages: MockMessage[] = Array.from({ length: 60 }, (_, i) => {
   };
 });
 
-// Dois emails em HTML: um simples e outro com imagem remota (para a faixa "Mostrar imagens").
+// Emails em HTML: um simples, um com imagem remota (para a faixa "Mostrar imagens") e uma newsletter de largura fixa (ajuste à largura e zoom).
 const IMG = "https://placehold.co/560x180/png?text=Oferta+de+inverno";
 const htmlSamples: [string, string, string, string, string, number][] = [
   ["Café Origem", "contato@cafeorigem.com.br", "Seu pedido #4821 saiu para entrega", "Seu pedido saiu para entrega e chega amanhã entre 9h e 12h.",
     `<div style="font-family:Georgia,serif;max-width:560px;margin:0 auto;padding:16px"><h2 style="color:#5b3a1e">Pedido a caminho</h2><p>Olá, Renan! Seu pedido <b>#4821</b> saiu para entrega e chega amanhã entre <b>9h e 12h</b>.</p><table style="width:100%;border-collapse:collapse"><tr><td style="padding:6px 0;border-bottom:1px solid #eee">Café Santa Luzia 250 g</td><td style="text-align:right;border-bottom:1px solid #eee">R$ 38,00</td></tr><tr><td style="padding:6px 0">Frete</td><td style="text-align:right">R$ 12,00</td></tr></table><p><a href="https://example.com/rastreio">Acompanhar entrega</a></p></div>`, 1.2],
   ["Loja Norte", "ofertas@lojanorte.com.br", "Últimos dias: casacos com 40%", "Casacos, botas e cachecóis com até 40% de desconto.",
     `<div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto"><img src="${IMG}" width="560" alt="Oferta de inverno" style="display:block;width:100%"><div style="padding:16px"><h2 style="margin:0 0 8px">Frio chegou, desconto também</h2><p>Casacos, botas e cachecóis com até <b>40% de desconto</b> até domingo.</p><p><a href="https://example.com/ofertas" style="background:#111;color:#fff;padding:10px 16px;border-radius:6px;text-decoration:none">Ver ofertas</a></p></div></div>`, 3.5],
+  ["Boletim Rota", "news@boletimrota.com.br", "Novidades da semana: rotas, frota e agenda", "Tabela de 680 px fixos, como a maioria das newsletters.",
+    `<table width="680" cellpadding="0" cellspacing="0" style="width:680px;font-family:Arial,sans-serif;background:#f6f3ee"><tr><td style="padding:32px"><h1 style="margin:0 0 12px;font:600 28px Georgia,serif">Novidades da semana</h1><p style="font-size:16px;line-height:1.6">Esta newsletter tem largura fixa de 680 px. No painel estreito ela encolhe para caber, sem barra de rolagem lateral, e o zoom do leitor aumenta ou diminui a partir daí.</p><table width="616" style="width:616px"><tr><td width="300" style="padding:12px;background:#fff">Rotas novas para o aeroporto de Guarulhos.</td><td width="16"></td><td width="300" style="padding:12px;background:#fff">Agenda de manutenção da frota em dezembro.</td></tr></table></td></tr></table>`, 0.4],
 ];
 htmlSamples.forEach(([from_name, from_addr, subject, text, html, hoursAgo], i) => {
   const id = 1000 + i;

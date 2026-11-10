@@ -15,3 +15,5 @@ Onde está: tokens de cor em `apps/client/src/themes.css` (`[data-theme="id"]`, 
 6. Encerre o vite ao terminar e remova o `node_modules` do worktree se foi instalado só para isto.
 
 Armadilhas: toast saindo faz o axe medir cor em transição (o script espera o `.toast` sumir); `[data-theme-swap]` anima 200 ms ao trocar, então espere ~450 ms antes de medir.
+
+Pendência conhecida (axe 4.14): `label-content-name-mismatch` nos `.contact-chip` do leitor (`title` = endereço, texto = nome) aparece em "axe no app" e já existe no master; não é regressão de tema.
