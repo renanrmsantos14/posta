@@ -559,14 +559,17 @@ kbd {
 .draft-row .from { font-weight: 500; }
 .update-versions { margin: -6px 0 0; font: 13px/1 var(--mono); color: var(--muted); }
 .update-versions strong { color: var(--green); font-weight: 500; }
+.dialog.update { width: min(640px, 100%); max-height: calc(100dvh - 32px); }
 .update-notes {
-  margin: 0; padding: 12px 14px 12px 30px;
-  max-height: 220px; overflow: auto;
+  padding: 14px 16px; min-height: 0;
+  max-height: min(60dvh, 520px); overflow: auto;
   background: var(--bg); border: 1px solid var(--line); border-radius: 8px;
-  display: flex; flex-direction: column; gap: 6px;
+  display: flex; flex-direction: column; gap: 16px;
 }
+.update-notes h3 { margin: 0 0 6px; font: 500 12px/1 var(--mono); color: var(--muted); }
+.update-notes ul { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 6px; line-height: 1.45; }
 /* Novidades entram em cascata curta: uma vez por popup, não atrapalha. */
-.update-notes li { animation: row-in 260ms var(--ease-out) both; animation-delay: calc(80ms + var(--i) * 40ms); }
+.update-notes section { animation: row-in 260ms var(--ease-out) both; animation-delay: calc(80ms + var(--i) * 40ms); }
 .update-progress { display: flex; flex-direction: column; gap: 8px; }
 .update-progress .bar { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; }
 .update-progress .bar span {
