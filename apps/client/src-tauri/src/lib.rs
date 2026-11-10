@@ -529,15 +529,19 @@ fn search_starred(state: State<'_, AppState>, query: String) -> CmdResult<Vec<Me
     state.store.lock().unwrap().search_starred(&query, 200).map_err(err)
 }
 
-/// Não lidas por papel de pasta (chaves `inbox`, `sent`...), somando as contas.
+/// Não lidas por id de conta e papel de pasta (chaves `inbox`, `sent`...); a bandeja recebe a soma da Entrada.
 #[tauri::command]
-fn unread_counts(app: AppHandle, state: State<'_, AppState>) -> CmdResult<HashMap<String, u32>> {
-    let counts = state.store.lock().unwrap().unread_counts().map_err(err)?;
+fn unread_counts(app: AppHandle, state: State<'_, AppState>) -> CmdResult<HashMap<String, HashMap<String, u32>>> {
+    let by = state.store.lock().unwrap().unread_by_account().map_err(err)?;
     #[cfg(desktop)]
-    tray::show_unread(&app, counts.iter().find(|(r, _)| *r == Role::Inbox).map_or(0, |(_, n)| *n));
+    tray::show_unread(&app, by.iter().filter(|(_, r, _)| *r == Role::Inbox).map(|(_, _, n)| n).sum());
     #[cfg(not(desktop))]
     let _ = &app;
-    Ok(counts.into_iter().map(|(r, n)| (r.as_str().to_string(), n)).collect())
+    let mut by_account: HashMap<String, HashMap<String, u32>> = HashMap::new();
+    for (account, role, n) in by {
+        by_account.entry(account).or_default().insert(role.as_str().to_string(), n);
+    }
+    Ok(by_account)
 }
 
 /// Liga/desliga `\Seen` ou `\Flagged` em várias mensagens: o servidor primeiro, o banco local só se ele aceitar.

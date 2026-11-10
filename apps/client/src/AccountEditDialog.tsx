@@ -1,13 +1,23 @@
-// Editar conta: nome, senha, servidores e portas. A conexão é testada antes de gravar; com falha nada muda.
+// Editar conta: nome, apelido e cor (só na interface), senha, servidores e portas. A conexão é testada antes de gravar; com falha nada muda.
 import { useEffect, useRef, useState } from "react";
 import { X } from "@phosphor-icons/react";
 import { api, type Account, type Security } from "./api";
+import { ColorField } from "./AccountSteps";
 
-interface Props { account: Account; onClose: () => void; onSaved: (a: Account) => void }
+interface Props {
+  account: Account;
+  /** Apelido salvo (vazio = padrão), o padrão que aparece no campo vazio e a cor atual. */
+  label: string;
+  defaultLabel: string;
+  color: string;
+  onLook: (label: string, color: string) => void;
+  onClose: () => void;
+  onSaved: (a: Account) => void;
+}
 
 const EXIT_MS = 150;
 
-export function AccountEditDialog({ account, onClose, onSaved }: Props) {
+export function AccountEditDialog({ account, label, defaultLabel, color, onLook, onClose, onSaved }: Props) {
   const oauth = !!account.auth && account.auth !== "password";
   const domain = account.username.split("@")[1] ?? "";
   const start = {
@@ -18,6 +28,8 @@ export function AccountEditDialog({ account, onClose, onSaved }: Props) {
     security: account.security,
     smtpHost: account.smtp?.host ?? `smtp.${domain}`,
     smtpPort: String(account.smtp?.port ?? 465),
+    label,
+    color,
   };
   const [form, setForm] = useState(start);
   const [busy, setBusy] = useState(false);
@@ -28,6 +40,8 @@ export function AccountEditDialog({ account, onClose, onSaved }: Props) {
   const first = useRef<HTMLInputElement>(null);
 
   const dirty = (Object.keys(start) as (keyof typeof start)[]).some((k) => form[k] !== start[k]);
+  /** Apelido e cor não dependem do servidor: sem mudança de conexão, salvar não reconecta. */
+  const connDirty = (["name", "password", "host", "port", "security", "smtpHost", "smtpPort"] as const).some((k) => form[k] !== start[k]);
   const set = <K extends keyof typeof form>(key: K, value: (typeof form)[K]) => setForm((f) => ({ ...f, [key]: value }));
 
   useEffect(() => first.current?.focus(), []);
@@ -60,12 +74,16 @@ export function AccountEditDialog({ account, onClose, onSaved }: Props) {
     setError("");
     setBusy(true);
     try {
-      const smtp = { host: form.smtpHost.trim(), port: Number(form.smtpPort), security: (form.smtpPort === "465" ? "tls" : "starttls") as Security };
-      const saved = await api.updateAccount(
-        { ...account, name: form.name.trim() || null, host: form.host.trim(), port: Number(form.port), security: form.security, smtp },
-        form.password || null,
-      );
-      onSaved(saved);
+      // Apelido e cor só valem depois da conexão salva (se ela falhar, o diálogo continua aberto).
+      if (connDirty) {
+        const smtp = { host: form.smtpHost.trim(), port: Number(form.smtpPort), security: (form.smtpPort === "465" ? "tls" : "starttls") as Security };
+        const saved = await api.updateAccount(
+          { ...account, name: form.name.trim() || null, host: form.host.trim(), port: Number(form.port), security: form.security, smtp },
+          form.password || null,
+        );
+        onSaved(saved);
+      }
+      onLook(form.label.trim(), form.color);
       close();
     } catch (err) {
       setError(String(err).includes("LOGIN") ? "Usuário ou senha recusados pelo servidor." : String(err));
@@ -90,8 +108,14 @@ export function AccountEditDialog({ account, onClose, onSaved }: Props) {
           <input ref={first} value={form.name} onChange={(e) => set("name", e.target.value)} placeholder="Como aparece para quem recebe" />
         </label>
 
+        <label className="field">
+          <span>Apelido (aparece na barra lateral e na lista)</span>
+          <input value={form.label} onChange={(e) => set("label", e.target.value)} placeholder={defaultLabel} maxLength={24} />
+        </label>
+        <ColorField label="Cor" color={form.color} onColor={(c) => set("color", c)} />
+
         {oauth ? (
-          <p className="hint">O login desta conta é feito pelo provedor; aqui só dá para mudar o nome. Para reconectar, use "Entrar de novo" na lista de contas.</p>
+          <p className="hint">O login desta conta é feito pelo provedor; aqui só dá para mudar o nome, o apelido e a cor. Para reconectar, use "Entrar de novo" na lista de contas.</p>
         ) : (
           <>
             <label className="field">

@@ -4,6 +4,8 @@ import { AirplaneTilt, ArrowLeft, ArrowsClockwise, Bell, ChatTeardropText, Funne
 import { api, providerOf, PROVIDER_LABEL, type Account, type Settings } from "./api";
 import { OauthAdvanced } from "./OauthSettings";
 import { AccountEditDialog } from "./AccountEditDialog";
+import { accountColor, defaultLabel, labelKey } from "./accountMeta";
+import { colorKey } from "./accountColors";
 import { Row, Segmented } from "./SettingsParts";
 import { AppearanceSection } from "./AppearanceSettings";
 import { RulesSection, TemplatesSection, VacationSection } from "./ProductivitySettings";
@@ -359,7 +361,15 @@ export function SettingsPage({ accounts, settings, onSetting, onRemoveAccount, o
         </div>
       </main>
 
-      {editing && <AccountEditDialog account={editing} onClose={() => setEditing(null)} onSaved={onAccountSaved} />}
+      {editing && (
+        <AccountEditDialog account={editing} label={settings[labelKey(editing.id)] ?? ""} defaultLabel={defaultLabel(accounts, editing.id)}
+          color={accountColor(accounts, editing.id, settings)}
+          onLook={(label, color) => {
+            if (label !== (settings[labelKey(editing.id)] ?? "")) onSetting(labelKey(editing.id), label);
+            if (color !== accountColor(accounts, editing.id, settings)) onSetting(colorKey(editing.id), color);
+          }}
+          onClose={() => setEditing(null)} onSaved={onAccountSaved} />
+      )}
 
       {removing && (
         <div className="confirm scrim" onMouseDown={(e) => { if (e.target === e.currentTarget && !removeBusy) setRemoving(null); }}>

@@ -1,29 +1,41 @@
-// Painel de pastas: Favoritos, pastas da conta, pastas do usuário e categorias, rascunhos/agendados e contas.
-import { FileText, PaperPlaneTilt, Plus, Clock } from "@phosphor-icons/react";
-import type { Account, Category, Settings, UserFolder, View } from "./api";
-import { colorKey } from "./accountColors";
+// Painel de pastas: Favoritos, "Todas as contas" e, com várias contas, uma seção recolhível por conta (pastas do sistema e do usuário).
+// Com uma conta só, é a lista simples de sempre. O mesmo componente serve de gaveta no celular (`variant="drawer"`).
+import { useEffect, useRef } from "react";
+import { CaretRight, FileText, PaperPlaneTilt, Plus, Clock, Stack } from "@phosphor-icons/react";
+import type { Account, Category, UserFolder, View } from "./api";
 import { FolderTree } from "./FolderTree";
 import { PageLayout } from "./layout/primitives";
 import { viewInfo, type FolderNode, type OpenMap } from "./folders";
+import { parseBox } from "./views";
 
-type NavView = "all" | "inbox" | "starred" | "sent" | "archive" | "trash" | "junk";
+type NavView = "inbox" | "starred" | "sent" | "archive" | "trash" | "junk";
+/** Visões da seção "Todas as contas". */
+const ALL_VIEWS: NavView[] = ["inbox", "starred", "sent"];
 
 interface Props {
   navFolders: NavView[];
   favorites: View[];
   folder: View;
   inList: boolean;
+  /** Não lidas da visão somando as contas. */
   unread: (view: View) => number;
-  open: (view: View) => void;
-  drop: (key: string, view: View) => Record<string, unknown>;
+  /** Não lidas da visão numa conta (0 nas pastas sem contador). */
+  unreadIn: (account: string, view: View) => number;
+  /** Abre a visão; `account` é a conta ativa (null = todas). */
+  open: (view: View, account?: string | null) => void;
+  drop: (key: string, view: string) => Record<string, unknown>;
   onContext: (x: number, y: number, view: View) => void;
   userFolders: UserFolder[];
   categories: Category[];
   tree: FolderNode[];
   accounts: Account[] | null;
-  settings: Settings;
+  /** Conta ativa (null = todas). */
   accountFilter: string | null;
-  onAccountFilter: (id: string | null) => void;
+  acctLabel: (id: string) => string;
+  acctColor: (id: string) => string;
+  /** Seção de conta aberta (uma por vez) e a troca dela. */
+  openAccount: string | null;
+  onOpenAccount: (id: string | null) => void;
   drafts: number;
   scheduled: number;
   outbox: number;
@@ -33,7 +45,7 @@ interface Props {
   openDrafts: () => void;
   openScheduled: () => void;
   openOutbox: () => void;
-  onNewFolder: (parent?: FolderNode) => void;
+  onNewFolder: (parent?: FolderNode, account?: string) => void;
   onRenameFolder: (n: FolderNode) => void;
   onDeleteFolder: (n: FolderNode) => void;
   onAddAccount: () => void;
@@ -41,74 +53,143 @@ interface Props {
   onToggleFolder: (n: FolderNode, open: boolean) => void;
   folderUnread: Map<string, number>;
   hoverView: string | null;
+  variant?: "rail" | "drawer";
+  /** Chamado depois de escolher uma pasta (a gaveta fecha). */
+  onNavigate?: () => void;
 }
 
 export function Rail(p: Props) {
-  const here = (v: View) => (v === p.folder && p.inList ? "page" : undefined);
-  const item = (view: View, key = view as string) => {
+  const accounts = p.accounts ?? [];
+  const multi = accounts.length > 1;
+  const drawer = p.variant === "drawer";
+  const sections = useRef(new Map<string, HTMLElement>());
+  const go = (run: () => void) => { run(); p.onNavigate?.(); };
+  /** Conta da visão: pastas do usuário já pertencem a uma conta; as demais seguem a seção onde o item está. */
+  const here = (v: View, account: string | null) =>
+    v === p.folder && p.inList && (parseBox(v) !== null || p.accountFilter === account) ? "page" : undefined;
+  const item = (view: View, account: string | null = null, key: string = view) => {
     const { label, icon: Icon } = viewInfo(view, p.userFolders, p.categories);
-    const n = p.unread(view);
+    const n = account ? p.unreadIn(account, view) : p.unread(view);
+    /** Na seção de uma conta, o alvo de soltar leva a conta (`papel|conta`). */
+    const dropAt = account ? `${view}|${account}` : view;
     return (
-      <button key={key} type="button" className="nav-item" title={label} aria-label={n > 0 ? `${label} ${n} não lidas` : label} aria-current={here(view)} onClick={() => p.open(view)}
+      <button key={key} type="button" className="nav-item" title={label} aria-label={n > 0 ? `${label} ${n} não lidas` : label} aria-current={here(view, account)}
+        onClick={() => go(() => p.open(view, account))}
         onContextMenu={(e) => { e.preventDefault(); p.onContext(e.clientX, e.clientY, view); }}
-        {...(view === "starred" || view === "all" ? {} : p.drop(view, view))}>
+        {...(view === "starred" ? {} : p.drop(dropAt, dropAt))}>
         <span className="nav-icon"><Icon size={16} weight="bold" /></span>
         <span className="nav-label">{label}</span>
         {n > 0 && <>{" "}<span className="count" aria-hidden>{n}</span></>}
       </button>
     );
   };
+  /** Rascunhos, Agendados e Caixa de saída valem para todas as contas: abrem sem conta ativa. */
   const extra = (label: string, Icon: typeof FileText, n: number, current: boolean, run: () => void) => (
-    <button type="button" className="nav-item" title={label} aria-label={n > 0 ? `${label} ${n}` : label} onClick={run} aria-current={current ? "page" : undefined}>
+    <button type="button" className="nav-item" title={label} aria-label={n > 0 ? `${label} ${n}` : label} onClick={() => go(run)}
+      aria-current={current && !(multi && p.accountFilter) ? "page" : undefined}>
       <span className="nav-icon"><Icon size={16} weight="bold" /></span>
       <span className="nav-label">{label}</span>
       {n > 0 && <>{" "}<span className="count plain" aria-hidden>{n}</span></>}
     </button>
   );
+  const extras = (
+    <>
+      {extra("Rascunhos", FileText, p.drafts, p.showDrafts && !p.showOutbox, p.openDrafts)}
+      {extra("Agendados", Clock, p.scheduled, p.showScheduled, p.openScheduled)}
+      {(p.outbox > 0 || p.showOutbox) && extra("Caixa de saída", PaperPlaneTilt, p.outbox, p.showOutbox, p.openOutbox)}
+    </>
+  );
+  const tree = (nodes: FolderNode[], section?: "folders" | "categories", account?: string) => (
+    <FolderTree nodes={nodes} section={section}
+      categories={p.categories} folder={p.folder} inList={p.inList} open={(v) => go(() => p.open(v, account ?? null))} drop={p.drop} onContext={p.onContext}
+      onNew={(parent) => p.onNewFolder(parent, account)} onRename={p.onRenameFolder} onDelete={p.onDeleteFolder}
+      openMap={p.openMap} onToggle={p.onToggleFolder} unread={p.folderUnread} hoverView={p.hoverView} />
+  );
 
-  return (
-    <PageLayout area="rail" as="aside" aria-label="Pastas e contas">
+  // Várias contas: faixa de atalhos, seção "Todas as contas" e uma seção recolhível por conta.
+  const inboxOf = (id: string) => p.unreadIn(id, "inbox");
+  const strip = (
+    <nav className="acct-strip" aria-label="Contas">
+      {[null, ...accounts.map((a) => a.id)].map((id) => {
+        const n = id ? inboxOf(id) : p.unread("inbox");
+        const label = id ? p.acctLabel(id) : "Todas as contas";
+        return (
+          <button key={id ?? "all"} type="button" className="acct-chip" title={label}
+            aria-label={n > 0 ? `${label}, ${n} não lidas` : label} aria-current={p.accountFilter === id && p.inList ? "true" : undefined}
+            onClick={() => go(() => p.open("inbox", id))}>
+            <span className="avatar" data-color={id ? p.acctColor(id) : undefined} data-all={id ? undefined : ""} aria-hidden>{id ? p.acctLabel(id)[0]?.toUpperCase() : <Stack size={14} weight="bold" />}</span>
+            {n > 0 && <span className="acct-n" aria-hidden>{n > 99 ? "99+" : n}</span>}
+          </button>
+        );
+      })}
+    </nav>
+  );
+
+  // Ao abrir uma seção (pela faixa, por exemplo), ela aparece inteira na barra lateral.
+  useEffect(() => {
+    if (p.openAccount) sections.current.get(p.openAccount)?.scrollIntoView({ block: "nearest" });
+  }, [p.openAccount]);
+
+  const section = (id: string) => {
+    const open = p.openAccount === id;
+    const n = inboxOf(id);
+    const label = p.acctLabel(id);
+    return (
+      <section key={id} className="acct-sec" data-open={open || undefined} data-acct-color={p.acctColor(id)} aria-label={label}
+        ref={(el) => { if (el) sections.current.set(id, el); else sections.current.delete(id); }}>
+        <button type="button" className="acct-head" aria-expanded={open} aria-controls={`acct-${p.variant ?? "rail"}-${id}`} title={accounts.find((a) => a.id === id)?.username}
+          aria-label={n > 0 ? `${label}, ${n} não lidas` : label} onClick={() => p.onOpenAccount(open ? null : id)}>
+          <CaretRight size={11} weight="bold" className="acct-caret" aria-hidden />
+          <span className="acct-dot" aria-hidden />
+          <span className="acct-name">{label}</span>
+          {n > 0 && <span className="count" aria-hidden>{n}</span>}
+        </button>
+        <div className="acct-body" id={`acct-${p.variant ?? "rail"}-${id}`}>
+          <div className="acct-inner">
+            {p.navFolders.map((r) => item(r, id, `${id}:${r}`))}
+            {tree(p.tree.filter((f) => f.account === id), "folders", id)}
+          </div>
+        </div>
+      </section>
+    );
+  };
+
+  const body = (
+    <>
+      {multi && strip}
       {p.favorites.length > 0 && (
         <nav className="rail-section" aria-label="Favoritos">
           <div className="rail-label">Favoritos</div>
-          {p.favorites.map((v) => item(v, `fav:${v}`))}
+          {p.favorites.map((v) => item(v, null, `fav:${v}`))}
         </nav>
       )}
-      <nav className="rail-section" aria-label="Caixa de correio">
-        <div className="rail-label">Caixa de correio</div>
-        {p.navFolders.map((r) => item(r))}
-        {extra("Rascunhos", FileText, p.drafts, p.showDrafts && !p.showOutbox, p.openDrafts)}
-        {extra("Agendados", Clock, p.scheduled, p.showScheduled, p.openScheduled)}
-        {(p.outbox > 0 || p.showOutbox) && extra("Caixa de saída", PaperPlaneTilt, p.outbox, p.showOutbox, p.openOutbox)}
+      <nav className="rail-section" aria-label={multi ? "Todas as contas" : "Caixa de correio"}>
+        <div className="rail-label">{multi ? "Todas as contas" : "Caixa de correio"}</div>
+        {(multi ? p.navFolders.filter((r) => ALL_VIEWS.includes(r as NavView)) : p.navFolders).map((r) => item(r))}
+        {extras}
       </nav>
-      <FolderTree nodes={p.tree} accounts={p.accounts ?? []} byAccount={(p.accounts?.length ?? 0) > 1 && !p.accountFilter}
-        categories={p.categories} folder={p.folder} inList={p.inList} open={p.open} drop={p.drop} onContext={p.onContext}
-        onNew={p.onNewFolder} onRename={p.onRenameFolder} onDelete={p.onDeleteFolder}
-        openMap={p.openMap} onToggle={p.onToggleFolder} unread={p.folderUnread} hoverView={p.hoverView} />
-      <div className="rail-section" aria-label="Contas">
-        <div className="rail-label">Contas</div>
-        {p.accounts && p.accounts.length > 1 && (
-          <button type="button" className="account account-btn" title="Todas as caixas juntas" aria-pressed={!p.accountFilter} onClick={() => p.onAccountFilter(null)}>
-            <span className="avatar" aria-hidden>*</span>
-            <span className="account-name">Todas as contas</span>
-          </button>
-        )}
-        {p.accounts?.map((a) => p.accounts!.length > 1 ? (
-          <button key={a.id} type="button" className="account account-btn" title={a.id} aria-pressed={p.accountFilter === a.id}
-            onClick={() => p.onAccountFilter(p.accountFilter === a.id ? null : a.id)}>
-            <span className="avatar" data-color={p.settings[colorKey(a.id)]} aria-hidden>{a.username[0]?.toUpperCase()}</span>
-            <span className="account-name">{a.username}</span>
-          </button>
-        ) : (
+      {multi ? (
+        <>
+          <div className="acct-list">{accounts.map((a) => section(a.id))}</div>
+          {tree([], "categories")}
+        </>
+      ) : tree(p.tree)}
+      <div className="rail-section" aria-label={multi ? undefined : "Contas"}>
+        {!multi && <div className="rail-label">Contas</div>}
+        {!multi && accounts.map((a) => (
           <div key={a.id} className="account" title={a.id}>
-            <span className="avatar" data-color={p.settings[colorKey(a.id)]} aria-hidden>{a.username[0]?.toUpperCase()}</span>
+            <span className="avatar" data-color={p.acctColor(a.id)} aria-hidden>{p.acctLabel(a.id)[0]?.toUpperCase()}</span>
             <span className="account-name">{a.username}</span>
           </div>
         ))}
-        <button type="button" className="btn ghost small add-account" aria-label="Adicionar conta" onClick={p.onAddAccount}>
+        <button type="button" className="btn ghost small add-account" aria-label="Adicionar conta" onClick={() => go(p.onAddAccount)}>
           <Plus size={14} weight="bold" /> <span>Adicionar conta</span>
         </button>
       </div>
-    </PageLayout>
+    </>
   );
+
+  return drawer
+    ? <aside className="rail-panel" aria-label="Pastas e contas">{body}</aside>
+    : <PageLayout area="rail" as="aside" aria-label="Pastas e contas">{body}</PageLayout>;
 }

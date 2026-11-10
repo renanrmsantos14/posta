@@ -10,7 +10,7 @@ type Tab = "focused" | "other";
 
 /** Grupo de pastas do layout estreito (a Rail some no celular). */
 export function FolderTabs(p: {
-  navFolders: (Role | "starred" | "all")[]; tree: FolderNode[]; categories: Category[]; userFolders: UserFolder[];
+  navFolders: (Role | "starred")[]; tree: FolderNode[]; categories: Category[]; userFolders: UserFolder[];
   folder: View; inList: boolean; showDrafts: boolean; showScheduled: boolean; showOutbox: boolean; outbox: number;
   onOpen: (v: View) => void; onDrafts: () => void; onScheduled: () => void; onOutbox: () => void;
 }) {
@@ -50,7 +50,8 @@ export function FolderTabs(p: {
 
 /** Título da lista e abas Foco/Outros (setas esquerda/direita trocam de aba). */
 export function ListHead(p: {
-  title: string; tabsOn: boolean; tab: Tab; unread: { focused: number; other: number }; onTab: (t: Tab) => void;
+  title: string; /** Conta/escopo antes do título: `Apelido › Pasta`. */ scope?: { label: string; color?: string };
+  tabsOn: boolean; tab: Tab; unread: { focused: number; other: number }; onTab: (t: Tab) => void;
 }) {
   const onKey = (e: React.KeyboardEvent) => {
     if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
@@ -60,7 +61,15 @@ export function ListHead(p: {
   };
   return (
     <div className="list-head">
-      <h2 className="list-title">{p.title}</h2>
+      <h2 className="list-title" data-acct-color={p.scope?.color}>
+        {p.scope && (
+          <span className="list-scope">
+            {p.scope.color && <span className="acct-dot" aria-hidden />}
+            {p.scope.label}<span className="sr-only"> › </span>
+          </span>
+        )}
+        {p.title}
+      </h2>
       {p.tabsOn && (
         <div className="focus-tabs" role="tablist" aria-label="Foco e Outros" onKeyDown={onKey}>
           <button type="button" role="tab" id="tab-focused" aria-selected={p.tab === "focused"} tabIndex={p.tab === "focused" ? 0 : -1} onClick={() => p.onTab("focused")}>

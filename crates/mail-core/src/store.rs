@@ -1150,27 +1150,36 @@ impl Store {
         Ok(out)
     }
 
-    /// Não lidas por papel de pasta, somando as contas (papéis sem pasta ficam em 0).
-    /// Uma passada pelo índice parcial `messages_unread` (só linhas não lidas), sem tocar na tabela.
+    /// Não lidas por (conta, pasta), numa passada pelo índice parcial `messages_unread` (só linhas não lidas), sem tocar na tabela.
+    fn unread_per_box(&self) -> Result<std::collections::HashMap<(String, String), u32>> {
+        let mut st = self.conn.prepare_cached(
+            "SELECT account, mailbox, COUNT(*) FROM messages
+             WHERE seen = 0 AND snooze_until <= CAST(strftime('%s', 'now') AS INTEGER)
+             GROUP BY account, mailbox",
+        )?;
+        let rows = st
+            .query_map([], |r| Ok(((r.get(0)?, r.get(1)?), r.get(2)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(rows)
+    }
+
+    /// Não lidas por papel de pasta, somando as contas (papéis sem pasta ficam em 0). Deriva de `unread_by_account`.
     pub fn unread_counts(&self) -> Result<Vec<(Role, u32)>> {
-        let per_box: std::collections::HashMap<(String, String), u32> = {
-            let mut st = self.conn.prepare_cached(
-                "SELECT account, mailbox, COUNT(*) FROM messages
-                 WHERE seen = 0 AND snooze_until <= CAST(strftime('%s', 'now') AS INTEGER)
-                 GROUP BY account, mailbox",
-            )?;
-            let rows = st
-                .query_map([], |r| Ok(((r.get(0)?, r.get(1)?), r.get(2)?)))?
-                .collect::<rusqlite::Result<_>>()?;
-            rows
-        };
-        Role::ALL
-            .iter()
-            .map(|r| {
-                let n = self.role_boxes(*r)?.into_iter().map(|b| per_box.get(&b).copied().unwrap_or(0)).sum();
-                Ok((*r, n))
-            })
-            .collect()
+        let by = self.unread_by_account()?;
+        Ok(Role::ALL.iter().map(|r| (*r, by.iter().filter(|(_, br, _)| br == r).map(|(_, _, n)| n).sum())).collect())
+    }
+
+    /// Não lidas por conta e papel de pasta (só os pares que têm pasta; o resto é 0).
+    pub fn unread_by_account(&self) -> Result<Vec<(String, Role, u32)>> {
+        let per_box = self.unread_per_box()?;
+        let mut out = Vec::new();
+        for role in Role::ALL {
+            for (account, name) in self.role_boxes(role)? {
+                let n = per_box.get(&(account.clone(), name)).copied().unwrap_or(0);
+                out.push((account, role, n));
+            }
+        }
+        Ok(out)
     }
 
     /// Pasta virtual "Com estrela": todas as contas, exceto Lixeira e Spam.
@@ -1934,6 +1943,23 @@ mod tests {
         assert!(s.search_starred("lixo", 10).unwrap().is_empty());
         s.set_flagged(ids[0], false).unwrap();
         assert!(s.list_starred(10, 0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn nao_lidas_por_conta_somam_o_total_por_papel() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.set_folders("a", &folders_a()).unwrap();
+        s.set_folders("b", &folders_a()).unwrap();
+        s.insert_messages("a", "INBOX", &[msg(1, "x", "", 1), msg(2, "y", "", 2)]).unwrap();
+        s.insert_messages("b", "INBOX", &[msg(1, "z", "", 3)]).unwrap();
+        s.insert_messages("b", "Lixeira", &[msg(2, "w", "", 4)]).unwrap();
+        let by = s.unread_by_account().unwrap();
+        let get = |acc: &str, role| by.iter().find(|(a, r, _)| a == acc && *r == role).map(|(_, _, n)| *n);
+        assert_eq!((get("a", Role::Inbox), get("b", Role::Inbox), get("b", Role::Trash)), (Some(2), Some(1), Some(1)));
+        // Conta sem pasta de Spam não aparece; o total por papel continua somando as contas.
+        assert_eq!(get("a", Role::Junk), None);
+        let total = s.unread_counts().unwrap().into_iter().find(|(r, _)| *r == Role::Inbox).unwrap().1;
+        assert_eq!(total, 3);
     }
 
     #[test]

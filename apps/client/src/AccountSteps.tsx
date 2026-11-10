@@ -141,15 +141,22 @@ export function Personalize({ email, name, signature, color, onName, onSignature
         <span>Assinatura (opcional)</span>
         <textarea className="signature-input" rows={3} value={signature} onChange={(e) => onSignature(e.target.value)} placeholder="Entra no fim das mensagens novas e das respostas" />
       </label>
-      <div className="field" role="radiogroup" aria-label="Cor da conta">
-        <span>Cor na barra lateral</span>
-        <div className="swatches">
-          {ACCOUNT_COLORS.map((c) => (
-            <button key={c.id} type="button" role="radio" aria-checked={color === c.id} aria-label={c.label} title={c.label} className="swatch" onClick={() => onColor(c.id)}>
-              <span className="avatar" data-color={c.id} />
-            </button>
-          ))}
-        </div>
+      <ColorField label="Cor na barra lateral" color={color} onColor={onColor} />
+    </div>
+  );
+}
+
+/** Escolha da cor da conta (paleta de accountColors.ts). */
+export function ColorField({ label, color, onColor }: { label: string; color: string; onColor: (id: string) => void }) {
+  return (
+    <div className="field" role="radiogroup" aria-label="Cor da conta">
+      <span>{label}</span>
+      <div className="swatches">
+        {ACCOUNT_COLORS.map((c) => (
+          <button key={c.id} type="button" role="radio" aria-checked={color === c.id} aria-label={c.label} title={c.label} className="swatch" onClick={() => onColor(c.id)}>
+            <span className="avatar" data-color={c.id} />
+          </button>
+        ))}
       </div>
     </div>
   );

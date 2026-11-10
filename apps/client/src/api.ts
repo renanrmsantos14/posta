@@ -207,6 +207,8 @@ export interface Category {
 }
 /** Não lidas por pasta. */
 export type UnreadCounts = Partial<Record<Role, number>>;
+/** Não lidas por id de conta. */
+export type UnreadAll = Record<string, UnreadCounts>;
 
 export interface SyncResult {
   fetched: number;
@@ -334,7 +336,7 @@ export const api = isTauri
       deleteForeverMany: (ids: number[]) => invoke<void>("delete_forever_many", { ids }),
       setSeen: (ids: number[], seen: boolean) => invoke<void>("set_seen_many", { ids, seen }),
       setFlagged: (ids: number[], flagged: boolean) => invoke<void>("set_flagged_many", { ids, flagged }),
-      unreadCounts: () => invoke<UnreadCounts>("unread_counts"),
+      unreadCounts: () => invoke<UnreadAll>("unread_counts"),
       open: (id: number) => invoke<MessageDetail | null>("open_message", { id }),
       saveAttachment: (id: number, index: number, open: boolean) =>
         invoke<string>("save_attachment", { id, index, open }),
