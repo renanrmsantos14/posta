@@ -3,7 +3,7 @@
 // (com confirmação se há texto). Ctrl/Cmd+Enter envia.
 // O corpo é um editor formatado (contentEditable); `draft.html` é a fonte e `draft.body` o texto simples derivado.
 import { useEffect, useRef, useState } from "react";
-import { ChatTeardropText, Clock, Eraser, File as FileIcon, LinkSimple, ListBullets, ListNumbers, Paperclip, PaperPlaneTilt, Quotes, TextB, TextItalic, TextUnderline, Trash, X } from "@phosphor-icons/react";
+import { ArrowArcLeft, ArrowArcRight, ArrowsIn, ArrowsOut, ChatTeardropText, Clock, Eraser, Minus, File as FileIcon, LinkSimple, ListBullets, ListNumbers, Paperclip, PaperPlaneTilt, Quotes, TextB, TextItalic, TextUnderline, Trash, X } from "@phosphor-icons/react";
 import { aliasLines } from "./aliases";
 import { api, type Account, type Draft, type OutAttachment, type Settings } from "./api";
 import { fmtSize } from "./format";
@@ -78,7 +78,10 @@ export function Composer({ init, accounts, settings, onSend, onSchedule, templat
   const [errorKey, setErrorKey] = useState(0);
   const [confirming, setConfirming] = useState(false);
   const [leaving, setLeaving] = useState(false);
-  const [showCc, setShowCc] = useState(!!(init.cc || init.bcc));
+  const [showCc, setShowCc] = useState(!!init.cc);
+  const [showBcc, setShowBcc] = useState(!!init.bcc);
+  const [maxed, setMaxed] = useState(false);
+  const [minimized, setMinimized] = useState(false);
   const [attachNote, setAttachNote] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
   const toRef = useRef<HTMLInputElement>(null);
@@ -198,7 +201,7 @@ export function Composer({ init, accounts, settings, onSend, onSchedule, templat
     }
     const badCopy = badAddress(draft.cc ?? "") ?? badAddress(draft.bcc ?? "");
     if (badCopy) {
-      setShowCc(true);
+      if (badAddress(draft.cc ?? "")) setShowCc(true); else setShowBcc(true);
       setError(`Endereço inválido: ${badCopy}`);
       setErrorKey((k) => k + 1);
       return null;
@@ -354,13 +357,49 @@ export function Composer({ init, accounts, settings, onSend, onSchedule, templat
   };
 
   return (
-    <section className="composer" role="dialog" aria-labelledby="composer-title" data-leaving={leaving || undefined} data-fileover={fileOver || undefined} {...fileDrop}>
+    <section className="composer" role="dialog" aria-labelledby="composer-title" data-leaving={leaving || undefined} data-max={maxed || undefined} data-min={minimized || undefined} data-fileover={fileOver || undefined} {...fileDrop}>
       <header className="composer-head">
-        <h2 id="composer-title">{draft.title}</h2>
-        <button type="button" className="icon-btn" aria-label="Fechar" onClick={requestClose}>
-          <X size={16} weight="bold" />
-        </button>
+        <h2 id="composer-title" onDoubleClick={() => setMinimized((m) => !m)}>{draft.title}</h2>
+        <div className="composer-win">
+          <button type="button" className="icon-btn" aria-label={minimized ? "Restaurar" : "Minimizar"} title={minimized ? "Restaurar" : "Minimizar"}
+            onClick={() => { setMinimized((m) => !m); setMaxed(false); }}>
+            <Minus size={16} weight="bold" />
+          </button>
+          <button type="button" className="icon-btn" aria-label={maxed ? "Reduzir" : "Maximizar"} title={maxed ? "Reduzir" : "Maximizar"}
+            onClick={() => { setMaxed((m) => !m); setMinimized(false); }}>
+            {maxed ? <ArrowsIn size={16} weight="bold" /> : <ArrowsOut size={16} weight="bold" />}
+          </button>
+          <button type="button" className="icon-btn" aria-label="Fechar" onClick={requestClose}>
+            <X size={16} weight="bold" />
+          </button>
+        </div>
       </header>
+
+      <div className="composer-cmd" role="toolbar" aria-label="Ações da mensagem">
+        <button type="button" className="btn primary" onClick={send}>
+          <PaperPlaneTilt size={15} weight="fill" /> Enviar
+        </button>
+        <WhenMenu label="Enviar mais tarde" className="icon-btn" onPick={schedule}>
+          <Clock size={16} weight="bold" />
+        </WhenMenu>
+        <span className="cmd-sep" aria-hidden />
+        <input ref={fileRef} type="file" multiple hidden onChange={(e) => void addFiles(e.target.files)} />
+        <button type="button" className="icon-btn" aria-label="Anexar arquivos" title="Anexar arquivos"
+          onClick={() => fileRef.current?.click()}>
+          <Paperclip size={16} weight="bold" />
+        </button>
+        <TemplateMenu templates={templates} onPick={insertTemplate} />
+        <select className="imp-select" aria-label="Importância" title="Importância" value={draft.importance ?? "normal"}
+          onChange={(e) => set("importance", e.target.value === "normal" ? undefined : (e.target.value as "high" | "low"))}>
+          <option value="normal">Importância normal</option>
+          <option value="high">Importância alta</option>
+          <option value="low">Importância baixa</option>
+        </select>
+        {saved && <span className="draft-saved" role="status">Rascunho salvo</span>}
+        <button type="button" className="icon-btn push" aria-label="Descartar rascunho" title="Descartar rascunho" onClick={requestDiscard}>
+          <Trash size={16} weight="bold" />
+        </button>
+      </div>
 
       <div className="composer-fields">
         {senders.length > 1 ? (
@@ -383,14 +422,19 @@ export function Composer({ init, accounts, settings, onSend, onSchedule, templat
         )}
         <Recipients label="Para" value={draft.to} onChange={(v) => set("to", v)} placeholder="nome@exemplo.com"
           invalid={!!error} inputRef={toRef} own={accounts.map((a) => a.username)}
-          trailing={!showCc && <button type="button" className="btn ghost small cc-toggle" onClick={() => setShowCc(true)}>Cc/Bcc</button>} />
+          trailing={(!showCc || !showBcc) && (
+            <span className="cc-toggles">
+              {!showCc && <button type="button" className="btn ghost small cc-toggle" onClick={() => setShowCc(true)}>Cc</button>}
+              {!showBcc && <button type="button" className="btn ghost small cc-toggle" onClick={() => setShowBcc(true)}>Bcc</button>}
+            </span>
+          )} />
         {showCc && (
-          <>
-            <Recipients label="Cc" value={draft.cc ?? ""} onChange={(v) => set("cc", v)} placeholder="separe vários por vírgula"
-              own={accounts.map((a) => a.username)} />
-            <Recipients label="Bcc" value={draft.bcc ?? ""} onChange={(v) => set("bcc", v)} placeholder="cópia oculta"
-              own={accounts.map((a) => a.username)} />
-          </>
+          <Recipients label="Cc" value={draft.cc ?? ""} onChange={(v) => set("cc", v)} placeholder="separe vários por vírgula"
+            own={accounts.map((a) => a.username)} />
+        )}
+        {showBcc && (
+          <Recipients label="Bcc" value={draft.bcc ?? ""} onChange={(v) => set("bcc", v)} placeholder="cópia oculta"
+            own={accounts.map((a) => a.username)} />
         )}
         {error && <p key={errorKey} className="form-error composer-error" role="alert">{error}</p>}
         <label className="line">
@@ -401,6 +445,8 @@ export function Composer({ init, accounts, settings, onSend, onSchedule, templat
 
       <div className="fmt-bar" role="toolbar" aria-label="Formatação">
         {([
+          ["Desfazer", `${mac ? "⌘" : "Ctrl+"}Z`, <ArrowArcLeft size={15} weight="bold" />, () => format("undo")],
+          ["Refazer", `${mac ? "⌘⇧" : "Ctrl+"}${mac ? "Z" : "Y"}`, <ArrowArcRight size={15} weight="bold" />, () => format("redo")],
           ["Negrito", `${mac ? "⌘" : "Ctrl+"}B`, <TextB size={15} weight="bold" />, () => format("bold")],
           ["Itálico", `${mac ? "⌘" : "Ctrl+"}I`, <TextItalic size={15} weight="bold" />, () => format("italic")],
           ["Sublinhado", `${mac ? "⌘" : "Ctrl+"}U`, <TextUnderline size={15} weight="bold" />, () => format("underline")],
@@ -450,29 +496,8 @@ export function Composer({ init, accounts, settings, onSend, onSchedule, templat
       )}
 
       <footer className="composer-foot">
-        <button type="button" className="btn primary" onClick={send}>
-          <PaperPlaneTilt size={15} weight="fill" /> Enviar
-        </button>
-        <WhenMenu label="Enviar mais tarde" className="icon-btn" up onPick={schedule}>
-          <Clock size={16} weight="bold" />
-        </WhenMenu>
-        <TemplateMenu templates={templates} onPick={insertTemplate} />
-        <select className="imp-select" aria-label="Importância" title="Importância" value={draft.importance ?? "normal"}
-          onChange={(e) => set("importance", e.target.value === "normal" ? undefined : (e.target.value as "high" | "low"))}>
-          <option value="normal">Importância normal</option>
-          <option value="high">Importância alta</option>
-          <option value="low">Importância baixa</option>
-        </select>
-        <input ref={fileRef} type="file" multiple hidden onChange={(e) => void addFiles(e.target.files)} />
-        <button type="button" className="icon-btn" aria-label="Anexar arquivos" title="Anexar arquivos"
-          onClick={() => fileRef.current?.click()}>
-          <Paperclip size={16} weight="bold" />
-        </button>
-        <span className="hint-keys"><kbd>{mac ? "⌘" : "Ctrl"}</kbd><kbd>↵</kbd></span>
-        {saved && <span className="draft-saved" role="status">Rascunho salvo</span>}
-        <button type="button" className="icon-btn push" aria-label="Descartar rascunho" onClick={requestDiscard}>
-          <Trash size={16} weight="bold" />
-        </button>
+        <span className="hint-keys">Enviar: <kbd>{mac ? "⌘" : "Ctrl"}</kbd><kbd>↵</kbd></span>
+        {files.length === 0 && <span className="attach-hint">Arraste arquivos para anexar</span>}
       </footer>
 
       {confirming && (
