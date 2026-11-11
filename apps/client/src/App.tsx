@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowBendUpLeft, ArrowBendDoubleUpLeft, ArrowBendUpRight, ArrowsClockwise, Archive, Copy, FolderOpen, FolderSimple, NotePencil, Star, Tag, Trash, EnvelopeSimple, EnvelopeSimpleOpen, FloppyDisk, Printer, PushPin, Clock } from "@phosphor-icons/react";
+import { ArrowBendUpLeft, ArrowBendDoubleUpLeft, ArrowBendUpRight, ArrowsClockwise, Archive, Copy, FolderOpen, FolderSimple, NotePencil, Star, Tag, Trash, EnvelopeSimple, EnvelopeSimpleOpen, FloppyDisk, Printer, PushPin, Clock, ShieldWarning } from "@phosphor-icons/react";
 import { api, isTauri, type Account, type Attachment, type MailDelta, type MessageDetail, type MessageSummary, type OutAttachment, type OutboxItem, type Role, type Settings, type StoredDraft, type UnreadCounts, type UserFolder, type View } from "./api";
 import { AccountDialog } from "./AccountDialog";
 import { colorKey } from "./accountColors";
@@ -143,6 +143,7 @@ export default function App() {
   const [popId, setPopId] = useState<number | null>(null);
   /** Mensagens da Lixeira à espera de "Excluir de vez?". */
   const [confirmDelete, setConfirmDelete] = useState<MessageSummary[] | null>(null);
+  const [confirmPhish, setConfirmPhish] = useState<MessageSummary[] | null>(null);
   /** Rascunhos locais, a configuração (assinaturas, notificações) e os filtros de visão. */
   const [drafts, setDrafts] = useState<StoredDraft[]>([]);
   const [settings, setSettings] = useState<Settings>({});
@@ -287,6 +288,8 @@ export default function App() {
   const listMax = () => Math.max(LIST.min, Math.min(LIST.max, (appRef.current?.clientWidth ?? 1200) - (appRef.current?.querySelector<HTMLElement>(".rail")?.offsetWidth ?? RAIL.def) - MIN_READER));
   const listHMax = () => Math.max(LIST_H.min, (appRef.current?.clientHeight ?? 800) - 220);
   const canArchive = (m: MessageSummary) => m.role !== "archive" && folderList.includes(archiveTo(m));
+  const canReport = (m: MessageSummary) => m.role !== "junk" && folderList.includes("junk");
+  const reportPhishing = (ms: MessageSummary[]) => { const l = ms.filter(canReport); if (l.length) setConfirmPhish(l); };
   const canTrash = (m: MessageSummary) => m.role === "trash" || folderList.includes("trash");
 
   /** Ajusta o contador na hora; `refreshCounts` confere com o banco depois. */
@@ -1455,6 +1458,7 @@ export default function App() {
     items.push(
       { label: arch.length && archiveTo(arch[0]) === "inbox" ? "Mover para a entrada" : "Arquivar", icon: Archive, kbd: "E", disabled: !arch.length, onSelect: () => archive(ms) },
       { label: ms.every((m) => m.role === "trash") ? "Excluir de vez" : "Excluir", icon: Trash, kbd: "Delete", danger: true, disabled: !ms.some(canTrash), onSelect: () => remove(ms) },
+      { label: "Relatar phishing", icon: ShieldWarning, disabled: !ms.some(canReport), onSelect: () => reportPhishing(ms) },
       { label: "Mover para", icon: FolderOpen, items: moveItems(ms) },
       { separator: true },
       ms.every((m) => m.seen)
@@ -1522,6 +1526,10 @@ export default function App() {
         if (e.key === "Escape" && !folderBusy) setFolderDelete(null);
         return;
       }
+      if (confirmPhish) {
+        if (e.key === "Escape") setConfirmPhish(null);
+        return;
+      }
       if (confirmDelete) {
         if (e.key === "Escape" && !deleting) setConfirmDelete(null);
         return;
@@ -1587,7 +1595,7 @@ export default function App() {
   const targets = checkedList.length ? checkedList : current ? withThread([current]) : [];
   const cmds = buildCommands({
     targets, current, hasCategories: categories.length > 0, canArchive, canTrash, archiveTo, writeNew, act, remove, archive, markSeen,
-    toggleStar, togglePin, moveItems, snoozeItems, categoryItems, saveEml,
+    toggleStar, togglePin, moveItems, snoozeItems, categoryItems, saveEml, reportPhishing, canReport,
   });
   /** Barra de ações do leitor: só no celular (no desktop quem cuida disso é a faixa de comandos). */
   const mobileActions = (
@@ -1717,7 +1725,19 @@ export default function App() {
           expanded={expanded} full={full} viaKeyboard={viaKeyboard} folderLabel={info.label} hasMessages={messages.length > 0} imagesOk={imagesOk} imagesFrom={imagesFrom}
           savingAtt={savingAtt} mobileActions={mobileActions} onFull={setFull} onBack={() => (full ? setFull(false) : setReaderOpen(false))}
           onContact={openContact} onReaderContext={readerContext} onToggleThread={(id) => void toggleThreadMsg(id)}
-          onShowImages={(id) => setImagesOk((s) => new Set(s).add(id))} onTrustSender={trustSender} onSaveAttachment={(id, att) => void saveAttachment(id, att)} onDragAttachment={dragAttachment}>
+          onShowImages={(id) => setImagesOk((s) => new Set(s).add(id))} onTrustSender={trustSender} onReportPhishing={(d) => reportPhishing([d])} onSaveAttachment={(id, att) => void saveAttachment(id, att)} onDragAttachment={dragAttachment}>
+          {confirmPhish && (
+            <div className="confirm scrim" onMouseDown={(e) => { if (e.target === e.currentTarget) setConfirmPhish(null); }}>
+              <div className="confirm-card" role="alertdialog" aria-labelledby="phish-title">
+                <p id="phish-title">{confirmPhish.length === 1 ? "Relatar como phishing?" : `Relatar ${confirmPhish.length} mensagens como phishing?`}</p>
+                <span>Vão para o Spam. Dá para desfazer logo depois.</span>
+                <div className="confirm-actions">
+                  <button type="button" className="btn" onClick={() => setConfirmPhish(null)} autoFocus>Cancelar</button>
+                  <button type="button" className="btn danger" onClick={() => { const l = confirmPhish; setConfirmPhish(null); moveToDest(l, "junk"); }}>Relatar</button>
+                </div>
+              </div>
+            </div>
+          )}
           {confirmDelete && (
             <div className="confirm scrim" onMouseDown={(e) => { if (e.target === e.currentTarget && !deleting) setConfirmDelete(null); }}>
               <div className="confirm-card" role="alertdialog" aria-labelledby="delete-title">
