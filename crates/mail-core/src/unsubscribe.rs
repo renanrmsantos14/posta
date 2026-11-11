@@ -122,13 +122,15 @@ pub fn parse_mailto(m: &str) -> Option<UnsubMail> {
     Some(UnsubMail { to, subject: fallback(subject), body: fallback(body) })
 }
 
-/// POST `List-Unsubscribe=One-Click` (RFC 8058) na URL https. Sucesso só com resposta 2xx.
+/// POST `List-Unsubscribe=One-Click` (RFC 8058) na URL https. Sucesso só com resposta 2xx; 3xx conta como falha (sem seguir redirecionamento).
 pub fn post_one_click(url: &str) -> Result<()> {
     if !scheme_is(url, "https://") {
         return Err(Error::Invalid("o cancelamento direto exige um endereço https".into()));
     }
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .http_status_as_error(false)
+        // RFC 8058: não seguir redirecionamentos (evita SSRF para endereços internos).
+        .max_redirects(0)
         .timeout_global(Some(std::time::Duration::from_secs(15)))
         .build()
         .into();
