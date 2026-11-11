@@ -13,6 +13,7 @@ pub mod outbox;
 pub mod send;
 pub mod store;
 pub mod threads;
+pub mod unsubscribe;
 pub mod vacation;
 
 pub use attachments::Attachment;

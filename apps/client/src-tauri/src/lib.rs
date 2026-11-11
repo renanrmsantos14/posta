@@ -1,7 +1,7 @@
 //! Ponte entre a UI e o mail-core. Leituras vêm do SQLite local; rede só em sync e flags.
 
 use mail_core::rules::{self, Candidate};
-use mail_core::{search, vacation};
+use mail_core::{search, unsubscribe, vacation};
 use mail_core::{imap_sync, outbox, Delta, Hub, Kind, Page, send, Contact, DraftRecord, FlushReport, IdleEnd, ImapAccount, MessageDetail, MessageSummary, MsgFlag, OpKind, Outgoing, OutboxItem, ReplyRef, Role, SendReport, Store, UserFolder};
 use serde::{Deserialize, Serialize};
 use std::{collections::{HashMap, HashSet}, fs, path::PathBuf, sync::{atomic::{AtomicBool, Ordering}, Mutex}, time::{Duration, Instant}};
@@ -862,6 +862,40 @@ async fn save_eml(app: AppHandle, id: i64) -> CmdResult<String> {
     })
     .await?;
     Ok(path.display().to_string())
+}
+
+/// Cancelamento de inscrição oferecido pela mensagem (cabeçalho `List-Unsubscribe`), lido do servidor sob demanda.
+fn unsubscribe_offer(st: &AppState, id: i64) -> CmdResult<(ReplyRef, Option<unsubscribe::Unsubscribe>)> {
+    let loc = st.locate(id)?;
+    let acc = st.account_with_password(&loc.account)?;
+    let offer = st.hub.with(&acc, Kind::Read, |l| unsubscribe::fetch_on(l, &loc.mailbox, loc.uid)).map_err(err)?;
+    Ok((loc, offer))
+}
+
+#[tauri::command]
+async fn unsubscribe_info(app: AppHandle, id: i64) -> CmdResult<Option<unsubscribe::Unsubscribe>> {
+    blocking(app, move |st| Ok(unsubscribe_offer(st, id)?.1)).await
+}
+
+/// Executa o cancelamento pedido pelo usuário: `"one-click"` (POST direto) ou `"mailto"` (email pela conta da mensagem).
+/// Relê o cabeçalho no servidor em vez de confiar em endereço vindo da tela.
+#[tauri::command]
+async fn cancel_subscription(app: AppHandle, id: i64, method: String) -> CmdResult<()> {
+    blocking(app, move |st| {
+        let (loc, offer) = unsubscribe_offer(st, id)?;
+        let offer = offer.ok_or("a mensagem não oferece cancelamento de inscrição")?;
+        match method.as_str() {
+            "one-click" if offer.one_click => unsubscribe::post_one_click(offer.url.as_deref().unwrap_or_default()).map_err(err),
+            "mailto" => {
+                let m = offer.mailto.as_deref().and_then(unsubscribe::parse_mailto).ok_or("endereço de cancelamento inválido")?;
+                let acc = st.account_with_password(&loc.account)?;
+                let out = Outgoing { to: m.to, subject: m.subject, body: m.body, html: None, cc: String::new(), bcc: String::new(), attachments: Vec::new(), from: None, importance: None };
+                send::send(&acc, &out, None).map(|_| ()).map_err(err)
+            }
+            _ => Err("forma de cancelamento não oferecida por esta mensagem".to_string()),
+        }
+    })
+    .await
 }
 
 /// Arquivos prontos para o arrasto nativo para fora do app (um `.eml` por mensagem, ou um anexo) e a miniatura do cursor.
@@ -1739,6 +1773,8 @@ pub fn run() {
             save_attachment,
             forward_attachments,
             save_eml,
+            unsubscribe_info,
+            cancel_subscription,
             send_message,
             remove_account,
             list_user_folders,
