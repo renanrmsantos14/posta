@@ -23,6 +23,7 @@ export function SearchDialog({ state, onSubmit, onClose }: Props) {
   useEffect(() => { input.current?.focus(); input.current?.select(); }, []);
 
   function close() {
+    if (leaving) return;
     setLeaving(true);
     setTimeout(onClose, EXIT_MS);
   }
@@ -45,7 +46,7 @@ export function SearchDialog({ state, onSubmit, onClose }: Props) {
   function submit(e: React.FormEvent) {
     e.preventDefault();
     const n = name.trim();
-    if (!n) return;
+    if (!n || leaving) return;
     onSubmit(n);
     close();
   }

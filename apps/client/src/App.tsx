@@ -775,6 +775,8 @@ export default function App() {
     api.setSetting(key, value).catch((e) => toast(`Não consegui salvar a configuração: ${e}`, "error"));
   }
 
+  const savedSearchesRef = useRef(savedSearches);
+  savedSearchesRef.current = savedSearches;
   const writeSearches = (list: SavedSearch[]) => changeSetting("searches", serializeSavedSearches(list));
   const activeSearch = savedSearches.find((s) => s.query === query.trim() && s.scope === scope && (scope === "all" || s.folder === folder))?.id ?? null;
   function openSearch(s: SavedSearch) {
@@ -792,9 +794,16 @@ export default function App() {
     }
   }
   function deleteSearch(s: SavedSearch) {
-    const before = savedSearches;
-    writeSearches(before.filter((x) => x.id !== s.id));
-    toast(`Pesquisa “${s.name}” excluída`, "info", { action: { label: "Desfazer", onClick: () => writeSearches(before) } });
+    const index = savedSearches.findIndex((x) => x.id === s.id);
+    writeSearches(savedSearches.filter((x) => x.id !== s.id));
+    // Desfazer reinsere só esta pesquisa, preservando mudanças feitas depois da exclusão.
+    toast(`Pesquisa “${s.name}” excluída`, "info", { action: { label: "Desfazer", onClick: () => {
+      const now = savedSearchesRef.current;
+      if (now.some((x) => x.id === s.id)) return;
+      const next = [...now];
+      next.splice(Math.min(Math.max(index, 0), next.length), 0, s);
+      writeSearches(next);
+    } } });
   }
   const searchContext = (x: number, y: number, s: SavedSearch) => setMenu({ x, y, label: "Ações da pesquisa", items: [
     { label: "Renomear", icon: NotePencil, onSelect: () => setSearchDialog({ mode: "rename", id: s.id, query: s.query, name: s.name }) },
