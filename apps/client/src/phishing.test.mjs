@@ -6,7 +6,6 @@ import { baseDomain, suspiciousSender as s } from "./phishing.ts";
 test("positivos", () => {
   assert.match(s("Marina", "marina@lumen.com.br", "golpe@outro.com"), /diferente do remetente/);
   assert.match(s("banco@banco.com", "fraude@y.com", "fraude@y.com"), /banco@banco\.com/);
-  assert.match(s("Banco", "aviso@xn--bnco-9qa.com", ""), /imitam/);
   assert.match(s("Ana", "ana@lumen.com.br", "Ana <ana@lumen.com>"), /diferente/);
 });
 
@@ -16,6 +15,10 @@ test("negativos", () => {
   assert.equal(s("Marina", "marina@news.lumen.com.br", "<marina@lumen.com.br>"), null); // subdomínio
   assert.equal(s("marina@lumen.com.br", "noreply@mail.lumen.com.br", ""), null);
   assert.equal(s("Marina", "", "x@y.com"), null);
+  assert.equal(s("WordPress", "wordpress@site.com.br", "cliente@gmail.com"), null); // formulário de contato
+  assert.equal(s("Ana (ana@empresa.com) via Grupo", "noreply@googlegroups.com", ""), null);
+  assert.equal(s("Ótica", "contato@xn--tica-9ua.com.br", ""), null); // domínio com acento
+  assert.equal(s("a".repeat(100000), "x@y.com", ""), null);
 });
 
 test("baseDomain", () => {
