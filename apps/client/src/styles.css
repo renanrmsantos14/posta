@@ -857,6 +857,8 @@ kbd {
   .topbar .sync-btn { position: absolute; clip-path: inset(50%); }
   .topbar .searchbox .search { padding-right: 44px; }
   .topbar .searchbox .filter-btn { position: absolute; right: 2px; top: 2px; width: 40px; height: 40px; }
+  .topbar .searchbox .save-search-btn { right: 42px; }
+  .topbar .searchbox:has(.save-search-btn) .search { padding-right: 84px; }
   .list { overscroll-behavior-y: contain; }
   /* Selo de versão dentro da faixa da barra de gestos (Android), sem cobrir a lista, a leitura ou o Enviar. */
   .version { bottom: max(2px, calc(var(--sa-bottom) - 13px)); font-size: 9px; }

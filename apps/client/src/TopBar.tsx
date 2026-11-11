@@ -1,6 +1,6 @@
 // Barra superior: marca, busca central (com escopo e filtros) e ações globais (sincronizar, conta, configurações).
 import { useRef, useState } from "react";
-import { ArrowsClockwise, Check, FunnelSimple, GearSix, List, MagnifyingGlass, Plus, X } from "@phosphor-icons/react";
+import { ArrowsClockwise, BookmarkSimple, Check, FunnelSimple, GearSix, List, MagnifyingGlass, Plus, X } from "@phosphor-icons/react";
 import { OfflineBadge } from "./Offline";
 import type { QueueStatus } from "./api";
 import { SEARCH_FILTERS } from "./productivity";
@@ -18,6 +18,8 @@ interface Props {
   canScopeAll: boolean;
   onScope: (s: SearchScope) => void;
   onFilter: (token: string) => void;
+  /** Abre o diálogo para salvar a busca atual. */
+  onSaveSearch: () => void;
   net: QueueStatus;
   syncing: boolean;
   canSync: boolean;
@@ -66,6 +68,11 @@ export function TopBar(p: Props) {
           onClick={() => setMenu(menu === "filter" ? null : "filter")}>
           <FunnelSimple size={16} weight="bold" />
         </button>
+        {p.query.trim() && (
+          <button type="button" className="icon-btn filter-btn save-search-btn" aria-label="Salvar pesquisa" title="Salvar pesquisa" onClick={p.onSaveSearch}>
+            <BookmarkSimple size={16} weight="bold" />
+          </button>
+        )}
         {menu === "filter" && (
           <div className="top-menu" role="menu" aria-label="Filtros da busca">
             {SEARCH_FILTERS.map((f) => (
