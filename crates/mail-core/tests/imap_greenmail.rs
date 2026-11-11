@@ -140,6 +140,7 @@ fn responde_por_smtp_guarda_em_enviados_e_marca_respondida() {
         bcc: String::new(),
         attachments: vec![],
         from: None,
+        importance: None,
     };
     let report = send::send(&eu, &out, Some(&reply)).unwrap();
     assert_eq!(report.warning, None);
@@ -289,6 +290,7 @@ fn envia_com_anexo_e_cc_e_le_de_volta() {
             data: base64::engine::general_purpose::STANDARD.encode(&conteudo),
         }],
         from: None,
+        importance: None,
     };
     send::send(&eu, &out, None).unwrap();
 
@@ -494,6 +496,7 @@ fn envia_com_alias_como_remetente() {
         bcc: String::new(),
         attachments: vec![],
         from: Some("Reservas Betinhos <reservas@betinhos.exemplo>".into()),
+        importance: None,
     };
     send::send(&eu, &out, None).unwrap();
 
@@ -545,6 +548,7 @@ fn fila_offline_reaplica_quando_a_rede_volta() {
         bcc: String::new(),
         attachments: vec![],
         from: None,
+        importance: None,
     };
     store.enqueue_op(&acc.id, "INBOX", uids[0], mail_core::OpKind::Seen, "").unwrap();
     store.enqueue_op(&acc.id, "INBOX", uids[1], mail_core::OpKind::Star, "").unwrap();

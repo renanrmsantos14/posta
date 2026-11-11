@@ -1389,7 +1389,7 @@ fn auto_reply(st: &AppState, acc: &ImapAccount, new: &[Candidate]) {
         }
         let reply = st.store.lk().reply_ref(c.id).ok().flatten();
         let subject = if vac.subject.trim().is_empty() { format!("Resposta automática: {}", c.subject) } else { vac.subject.clone() };
-        let out = Outgoing { to: addr.to_string(), subject, body: vac.body.clone(), html: None, cc: String::new(), bcc: String::new(), attachments: Vec::new(), from: None };
+        let out = Outgoing { to: addr.to_string(), subject, body: vac.body.clone(), html: None, cc: String::new(), bcc: String::new(), attachments: Vec::new(), from: None, importance: None };
         match send::send_auto(acc, &out, reply.as_ref()) {
             Ok(_) => {
                 st.store.lk().mark_vacation_replied(&acc.id, addr, now_ts()).ok();

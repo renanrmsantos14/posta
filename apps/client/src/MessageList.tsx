@@ -3,6 +3,7 @@
 // botões: o clique em caixa/estrela é delegado por `data-act`, e as ações do mouse ficam numa barra flutuante irmã.
 import { forwardRef, memo, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Archive, Check, EnvelopeSimple, EnvelopeSimpleOpen, PushPin, Star, Trash } from "@phosphor-icons/react";
+import { ImportanceMark } from "./ImportanceMark";
 import type { Category, MessageSummary } from "./api";
 import { CategoryChip } from "./Categories";
 import { dateGroup, shortDate } from "./dates";
@@ -117,7 +118,7 @@ const RowView = memo(function RowView({ item: it, rowH, live, setFocusId, groupe
       <span className="dot" aria-hidden />
       <span className="check" data-act="check" aria-hidden><Check size={11} weight="bold" /></span>
       <span className="from has-meta">
-        <span className="sr">{unread ? "Não lida. " : ""}{starred ? "Com estrela. " : ""}{m.pinned ? "Fixada. " : ""}</span>
+        <span className="sr">{unread ? "Não lida. " : ""}{starred ? "Com estrela. " : ""}{m.pinned ? "Fixada. " : ""}{m.importance === 1 ? "Importância alta. " : m.importance === -1 ? "Importância baixa. " : ""}</span>
         <span className="from-name">{m.from_name || m.from_addr}</span>
         {n > 1 && <span className="thread-n" title={`${n} mensagens na conversa`}>{n}</span>}
       </span>
@@ -128,6 +129,7 @@ const RowView = memo(function RowView({ item: it, rowH, live, setFocusId, groupe
       <span className="subject">
         {acct !== null && <span className="acct" title={m.account}>{acct}</span>}
         {m.pinned && <PushPin size={12} weight="fill" className="pin-mark" aria-hidden />}
+        <ImportanceMark value={m.importance} />
         {category && <CategoryChip category={category} />}
         {m.subject || "(sem assunto)"}
       </span>

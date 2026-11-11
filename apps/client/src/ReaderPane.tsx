@@ -8,6 +8,7 @@ import { addrOf } from "./aliases";
 import { fmtLong, shortDate } from "./dates";
 import { fmtSize } from "./format";
 import type { Attachment, MessageDetail, MessageSummary } from "./api";
+import { ImportanceMark } from "./ImportanceMark";
 
 export const splitAddrs = (v: string) => v.split(/,(?=(?:[^"]*"[^"]*")*[^"]*$)/).map((x) => x.trim()).filter(Boolean);
 
@@ -144,7 +145,7 @@ export function ReaderPane(p: ReaderPaneProps) {
             <button className="btn ghost small back" onClick={() => p.onBack()}>
               <ArrowLeft size={14} weight="bold" /> {p.full ? "Voltar" : p.folderLabel}
             </button>
-            <h1>{p.detail.subject || "(sem assunto)"}</h1>
+            <h1><ImportanceMark value={p.detail.importance} />{p.detail.subject || "(sem assunto)"}</h1>
             {p.threaded && p.mobileActions}
             {p.threaded ? (
               <div className="thread">

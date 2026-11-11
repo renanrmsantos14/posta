@@ -13,6 +13,7 @@ description: Verifica o editor formatado do Composer, os chips de destinatários
    - Colar HTML hostil (`<script>`, `onclick`, `<img onerror>`, `style`, `javascript:`) via `ClipboardEvent` com `DataTransfer`: o `innerHTML` sai sem nada disso.
    - Esperar ~1,9 s mostra "Rascunho salvo"; Esc, Rascunhos, abrir o rascunho: texto continua formatado e os chips voltam.
    - Responder (`r`) abre com assinatura e a original dentro de `<blockquote>`.
+   - Importância: `select[aria-label=Importância]` no rodapé do Composer (normal/alta/baixa); no mock, `.imp-mark[data-imp=high|low]` aparece em itens da lista e no `h1` do leitor.
    - Console sem erro nem aviso (403 de fonte fora do `fs.allow` do vite não conta).
 4. Print: `/home/renan/.t3/userdata/attachments/posta-editor.png` (chip + lista de sugestões + texto formatado). Encerre o vite pelo PID de `ss -ltnp`.
 5. Não validável no mock: o comando Tauri `suggest_contacts` rodando no app real e o envio por SMTP de verdade (só GreenMail). `src-tauri` não compila no host sem libdbus; use `cargo check` em Docker (rust:1-bookworm + libwebkit2gtk-4.1-dev, libdbus-1-dev, libgtk-3-dev, libssl-dev).
