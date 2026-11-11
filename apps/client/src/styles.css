@@ -657,7 +657,20 @@ kbd {
   background: transparent; color: var(--text);
   font: 15px/1.7 var(--sans);
 }
-.composer-foot { display: flex; align-items: center; gap: 10px; padding: 12px 12px 12px 20px; border-top: 1px solid var(--line); }
+.composer-foot { display: flex; align-items: center; gap: 10px; padding: 8px 20px; border-top: 1px solid var(--line); font-size: 12px; color: var(--faint); }
+.attach-hint { margin-left: auto; }
+.composer-win { display: flex; gap: 2px; }
+/* Barra de comandos no topo, como o Outlook: Enviar em destaque, depois anexar, modelos e importância. */
+.composer-cmd { display: flex; align-items: center; gap: 6px; padding: 6px 12px 8px 20px; border-bottom: 1px solid var(--line); }
+.composer-cmd .icon-btn { border-color: transparent; }
+.composer-cmd .btn.primary { padding-inline: 16px; }
+.cmd-sep { width: 1px; height: 18px; margin: 0 4px; background: var(--line); }
+.cc-toggles { display: inline-flex; gap: 2px; }
+.composer { transition: transform 240ms var(--ease-out), opacity 240ms var(--ease-out), width 180ms var(--ease-out), height 180ms var(--ease-out); }
+.composer[data-max] { right: 50%; bottom: 50%; transform: translate(50%, 50%); width: min(980px, calc(100vw - 48px)); height: calc(100vh - 48px); border-bottom: 1px solid var(--line); border-radius: var(--r12); }
+.composer[data-max][data-leaving] { transform: translate(50%, calc(50% + 16px)); }
+.composer[data-min] { height: auto; }
+.composer[data-min] > :not(.composer-head) { display: none; }
 .hint-keys { display: inline-flex; gap: 3px; }
 .push { margin-left: auto; }
 .composer .confirm { border-radius: var(--r12) var(--r12) 0 0; }
