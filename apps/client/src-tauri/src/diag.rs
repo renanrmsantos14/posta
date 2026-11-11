@@ -10,6 +10,47 @@ extern "C" {
     fn __android_log_write(prio: i32, tag: *const std::ffi::c_char, text: *const std::ffi::c_char) -> i32;
 }
 
+/// Arquivo de log do desktop (`<dados do app>/logs/posta.log`). O release no Windows não tem console, então sem ele
+/// um pânico ou uma saída não deixam rastro.
+#[cfg(not(target_os = "android"))]
+static LOG_FILE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+/// Liga o log em arquivo. Passa de ~1 MB, o antigo vira `posta.log.old` (guarda só uma geração).
+#[cfg(not(target_os = "android"))]
+pub fn init_file(data_dir: &std::path::Path) {
+    let dir = data_dir.join("logs");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let file = dir.join("posta.log");
+    if std::fs::metadata(&file).map(|m| m.len() > 1_000_000).unwrap_or(false) {
+        std::fs::rename(&file, dir.join("posta.log.old")).ok();
+    }
+    LOG_FILE.set(file).ok();
+    log(&format!("--- Posta {} iniciado (pid {}) ---", env!("CARGO_PKG_VERSION"), std::process::id()));
+}
+
+/// Registra pânicos (thread, local e mensagem) antes de o processo seguir ou cair.
+#[cfg(not(target_os = "android"))]
+pub fn install_panic_hook() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let thread = std::thread::current();
+        log(&format!("PÂNICO na thread {:?}: {info}", thread.name().unwrap_or("?")));
+        default(info);
+    }));
+}
+
+#[cfg(not(target_os = "android"))]
+fn append(line: &str) {
+    use std::io::Write;
+    let Some(path) = LOG_FILE.get() else { return };
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        writeln!(f, "{secs} {line}").ok();
+    }
+}
+
 pub fn log(msg: &str) {
     #[cfg(target_os = "android")]
     if let Ok(text) = std::ffi::CString::new(msg) {
@@ -17,7 +58,10 @@ pub fn log(msg: &str) {
         unsafe { __android_log_write(4, c"Posta".as_ptr(), text.as_ptr()) };
     }
     #[cfg(not(target_os = "android"))]
-    eprintln!("[posta] {msg}");
+    {
+        eprintln!("[posta] {msg}");
+        append(msg);
+    }
 }
 
 /// Comandos síncronos em execução: (seq, nome, início). O vigia avisa quando algum passa do limite.

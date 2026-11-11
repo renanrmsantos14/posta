@@ -1690,6 +1690,8 @@ pub(crate) fn android_cert_dir() {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(not(target_os = "android"))]
+    diag::install_panic_hook();
     diag::log("run: início");
     #[cfg(target_os = "android")]
     {
@@ -1716,6 +1718,8 @@ pub fn run() {
             }
             let dir = app.path().app_data_dir()?;
             fs::create_dir_all(&dir)?;
+            #[cfg(not(target_os = "android"))]
+            diag::init_file(&dir);
             let store = Store::open(dir.join("mail.sqlite"))?;
             diag::log(&format!("setup: banco aberto em {} ms", t0.elapsed().as_millis()));
             app.manage(AppState::new(dir, store));
@@ -1832,6 +1836,11 @@ pub fn run() {
             list_scheduled,
             take_scheduled
         ]))
-        .run(tauri::generate_context!())
-        .expect("erro ao iniciar o Posta");
+        .build(tauri::generate_context!())
+        .expect("erro ao iniciar o Posta")
+        .run(|_, event| match event {
+            tauri::RunEvent::ExitRequested { code, .. } => diag::log(&format!("saída pedida (código {code:?})")),
+            tauri::RunEvent::Exit => diag::log("saída: encerrando"),
+            _ => {}
+        });
 }
