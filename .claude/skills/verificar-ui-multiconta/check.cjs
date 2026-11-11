@@ -22,21 +22,22 @@ const ok = (cond, msg) => { console.log(`${cond ? '✓' : '✗'} ${msg}`); if (!
   let p = await page({ width: 1280, height: 800 });
   const heads = p.locator('.rail .acct-head');
   ok(await heads.count() === 5, 'uma seção por conta (5)');
-  ok(await p.locator('.rail .acct-strip button').count() === 6, 'faixa: Todas + 5 contas');
+  ok(await p.locator('.rail .acct-strip').count() === 0, 'sem faixa de avatares (estilo Outlook)');
   const sec = (i) => p.locator('.rail .acct-sec').nth(i);
   // Contador da seção = não lidas da Entrada da conta; Todas › Entrada = soma.
   const nums = [];
   for (let i = 0; i < 5; i++) nums.push(Number(await sec(i).locator('.acct-head .count').textContent().catch(() => '0')) || 0);
   const all = Number(await p.locator('.rail .rail-section[aria-label="Todas as contas"] .nav-item .count').first().textContent());
   ok(nums.reduce((a, n) => a + n, 0) === all, `Todas › Entrada (${all}) soma as seções (${nums.join('+')})`);
-  // Acordeão: abrir a 2ª fecha as outras; nenhuma pasta de outra conta aparece.
+  // Padrão "Várias abertas": cada conta abre por conta própria ("Uma por vez" é conferido no preview por verificar-ui-temas).
   await heads.nth(0).click(); await p.waitForTimeout(300);
   await heads.nth(1).click(); await p.waitForTimeout(300);
-  ok(await p.locator('.rail .acct-sec[data-open]').count() === 1, 'só uma seção aberta por vez');
+  ok(await p.locator('.rail .acct-sec[data-open]').count() === 2, 'várias seções abertas ao mesmo tempo (padrão)');
   await sec(1).locator('.nav-item:visible').first().click(); await p.waitForTimeout(400);
   const scope = (await p.locator('.list-scope').textContent()).replace('›', '').trim();
   const name = (await sec(1).locator('.acct-name').textContent()).trim();
-  ok(scope === name, `cabeçalho da lista mostra a conta (${scope})`);
+  // O cabeçalho da seção mostra o endereço; o da lista, o apelido (parte local ou provedor do endereço).
+  ok(name.includes('@') && name.toLowerCase().includes(scope.toLowerCase()), `cabeçalho da lista mostra a conta (${scope} em ${name})`);
   ok(Number(await p.locator('.tab .count, [role=tab] .count').first().textContent().catch(() => '0')) <= nums[1], 'Foco da conta não passa do contador da seção');
   await p.screenshot({ path: `${out}/multiconta-desktop.png` });
   await p.close();
@@ -57,7 +58,8 @@ const ok = (cond, msg) => { console.log(`${cond ? '✓' : '✗'} ${msg}`); if (!
   await p.locator('.drawer-panel .acct-head').nth(2).click(); await p.waitForTimeout(300);
   await p.locator('.drawer-panel .acct-sec[data-open] .nav-item').first().click(); await p.waitForTimeout(500);
   ok(!(await p.locator('.drawer-panel').isVisible().catch(() => false)), 'gaveta fecha ao escolher pasta');
-  ok((await p.locator('.list-scope').textContent()).includes((await p.locator('.rail .acct-name').nth(2).textContent().catch(() => '')) || ''), 'título reflete a conta escolhida');
+  const scope2 = (await p.locator('.list-scope').textContent()).replace('›', '').trim().toLowerCase();
+  ok(scope2 !== '' && ((await p.locator('.rail .acct-name').nth(2).textContent().catch(() => '')) || '').toLowerCase().includes(scope2), 'título reflete a conta escolhida');
   await menu.click(); await p.waitForTimeout(400);
   await p.mouse.click(370, 400); await p.waitForTimeout(400);
   ok(!(await p.locator('.drawer-panel').isVisible().catch(() => false)), 'toque fora fecha');
