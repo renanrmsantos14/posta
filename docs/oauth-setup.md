@@ -68,7 +68,7 @@ Observações para Microsoft 365 (conta de trabalho ou escola):
 
 ## Como o Posta se comporta
 
-- O **refresh token** fica no cofre do sistema (serviço `posta`, entrada `<conta>:oauth-refresh`), onde as senhas já ficam. O **access token** só existe em memória e é renovado quando faltam menos de 60 s para vencer.
+- O **refresh token** fica no cofre do sistema (serviço `posta`, entrada `<conta>:oauth-refresh`), onde as senhas já ficam. O **access token** só existe em memória e é renovado quando faltam menos de 60 s para vencer. No Windows, que limita cada credencial a 1280 caracteres, tokens maiores são divididos em partes `<conta>:oauth-refresh#1..n`.
 - Se o servidor recusar o token mesmo assim (revogado, relógio, vencimento antecipado), o Posta renova e repete a operação **uma vez**. Falha seguida de nova falha não entra em laço.
 - Quando o provedor encerra o acesso (token de 7 dias do Google em modo Teste, senha trocada, consentimento pendente do admin), o aviso explica o motivo e traz o botão **Entrar de novo**; também há um em *Configurações › Contas*. O login refeito só vale para a mesma conta.
 - Tokens nunca vão para log, arquivo de contas ou mensagens de erro.
