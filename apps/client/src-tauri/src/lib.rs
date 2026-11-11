@@ -248,10 +248,9 @@ fn run_op(st: &AppState, account: &str, mailbox: &str, uids: &[u32], kind: OpKin
 /// Sincroniza uma pasta pela sessão persistente da conta (reconecta com backoff se a rede cair).
 fn sync_via_hub(st: &AppState, store: &mut Store, acc: &ImapAccount, mailbox: &str, keep: Option<usize>) -> CmdResult<mail_core::SyncReport> {
     let report = st.hub.with(acc, Kind::Cmd, |live| imap_sync::sync_on(live, acc, store, mailbox, keep)).map_err(err)?;
-    // Sincronização grande: devolve o WAL ao arquivo principal para as leituras não ficarem lentas.
-    if report.fetched >= 500 {
-        store.checkpoint();
-    }
+    // Devolve o WAL ao arquivo principal a cada sync (barato quando pouco mudou). Só nas grandes, o WAL de quem
+    // deixa o app aberto crescia sem parar (90 MB, arquivo principal intocado havia dias) e as leituras pioravam.
+    store.checkpoint();
     Ok(report)
 }
 
@@ -864,12 +863,20 @@ async fn save_eml(app: AppHandle, id: i64) -> CmdResult<String> {
     Ok(path.display().to_string())
 }
 
-/// Cancelamento de inscrição oferecido pela mensagem (cabeçalho `List-Unsubscribe`), lido do servidor sob demanda.
+/// Cancelamento de inscrição oferecido pela mensagem (cabeçalho `List-Unsubscribe`), guardado no sync; só mensagens antigas vão ao servidor, uma vez.
 fn unsubscribe_offer(st: &AppState, id: i64) -> CmdResult<(ReplyRef, Option<unsubscribe::Unsubscribe>)> {
     let loc = st.locate(id)?;
-    let acc = st.account_with_password(&loc.account)?;
-    let offer = st.hub.with(&acc, Kind::Read, |l| unsubscribe::fetch_on(l, &loc.mailbox, loc.uid)).map_err(err)?;
-    Ok((loc, offer))
+    // Lido no sync: abrir não vai ao servidor (no Gmail eram 0,5 a 3 s segurando a sessão de leitura).
+    let lines = match st.store.lk().unsub(id).map_err(err)? {
+        Some(l) => l,
+        None => {
+            let acc = st.account_with_password(&loc.account)?;
+            let l = st.hub.with(&acc, Kind::Read, |l| unsubscribe::fetch_on(l, &loc.mailbox, loc.uid)).map_err(err)?;
+            st.store.lk().set_unsub(id, &l).map_err(err)?;
+            l
+        }
+    };
+    Ok((loc, unsubscribe::parse(lines.as_bytes())))
 }
 
 #[tauri::command]
@@ -878,7 +885,7 @@ async fn unsubscribe_info(app: AppHandle, id: i64) -> CmdResult<Option<unsubscri
 }
 
 /// Executa o cancelamento pedido pelo usuário: `"one-click"` (POST direto) ou `"mailto"` (email pela conta da mensagem).
-/// Relê o cabeçalho no servidor em vez de confiar em endereço vindo da tela.
+/// Usa o cabeçalho guardado no sync (ou relido no servidor), nunca um endereço vindo da tela.
 #[tauri::command]
 async fn cancel_subscription(app: AppHandle, id: i64, method: String) -> CmdResult<()> {
     blocking(app, move |st| {

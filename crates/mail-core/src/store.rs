@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS messages (
   cc_addrs TEXT NOT NULL DEFAULT '',
   thread_id INTEGER NOT NULL DEFAULT 0,
   importance INTEGER NOT NULL DEFAULT 0,
+  unsub TEXT,
   UNIQUE (account, mailbox, uid)
 );
 CREATE INDEX IF NOT EXISTS messages_by_date ON messages (date DESC);
@@ -176,7 +177,7 @@ const FTS_CREATE: &str = "CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING 
 
 /// Revisão das colunas/índices/tabelas adicionadas sem recriar o banco (guardada em `application_id`).
 /// Banco já na revisão pula todo o esquema ao abrir.
-const SCHEMA_REV: i32 = 0x5054_0004;
+const SCHEMA_REV: i32 = 0x5054_0005;
 
 /// Mensagem já interpretada, pronta para gravar.
 #[derive(Debug, Clone, Default)]
@@ -206,6 +207,8 @@ pub struct NewMessage {
     pub header_only: bool,
     /// Importância pedida pelo remetente: 1 alta, -1 baixa, 0 normal.
     pub importance: i8,
+    /// Linhas `List-Unsubscribe*` (`unsubscribe::header_lines`); `None` quando o cabeçalho veio cortado.
+    pub unsub: Option<String>,
 }
 
 /// O que é preciso para responder mantendo a conversa agrupada.
@@ -669,6 +672,8 @@ impl Store {
         self.add_column("messages", "subject_re", "INTEGER NOT NULL DEFAULT 0")?;
         // Só mensagens novas trazem a importância; as anteriores ficam 0 (normal), sem baixar nada.
         self.add_column("messages", "importance", "INTEGER NOT NULL DEFAULT 0")?;
+        // NULL = ainda não lido; as anteriores buscam no servidor uma vez, ao abrir.
+        self.add_column("messages", "unsub", "TEXT")?;
         self.add_column("mailbox_state", "highest_modseq", "INTEGER NOT NULL DEFAULT 0")?;
         self.add_column("mailbox_state", "uid_next", "INTEGER NOT NULL DEFAULT 0")?;
         // 1 = a cópia local já tem todas as mensagens da pasta (sync incremental vale); 0 = falta histórico.
@@ -879,8 +884,8 @@ impl Store {
             let mut stmt = tx.prepare_cached(
                 "INSERT OR IGNORE INTO messages
                  (account, mailbox, uid, from_name, from_addr, subject, date, snippet, body_text, body_html, seen,
-                  message_id, refs, reply_addr, attachments, flagged, to_addrs, cc_addrs, subject_key, subject_re, body_loaded, importance)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
+                  message_id, refs, reply_addr, attachments, flagged, to_addrs, cc_addrs, subject_key, subject_re, body_loaded, importance, unsub)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
             )?;
             let mut refs = tx.prepare_cached("INSERT OR IGNORE INTO msg_refs (id, account, ref) VALUES (?1, ?2, ?3)")?;
             for m in msgs {
@@ -907,7 +912,8 @@ impl Store {
                     key,
                     re,
                     !m.header_only,
-                    m.importance
+                    m.importance,
+                    m.unsub
                 ])?;
                 if n == 0 {
                     continue;
@@ -1288,6 +1294,16 @@ impl Store {
                 },
             )
             .optional()?)
+    }
+
+    /// Linhas de cancelamento guardadas; `None` = ainda não lidas (mensagem antiga ou cabeçalho cortado).
+    pub fn unsub(&self, id: i64) -> Result<Option<String>> {
+        Ok(self.conn.query_row("SELECT unsub FROM messages WHERE id = ?1", params![id], |r| r.get(0)).optional()?.flatten())
+    }
+
+    pub fn set_unsub(&self, id: i64, lines: &str) -> Result<()> {
+        self.conn.execute("UPDATE messages SET unsub = ?1 WHERE id = ?2", params![lines, id])?;
+        Ok(())
     }
 
     pub fn set_reply_addr(&self, id: i64, addr: &str) -> Result<()> {
@@ -1755,6 +1771,26 @@ mod tests {
         s.conn.pragma_update(None, "application_id", SCHEMA_REV - 1).unwrap();
         let s = Store::init(s.conn).unwrap();
         assert!(s.summaries(&ids).unwrap().iter().all(|m| m.importance == 0));
+    }
+
+    #[test]
+    fn cancelamento_guardado_no_sync_e_banco_antigo_fica_desconhecido() {
+        let mut s = Store::open_in_memory().unwrap();
+        let mut com = msg(1, "Boletim", "x", 100);
+        com.unsub = Some("list-unsubscribe: <https://x.com/u>\r\n".into());
+        let mut sem = msg(2, "Oi", "x", 200);
+        sem.unsub = Some(String::new());
+        let ids = s.insert_messages("a", "INBOX", &[com, sem, msg(3, "Cortado", "x", 300)]).unwrap();
+        assert_eq!(s.unsub(ids[0]).unwrap().as_deref(), Some("list-unsubscribe: <https://x.com/u>\r\n"));
+        assert_eq!(s.unsub(ids[1]).unwrap().as_deref(), Some(""));
+        assert_eq!(s.unsub(ids[2]).unwrap(), None);
+        s.set_unsub(ids[2], "").unwrap();
+        assert_eq!(s.unsub(ids[2]).unwrap().as_deref(), Some(""));
+        // Banco criado antes da coluna: ela é adicionada vazia e cada mensagem busca no servidor uma vez.
+        s.conn.execute_batch("ALTER TABLE messages DROP COLUMN unsub").unwrap();
+        s.conn.pragma_update(None, "application_id", SCHEMA_REV - 1).unwrap();
+        let s = Store::init(s.conn).unwrap();
+        assert!(ids.iter().all(|&id| s.unsub(id).unwrap().is_none()));
     }
 
     #[test]

@@ -42,11 +42,24 @@ fn headers(raw: &[u8]) -> Vec<(String, String)> {
     out
 }
 
-/// Baixa só os cabeçalhos de cancelamento da mensagem (sem corpo nem anexos) numa sessão já aberta.
-pub fn fetch_on(live: &mut Live, mailbox: &str, uid: u32) -> Result<Option<Unsubscribe>> {
+/// Só as linhas de cancelamento do bloco de cabeçalhos, prontas para `parse` (vazio: a mensagem não as tem).
+/// `None` quando o bloco veio cortado (leitura parcial de mensagem grande) e não dá para saber.
+pub fn header_lines(raw: &[u8]) -> Option<String> {
+    raw.windows(4).any(|w| w == b"\r\n\r\n").then(|| {
+        headers(raw)
+            .into_iter()
+            .filter(|(n, _)| n == "list-unsubscribe" || n == "list-unsubscribe-post")
+            .map(|(n, v)| format!("{n}: {v}\r\n"))
+            .collect()
+    })
+}
+
+/// Baixa só os cabeçalhos de cancelamento da mensagem (sem corpo nem anexos) numa sessão já aberta, já em `header_lines`.
+pub fn fetch_on(live: &mut Live, mailbox: &str, uid: u32) -> Result<String> {
     live.s.select(mailbox)?;
     let fetches = live.s.uid_fetch(uid.to_string(), "BODY.PEEK[HEADER.FIELDS (LIST-UNSUBSCRIBE LIST-UNSUBSCRIBE-POST)]")?;
-    Ok(fetches.iter().find_map(|f| f.header()).and_then(parse))
+    let raw = fetches.iter().find_map(|f| f.header()).unwrap_or_default();
+    Ok(header_lines(raw).unwrap_or_default())
 }
 
 /// Itens entre `<...>` de um valor de `List-Unsubscribe`.
@@ -160,6 +173,17 @@ mod tests {
         assert_eq!(parse(&h("")), None);
         // O corpo não conta, nem itens sem esquema conhecido.
         assert_eq!(parse(&h("List-Unsubscribe: <ftp://x.com/u>")), None);
+    }
+
+    #[test]
+    fn linhas_guardadas_reproduzem_a_oferta() {
+        let raw = h("List-Unsubscribe: <https://x.com/u>,\r\n <mailto:s@x.com>\r\nList-Unsubscribe-Post: List-Unsubscribe=One-Click");
+        let lines = header_lines(&raw).unwrap();
+        assert_eq!(parse(lines.as_bytes()), parse(&raw));
+        assert!(parse(lines.as_bytes()).unwrap().one_click);
+        assert_eq!(header_lines(&h("")).as_deref(), Some(""));
+        // Leitura parcial sem o fim do cabeçalho: desconhecido, não "sem cancelamento".
+        assert_eq!(header_lines(b"From: a@b.c\r\nList-Unsub"), None);
     }
 
     #[test]

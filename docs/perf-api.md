@@ -49,7 +49,7 @@ Corpo sob demanda: `open_message` sem corpo no cache baixa pela sessão; sem red
 - Fios (`thread_id`) recalculados só nos componentes tocados pela inserção (`insert_messages` deixou de ser quadrático); tabela `msg_refs`.
 - Busca: FTS5 com prefixo (`prefix='2'`); incluem corpos que chegam depois. Contatos em tabela própria e indexada (`suggest_contacts`).
 - `unread_counts` por índice parcial.
-- PRAGMAs: WAL, `synchronous=NORMAL`, `cache_size` e `mmap_size` maiores, `wal_autocheckpoint` alto, mais `Store::checkpoint()` após sincronizações grandes. `Store::open` usa caminho rápido por `user_version`/`application_id` e não reexecuta o schema.
+- PRAGMAs: WAL, `synchronous=NORMAL`, `cache_size` e `mmap_size` maiores, `wal_autocheckpoint` alto, mais `Store::checkpoint()` (PASSIVE) depois de cada sincronização. `Store::open` usa caminho rápido por `user_version`/`application_id` e não reexecuta o schema.
 
 ## Medições (50 mil mensagens, `tests/perf_bench.rs`)
 
