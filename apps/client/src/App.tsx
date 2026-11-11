@@ -18,7 +18,7 @@ import { justSwiped, swipeProps, type SwipeAction, type SwipeDir } from "./swipe
 import { escapeHtml, textToHtml } from "./richtext";
 import { Toaster, toast } from "./toast";
 import { watchOpenTarget, type OpenTarget } from "./notificationOpen";
-import { applyAppearance, themePref, watchSystem } from "./themes";
+import { applyAppearance, applyStyle, parseCustomThemes, themePref, watchSystem } from "./themes";
 import { FOLDERS, LOCAL_VIEWS, SHOWS_UNREAD, folderKey, folderTree, parseOpenMap, viewInfo, withStarred, type Dest, type FolderNode } from "./folders";
 import { DragGhost, placeGhost } from "./DragGhost";
 import { canDragOut, dragOut } from "./dragout";
@@ -589,11 +589,14 @@ export default function App() {
   function navigate(view: View, account: string | null = null) {
     const acc = multi ? parseBox(view)?.account ?? account : null;
     setAccountFilter(acc);
-    if (acc && settings["rail:account"] !== acc) changeSetting("rail:account", acc);
+    if (acc && !openAccounts.includes(acc)) setOpenAccounts(oneAtATime ? [acc] : [...openAccounts, acc]);
     openFolder(view);
   }
-  /** Seção de conta aberta na barra lateral (uma por vez, guardada como as outras preferências). */
-  const openAccount = accounts?.some((a) => a.id === settings["rail:account"]) ? settings["rail:account"] : null;
+  /** "Uma por vez" (sanfona): abrir uma conta fecha as outras. */
+  const oneAtATime = settings.railAccounts === "one";
+  /** Seções de conta abertas na barra lateral (várias ao mesmo tempo, guardadas como as outras preferências). */
+  const openAccounts = (settings["rail:accounts"] ?? settings["rail:account"] ?? "").split("\n").filter((id) => accounts?.some((a) => a.id === id)).slice(0, oneAtATime ? 1 : undefined);
+  const setOpenAccounts = (ids: string[]) => changeSetting("rail:accounts", ids.join("\n"));
   const drawer = useDrawer();
   const menuRef = useRef<HTMLButtonElement>(null);
 
@@ -740,12 +743,17 @@ export default function App() {
 
   /** Tema, destaque e fonte vivem no <html>. Antes de as configurações chegarem vale o que o public/theme-init.js aplicou. */
   const [accentAdjusted, setAccentAdjusted] = useState(false);
+  const customThemes = useMemo(() => parseCustomThemes(settings.customThemes), [settings.customThemes]);
   useEffect(() => {
     if (!prefsReady) return;
-    const apply = () => setAccentAdjusted(applyAppearance(themePref(settings.theme), settings.accent)?.adjusted ?? false);
+    const pref = themePref(settings.theme, customThemes);
+    const apply = () => setAccentAdjusted(applyAppearance(pref, settings.accent, customThemes)?.adjusted ?? false);
     apply();
-    return themePref(settings.theme) === "system" ? watchSystem(apply) : undefined;
-  }, [prefsReady, settings.theme, settings.accent]);
+    return pref === "system" ? watchSystem(apply) : undefined;
+  }, [prefsReady, settings.theme, settings.accent, customThemes]);
+  useEffect(() => {
+    if (prefsReady) applyStyle(settings);
+  }, [prefsReady, settings.radius, settings.shadow, settings.font, settings.railDensity]);
   useEffect(() => {
     const root = document.documentElement;
     if (settings.size === "s" || settings.size === "l") root.dataset.size = settings.size;
@@ -1653,7 +1661,7 @@ export default function App() {
       searches={savedSearches} activeSearch={activeSearch} openSearch={openSearch} onSearchContext={searchContext} onDeleteSearch={deleteSearch}
       onRenameSearch={(s) => setSearchDialog({ mode: "rename", id: s.id, query: s.query, name: s.name })} accounts={accounts}
       accountFilter={accountFilter} acctLabel={acctLabel} acctColor={acctColor}
-      openAccount={openAccount} onOpenAccount={(id) => changeSetting("rail:account", id ?? "")}
+      openAccounts={openAccounts} onToggleAccount={(id, open) => setOpenAccounts(open ? (oneAtATime ? [id] : [...openAccounts, id]) : openAccounts.filter((a) => a !== id))}
       drafts={drafts.length} scheduled={scheduled.length} outbox={net.outbox} showDrafts={showDrafts} showScheduled={showScheduled} showOutbox={showOutbox}
       openDrafts={inAll(openDrafts)} openScheduled={inAll(openScheduled)} openOutbox={inAll(openOutbox)}
       onNewFolder={(parent, account) => setFolderDialog({ mode: "create", account: parent?.account ?? account ?? accountFilter ?? undefined, parent: parent?.name })}
