@@ -7,7 +7,8 @@
     "dev": "vite --port 36480 --strictPort",
     "build": "tsc -b && vite build",
     "tauri": "tauri",
-    "typecheck": "tsc -b"
+    "typecheck": "tsc -b",
+    "test": "node --test src/phishing.test.mjs"
   },
   "dependencies": {
     "@crabnebula/tauri-plugin-drag": "^2.1.0",
