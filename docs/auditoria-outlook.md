@@ -40,8 +40,31 @@ P = pequeno (≤1 dia), M = médio, G = grande (spec própria).
 ## Próximo passo sugerido
 Onda 1 (P, sem dependências): #1, #2, #4, #6, #7, #16. Onda 2: #3, #5, #8, #18. Onda 3 (spec própria): #11, #12, #13, #20.
 
-## Levantamento no app instalado (parcial)
-Feito no novo Outlook v1.2026.1020.100 (Betinhos-Renan), só a aba Página Inicial; Exibir, Ajuda, Arquivo, Configurações, Nova mensagem e menus de contexto não foram abertos, e o Outlook clássico não abriu (encerra em segundos sem janela).
-Itens vistos na Página Inicial e o que muda na tabela acima:
-- Já listados: Excluir, Arquivar, Responder, Responder a todos, Encaminhar, Mover, Lido/Não lido, Categorizar, Bandeira, Fixar, Adiar, Imprimir, Destaques/Outros, Pastas de Pesquisa (#4, #21).
-- **Novos**: Etapas rápidas (#9 confirmado), Relatar lixo eletrônico (#15), Desfazer global de ações (o Posta só desfaz o envio), responder com Reunião (#17), Descobrir grupos (fora de escopo em IMAP), pastas Observações, Arquivo Morto, Histórico de Conversa e RSS Feeds (RSS fora de escopo).
+## Levantamento no app instalado (novo Outlook v1.2026.1020.100 e clássico 16.0.20527)
+Feito por UI Automation, só leitura. Ficaram de fora: submenus de contexto, Cores por Categoria, Central de Confiabilidade, Assinaturas e as janelas internas de Regra, Categoria e Programar Entrega.
+
+### Confirmados (já na tabela)
+Etapas rápidas (#9), Limpeza (#10), Regras (#3), Pastas de pesquisa (#4), Importância, Confirmação de entrega/leitura e Agendar envio (#6, #8), Relatar lixo eletrônico e phishing (#15), Bloquear e Ignorar (#7), Reunião (#17), S/MIME (#20), Arquivos de dados .pst/.ics (#21), Painel de leitura e Densidade (#22).
+
+### Novos (23 em diante)
+| # | Recurso | Versão | Esforço | Observação |
+|---|---|---|---|---|
+| 23 | Partes Rápidas (blocos de texto reutilizáveis) | ambos | P | O Posta tem respostas prontas; falta inserir trecho no meio do texto |
+| 24 | Formatação condicional da lista (cor/negrito por regra) | ambos | M | Reaproveita o motor de regras |
+| 25 | Sugestões inteligentes ao escrever e Editor (ortografia/gramática) | ambos | M | Depende de #14 |
+| 26 | Encaminhamento automático de caixa | novo | P | Regra com ação "encaminhar" |
+| 27 | Recuperar itens excluídos (histórico da Lixeira) | clássico | P | Depende do servidor |
+| 28 | Leitura Avançada (leitor imersivo) | ambos | P | Modo foco do leitor |
+| 29 | Localizar relacionados (mesma conversa/remetente) | ambos | P | Busca pré-preenchida |
+| 30 | Impressão rápida e Salvar como (texto/PDF) | ambos | P | Imprimir e .eml já existem |
+| 31 | Confidencialidade (Normal/Pessoal/Privado/Confidencial) | ambos | P | Cabeçalho `Sensitivity` |
+| 32 | Salvar rascunho no servidor (IMAP Drafts) | ambos | M | Hoje só local; já anotado no README |
+| 33 | Caixas compartilhadas e delegação ("Compartilhado comigo") | novo | G | Exige Graph/Exchange |
+| 34 | Políticas de retenção, LDAP, grupos de distribuição | ambos | — | Corporativo; não fazer |
+| 35 | Desenhar (tinta) na nova mensagem | novo | — | Baixo valor; não fazer |
+| 36 | Horas de trabalho, clima e calendário compartilhado | novo | G | Só com calendário (#13) |
+| 37 | Desfazer global (excluir, mover, arquivar) | novo | P | Hoje só desfaz envio; confirmar |
+| 38 | Meu Dia (painel com agenda e tarefas) | novo | G | Só com calendário e tarefas |
+
+### Ordem revisada
+Onda 1: #1, #2, #4, #6, #7, #15, #16, #37. Onda 2: #3, #5, #8, #18, #23, #26, #29, #31, #32. Onda 3: #9, #10, #24, #25, #11, #12, #13, #20.
