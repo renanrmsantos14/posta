@@ -867,7 +867,10 @@ async fn save_eml(app: AppHandle, id: i64) -> CmdResult<String> {
 fn unsubscribe_offer(st: &AppState, id: i64) -> CmdResult<(ReplyRef, Option<unsubscribe::Unsubscribe>)> {
     let loc = st.locate(id)?;
     // Lido no sync: abrir não vai ao servidor (no Gmail eram 0,5 a 3 s segurando a sessão de leitura).
-    let lines = match st.store.lk().unsub(id).map_err(err)? {
+    // Guarda a trava só nesta linha: no `match st.store.lk()...` ela vivia até o fim do match e o `set_unsub` abaixo
+    // esperava por ela mesma (deadlock que congelava a janela inteira ao abrir uma mensagem antiga).
+    let stored = st.store.lk().unsub(id).map_err(err)?;
+    let lines = match stored {
         Some(l) => l,
         None => {
             let acc = st.account_with_password(&loc.account)?;
@@ -1719,7 +1722,7 @@ pub fn run() {
             let dir = app.path().app_data_dir()?;
             fs::create_dir_all(&dir)?;
             #[cfg(not(target_os = "android"))]
-            diag::init_file(&dir);
+            diag::init_file(&dir, &app.package_info().version.to_string());
             let store = Store::open(dir.join("mail.sqlite"))?;
             diag::log(&format!("setup: banco aberto em {} ms", t0.elapsed().as_millis()));
             app.manage(AppState::new(dir, store));

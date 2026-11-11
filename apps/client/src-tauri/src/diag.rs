@@ -17,7 +17,7 @@ static LOG_FILE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::
 
 /// Liga o log em arquivo. Passa de ~1 MB, o antigo vira `posta.log.old` (guarda só uma geração).
 #[cfg(not(target_os = "android"))]
-pub fn init_file(data_dir: &std::path::Path) {
+pub fn init_file(data_dir: &std::path::Path, version: &str) {
     let dir = data_dir.join("logs");
     if std::fs::create_dir_all(&dir).is_err() {
         return;
@@ -27,7 +27,7 @@ pub fn init_file(data_dir: &std::path::Path) {
         std::fs::rename(&file, dir.join("posta.log.old")).ok();
     }
     LOG_FILE.set(file).ok();
-    log(&format!("--- Posta {} iniciado (pid {}) ---", env!("CARGO_PKG_VERSION"), std::process::id()));
+    log(&format!("--- Posta {version} iniciado (pid {}) ---", std::process::id()));
 }
 
 /// Registra pânicos (thread, local e mensagem) antes de o processo seguir ou cair.
