@@ -1115,6 +1115,11 @@ kbd {
 .tpl-card { gap: 6px; }
 .tpl-head { display: flex; gap: 6px; align-items: center; }
 .vacation-on { justify-content: space-between; }
+.imp-select { max-width: 150px; padding: 4px 6px; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--muted); font-size: 12px; }
+.imp-select:hover, .imp-select:focus-visible { border-color: var(--line); }
+.imp-mark { flex: none; margin-right: 4px; vertical-align: -1px; }
+.imp-mark[data-imp="high"] { color: var(--red); }
+.imp-mark[data-imp="low"] { color: var(--muted); }
 .pin-mark { flex: none; margin-right: 4px; color: var(--muted); vertical-align: -1px; }
 .sched-icon { flex: none; color: var(--muted); }
 .sched-status { display: flex; align-items: center; gap: 8px; }

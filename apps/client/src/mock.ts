@@ -43,6 +43,7 @@ let messages: MockMessage[] = Array.from({ length: 60 }, (_, i) => {
     body_html: "",
     seen: i > 2 && i % 4 !== 0,
     flagged: i % 7 === 2,
+    importance: i % 11 === 1 ? 1 : i % 13 === 5 ? -1 : 0,
     reply_addr: from_addr,
     attachments: [],
     to_addrs: "renan@exemplo.com",

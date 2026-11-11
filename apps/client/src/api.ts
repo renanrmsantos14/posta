@@ -78,6 +78,8 @@ export interface MessageSummary {
   category?: string | null;
   /** Fixada no topo da lista (local). */
   pinned?: boolean;
+  /** Importância pedida pelo remetente: 1 alta, -1 baixa, ausente/0 normal. */
+  importance?: number;
 }
 
 export interface Attachment {
@@ -124,6 +126,8 @@ export interface Draft {
   attachments?: OutAttachment[];
   /** Remetente alternativo (alias da conta); ausente = o endereço da conta. */
   from?: string;
+  /** Importância no envio (`Importance`/`X-Priority`); ausente = normal. Não é guardada no rascunho. */
+  importance?: "high" | "low";
 }
 
 /** Rascunho salvo localmente pelo Composer. */

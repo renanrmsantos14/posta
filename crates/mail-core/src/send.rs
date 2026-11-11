@@ -36,6 +36,9 @@ pub struct Outgoing {
     /// Remetente alternativo (alias da conta): `end@x.com` ou `Nome <end@x.com>`. Ausente = o endereço da conta.
     #[serde(default)]
     pub from: Option<String>,
+    /// `high` ou `low`; ausente (ou qualquer outro valor) = normal, sem cabeçalho.
+    #[serde(default)]
+    pub importance: Option<String>,
 }
 
 /// Endereço de uma linha `end@x.com` ou `Nome <end@x.com>`, em minúsculas.
@@ -122,6 +125,27 @@ impl header::Header for AutoSubmitted {
     }
 }
 
+/// Cabeçalhos de importância (`Importance: high|low`, `X-Priority: 1|5`), que o lettre não modela.
+macro_rules! text_header {
+    ($t:ident, $name:literal) => {
+        #[derive(Debug, Clone)]
+        struct $t(&'static str);
+        impl header::Header for $t {
+            fn name() -> header::HeaderName {
+                header::HeaderName::new_from_ascii_str($name)
+            }
+            fn parse(_: &str) -> std::result::Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+                Err("somente envio".into())
+            }
+            fn display(&self) -> header::HeaderValue {
+                header::HeaderValue::new(Self::name(), self.0.to_string())
+            }
+        }
+    };
+}
+text_header!(ImportanceHdr, "Importance");
+text_header!(XPriorityHdr, "X-Priority");
+
 fn build_with(acc: &ImapAccount, out: &Outgoing, reply: Option<&ReplyRef>, auto: bool) -> Result<Message> {
     let account_name = acc.name.clone().filter(|n| !n.trim().is_empty());
     let from = match out.from.as_deref().map(str::trim).filter(|f| !f.is_empty()) {
@@ -140,6 +164,11 @@ fn build_with(acc: &ImapAccount, out: &Outgoing, reply: Option<&ReplyRef>, auto:
     b = b.mailbox(header::To::from(recipients(&out.to)?));
     if auto {
         b = b.header(AutoSubmitted);
+    }
+    match out.importance.as_deref() {
+        Some("high") => b = b.header(ImportanceHdr("high")).header(XPriorityHdr("1")),
+        Some("low") => b = b.header(ImportanceHdr("low")).header(XPriorityHdr("5")),
+        _ => {}
     }
     if let Some(r) = reply.filter(|r| !r.message_id.is_empty()) {
         let parent = format!("<{}>", r.message_id);
@@ -338,7 +367,7 @@ mod tests {
     }
 
     fn out(to: &str) -> Outgoing {
-        Outgoing { to: to.into(), subject: "Re: Orçamento".into(), body: "Combinado, até amanhã.".into(), html: None, cc: String::new(), bcc: String::new(), attachments: vec![], from: None }
+        Outgoing { to: to.into(), subject: "Re: Orçamento".into(), body: "Combinado, até amanhã.".into(), html: None, cc: String::new(), bcc: String::new(), attachments: vec![], from: None, importance: None }
     }
 
     #[test]
@@ -430,6 +459,27 @@ mod tests {
         assert!(matches!(build(&acc(), &o, None), Err(Error::Invalid(m)) if m.contains("25 MB")));
         o.attachments = vec![OutAttachment { name: "a".into(), mime: "".into(), data: "***".into() }];
         assert!(matches!(build(&acc(), &o, None), Err(Error::Invalid(_))));
+    }
+
+    #[test]
+    fn importancia_alta_baixa_e_normal_nos_cabecalhos() {
+        let raw = |imp: Option<&str>| {
+            let mut o = out("ana@x.com");
+            o.importance = imp.map(str::to_string);
+            String::from_utf8(build(&acc(), &o, None).unwrap().formatted()).unwrap()
+        };
+        let high = raw(Some("high"));
+        assert!(high.contains("Importance: high") && high.contains("X-Priority: 1"), "{high}");
+        let low = raw(Some("low"));
+        assert!(low.contains("Importance: low") && low.contains("X-Priority: 5"), "{low}");
+        for n in [raw(None), raw(Some("normal")), raw(Some(""))] {
+            assert!(!n.contains("Importance:") && !n.contains("X-Priority:"), "{n}");
+        }
+        // Volta pelo parser da sincronização.
+        let parsed = mail_parser::MessageParser::default().parse(high.as_bytes()).unwrap();
+        assert_eq!(crate::imap_sync::importance_of(&parsed), 1);
+        let parsed = mail_parser::MessageParser::default().parse(low.as_bytes()).unwrap();
+        assert_eq!(crate::imap_sync::importance_of(&parsed), -1);
     }
 
     #[test]
