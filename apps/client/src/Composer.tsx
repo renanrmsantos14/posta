@@ -457,6 +457,12 @@ export function Composer({ init, accounts, settings, onSend, onSchedule, templat
           <Clock size={16} weight="bold" />
         </WhenMenu>
         <TemplateMenu templates={templates} onPick={insertTemplate} />
+        <select className="imp-select" aria-label="Importância" title="Importância" value={draft.importance ?? "normal"}
+          onChange={(e) => set("importance", e.target.value === "normal" ? undefined : (e.target.value as "high" | "low"))}>
+          <option value="normal">Importância normal</option>
+          <option value="high">Importância alta</option>
+          <option value="low">Importância baixa</option>
+        </select>
         <input ref={fileRef} type="file" multiple hidden onChange={(e) => void addFiles(e.target.files)} />
         <button type="button" className="icon-btn" aria-label="Anexar arquivos" title="Anexar arquivos"
           onClick={() => fileRef.current?.click()}>

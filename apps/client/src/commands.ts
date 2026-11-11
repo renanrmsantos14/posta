@@ -1,5 +1,5 @@
 // Comandos da faixa (CommandBar): o que cada botão faz sobre a seleção atual. Puro: tudo que depende do estado entra por `c`.
-import { Archive, ArrowBendDoubleUpLeft, ArrowBendUpLeft, ArrowBendUpRight, Clock, EnvelopeSimple, EnvelopeSimpleOpen, FloppyDisk, FolderOpen, NotePencil, Printer, PushPin, Star, Tag, Trash } from "@phosphor-icons/react";
+import { Archive, ArrowBendDoubleUpLeft, ArrowBendUpLeft, ArrowBendUpRight, Clock, EnvelopeSimple, EnvelopeSimpleOpen, FloppyDisk, FolderOpen, NotePencil, Printer, PushPin, ShieldWarning, Star, Tag, Trash } from "@phosphor-icons/react";
 import type { Cmd } from "./CommandBar";
 import type { MenuItem } from "./ContextMenu";
 import type { MessageDetail, MessageSummary, Role } from "./api";
@@ -25,13 +25,15 @@ export interface CommandContext {
   snoozeItems: (ms: MessageSummary[]) => MenuItem[];
   categoryItems: (ms: MessageSummary[]) => MenuItem[];
   saveEml: (id: number) => unknown;
+  reportPhishing: (ms: MessageSummary[]) => void;
+  canReport: (m: MessageSummary) => boolean;
 }
 
 /** Botões que o usuário pode esconder da faixa (Configurações > Aparência). */
 export const TOOLBAR_ITEMS: [string, string][] = [
   ["new", "Novo email"], ["delete", "Excluir"], ["archive", "Arquivar"], ["reply", "Responder"], ["replyAll", "Responder a todos"],
   ["forward", "Encaminhar"], ["move", "Mover"], ["read", "Marcar lida/não lida"], ["flag", "Sinalizar"], ["pin", "Fixar"],
-  ["snooze", "Adiar"], ["cats", "Categorias"], ...(!ANDROID ? [["print", "Imprimir"] as [string, string]] : []), ["eml", "Salvar .eml"],
+  ["snooze", "Adiar"], ["cats", "Categorias"], ...(!ANDROID ? [["print", "Imprimir"] as [string, string]] : []), ["eml", "Salvar .eml"], ["phish", "Relatar phishing"],
 ];
 export const hiddenTools = (v: string | undefined) => new Set((v ?? "").split(",").filter(Boolean));
 
@@ -55,5 +57,6 @@ export function buildCommands(c: CommandContext): Cmd[] {
     ...(c.hasCategories ? [{ id: "cats", label: "Categorias", icon: Tag, pri: 12, group: 5, disabled: none, menu: () => categoryItems(targets) }] : []),
     ...(!ANDROID ? [{ id: "print", label: "Imprimir", icon: Printer, pri: 13, group: 6, disabled: !current, run: () => window.print() }] : []),
     { id: "eml", label: "Salvar .eml", icon: FloppyDisk, pri: 14, group: 6, disabled: !current, run: () => current && void saveEml(current.id) },
+    { id: "phish", label: "Relatar phishing", icon: ShieldWarning, pri: 15, group: 6, disabled: !targets.some(c.canReport), run: () => c.reportPhishing(targets) },
   ];
 }

@@ -134,13 +134,19 @@ export function SettingsPage({ accounts, settings, onSetting, onRemoveAccount, o
     }
   }
 
+  /** Tema personalizado em edição: sair da tela ou da seção pede confirmação. */
+  const [dirty, setDirty] = useState(false);
+  const [leaving, setLeaving] = useState<(() => void) | null>(null);
+  const guard = (go: () => void) => (dirty ? setLeaving(() => go) : go());
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
       e.stopPropagation();
       if (editing) return; // o diálogo de edição trata o próprio Esc
-      if (removing) { if (!removeBusy) setRemoving(null); }
-      else onClose();
+      if (leaving) setLeaving(null);
+      else if (removing) { if (!removeBusy) setRemoving(null); }
+      else guard(onClose);
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
@@ -151,11 +157,11 @@ export function SettingsPage({ accounts, settings, onSetting, onRemoveAccount, o
   return (
     <div className="settings-page">
       <nav className="settings-nav" aria-label="Seções das configurações">
-        <button type="button" className="btn ghost small settings-back" onClick={onClose}>
+        <button type="button" className="btn ghost small settings-back" onClick={() => guard(onClose)}>
           <ArrowLeft size={14} weight="bold" /> Voltar <kbd>Esc</kbd>
         </button>
         {SECTIONS.map(({ id, label, icon: Icon }) => (
-          <button key={id} type="button" className="nav-item" aria-current={id === section ? "page" : undefined} onClick={() => setSection(id)}>
+          <button key={id} type="button" className="nav-item" aria-current={id === section ? "page" : undefined} onClick={() => guard(() => setSection(id))}>
             <Icon size={16} weight="bold" /> <span>{label}</span>
           </button>
         ))}
@@ -227,7 +233,7 @@ export function SettingsPage({ accounts, settings, onSetting, onRemoveAccount, o
           {section === "templates" && <TemplatesSection settings={settings} onSetting={onSetting} />}
           {section === "vacation" && <VacationSection settings={settings} onSetting={onSetting} />}
 
-          {section === "appearance" && <AppearanceSection settings={settings} onSetting={onSetting} onPreview={onPreview} accentAdjusted={accentAdjusted} />}
+          {section === "appearance" && <AppearanceSection settings={settings} onSetting={onSetting} onPreview={onPreview} accentAdjusted={accentAdjusted} onDirty={setDirty} />}
 
           {section === "layout" && (
             <section className="settings-group" aria-label="Leitura e layout">
@@ -376,6 +382,17 @@ export function SettingsPage({ accounts, settings, onSetting, onRemoveAccount, o
           onClose={() => setEditing(null)} onSaved={onAccountSaved} />
       )}
 
+      {leaving && (
+        <div className="confirm scrim" onMouseDown={(e) => { if (e.target === e.currentTarget) setLeaving(null); }}>
+          <div className="confirm-card" role="alertdialog" aria-labelledby="leave-title">
+            <p id="leave-title">Descartar alterações?</p>
+            <div className="confirm-actions">
+              <button type="button" className="btn" onClick={() => setLeaving(null)} autoFocus>Continuar editando</button>
+              <button type="button" className="btn danger" onClick={() => { const go = leaving; setLeaving(null); setDirty(false); go(); }}>Descartar</button>
+            </div>
+          </div>
+        </div>
+      )}
       {removing && (
         <div className="confirm scrim" onMouseDown={(e) => { if (e.target === e.currentTarget && !removeBusy) setRemoving(null); }}>
           <div className="confirm-card" role="alertdialog" aria-labelledby="remove-title">

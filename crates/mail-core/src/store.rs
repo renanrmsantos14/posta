@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS messages (
   to_addrs TEXT NOT NULL DEFAULT '',
   cc_addrs TEXT NOT NULL DEFAULT '',
   thread_id INTEGER NOT NULL DEFAULT 0,
+  importance INTEGER NOT NULL DEFAULT 0,
   UNIQUE (account, mailbox, uid)
 );
 CREATE INDEX IF NOT EXISTS messages_by_date ON messages (date DESC);
@@ -175,7 +176,7 @@ const FTS_CREATE: &str = "CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING 
 
 /// Revisão das colunas/índices/tabelas adicionadas sem recriar o banco (guardada em `application_id`).
 /// Banco já na revisão pula todo o esquema ao abrir.
-const SCHEMA_REV: i32 = 0x5054_0003;
+const SCHEMA_REV: i32 = 0x5054_0004;
 
 /// Mensagem já interpretada, pronta para gravar.
 #[derive(Debug, Clone, Default)]
@@ -203,6 +204,8 @@ pub struct NewMessage {
     pub cc_addrs: String,
     /// Só cabeçalhos: `body_text` traz apenas uma prévia curta e o corpo é baixado ao abrir.
     pub header_only: bool,
+    /// Importância pedida pelo remetente: 1 alta, -1 baixa, 0 normal.
+    pub importance: i8,
 }
 
 /// O que é preciso para responder mantendo a conversa agrupada.
@@ -238,6 +241,8 @@ pub struct MessageSummary {
     pub category: Option<String>,
     /// Fixada no topo da lista.
     pub pinned: bool,
+    /// 1 alta, -1 baixa, 0 normal (mensagens anteriores ao recurso ficam 0).
+    pub importance: i8,
 }
 
 /// Pasta criada pelo usuário numa conta.
@@ -343,7 +348,7 @@ pub(crate) const SUMMARY_COLS: &str = concat!(
     (SELECT c.category FROM message_categories c WHERE c.account = m.account AND c.msg_key = ",
     msg_key!(),
     "),
-    m.pinned"
+    m.pinned, m.importance"
 );
 
 /// Adiada e ainda dentro do prazo: some das listas até a hora marcada. (`snooze_until` é mantida na gravação.)
@@ -373,6 +378,7 @@ pub(crate) fn row_to_summary(r: &rusqlite::Row) -> rusqlite::Result<MessageSumma
         thread_count: r.get(12)?,
         category: r.get(13)?,
         pinned: r.get(14)?,
+        importance: r.get(15)?,
     })
 }
 
@@ -661,6 +667,8 @@ impl Store {
         self.add_column("messages", "body_loaded", "INTEGER NOT NULL DEFAULT 1")?;
         let new_subject = self.add_column("messages", "subject_key", "TEXT NOT NULL DEFAULT ''")?;
         self.add_column("messages", "subject_re", "INTEGER NOT NULL DEFAULT 0")?;
+        // Só mensagens novas trazem a importância; as anteriores ficam 0 (normal), sem baixar nada.
+        self.add_column("messages", "importance", "INTEGER NOT NULL DEFAULT 0")?;
         self.add_column("mailbox_state", "highest_modseq", "INTEGER NOT NULL DEFAULT 0")?;
         self.add_column("mailbox_state", "uid_next", "INTEGER NOT NULL DEFAULT 0")?;
         // 1 = a cópia local já tem todas as mensagens da pasta (sync incremental vale); 0 = falta histórico.
@@ -871,8 +879,8 @@ impl Store {
             let mut stmt = tx.prepare_cached(
                 "INSERT OR IGNORE INTO messages
                  (account, mailbox, uid, from_name, from_addr, subject, date, snippet, body_text, body_html, seen,
-                  message_id, refs, reply_addr, attachments, flagged, to_addrs, cc_addrs, subject_key, subject_re, body_loaded)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
+                  message_id, refs, reply_addr, attachments, flagged, to_addrs, cc_addrs, subject_key, subject_re, body_loaded, importance)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
             )?;
             let mut refs = tx.prepare_cached("INSERT OR IGNORE INTO msg_refs (id, account, ref) VALUES (?1, ?2, ?3)")?;
             for m in msgs {
@@ -898,7 +906,8 @@ impl Store {
                     m.cc_addrs,
                     key,
                     re,
-                    !m.header_only
+                    !m.header_only,
+                    m.importance
                 ])?;
                 if n == 0 {
                     continue;
@@ -1249,13 +1258,13 @@ impl Store {
                 |r| {
                     Ok(MessageDetail {
                         summary: row_to_summary(r)?,
-                        body_text: r.get(15)?,
-                        body_html: r.get(16)?,
-                        reply_addr: r.get(17)?,
-                        attachments: serde_json::from_str(&r.get::<_, String>(18)?).unwrap_or_default(),
-                        to_addrs: r.get(19)?,
-                        cc_addrs: r.get(20)?,
-                        body_loaded: r.get(21)?,
+                        body_text: r.get(16)?,
+                        body_html: r.get(17)?,
+                        reply_addr: r.get(18)?,
+                        attachments: serde_json::from_str(&r.get::<_, String>(19)?).unwrap_or_default(),
+                        to_addrs: r.get(20)?,
+                        cc_addrs: r.get(21)?,
+                        body_loaded: r.get(22)?,
                     })
                 },
             )
@@ -1339,7 +1348,7 @@ impl Store {
              WHERE m.account = ?1 AND m.mailbox = ?2 AND {NOT_SNOOZED} {after}
              {ORDER_TOP} LIMIT ?3 OFFSET ?4"
         ))?;
-        let map = |r: &rusqlite::Row| Ok((row_to_summary(r)?, r.get::<_, i64>(15)?));
+        let map = |r: &rusqlite::Row| Ok((row_to_summary(r)?, r.get::<_, i64>(16)?));
         let rows = match cursor {
             Some(c) => stmt
                 .query_map(params![account, mailbox, limit, offset, c.pinned, c.visible_date, c.id], map)?
@@ -1728,6 +1737,24 @@ mod tests {
             cc_addrs: String::new(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn importancia_e_gravada_e_lida_e_banco_antigo_fica_normal() {
+        let mut s = Store::open_in_memory().unwrap();
+        let mut hi = msg(1, "Urgente", "x", 100);
+        hi.importance = 1;
+        let mut lo = msg(2, "Sem pressa", "x", 200);
+        lo.importance = -1;
+        let ids = s.insert_messages("a", "INBOX", &[hi, lo, msg(3, "Normal", "x", 300)]).unwrap();
+        let imp = |s: &Store, id: i64| s.summaries(&[id]).unwrap()[0].importance;
+        assert_eq!([imp(&s, ids[0]), imp(&s, ids[1]), imp(&s, ids[2])], [1, -1, 0]);
+        assert_eq!(s.get(ids[0]).unwrap().unwrap().summary.importance, 1);
+        // Banco criado antes da coluna: ela é adicionada e as mensagens antigas ficam normais.
+        s.conn.execute_batch("ALTER TABLE messages DROP COLUMN importance").unwrap();
+        s.conn.pragma_update(None, "application_id", SCHEMA_REV - 1).unwrap();
+        let s = Store::init(s.conn).unwrap();
+        assert!(s.summaries(&ids).unwrap().iter().all(|m| m.importance == 0));
     }
 
     #[test]

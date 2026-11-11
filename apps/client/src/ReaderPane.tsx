@@ -1,13 +1,15 @@
 // Painel de leitura: cabeçalho, destinatários (com cartão de contato), anexos, corpo (HtmlBody) e a conversa dobrável.
 import { useEffect, useState, type ReactNode } from "react";
-import { ArrowLeft, ArrowsIn, ArrowsOut, CaretUp, Paperclip, WarningCircle, WifiSlash } from "@phosphor-icons/react";
+import { ArrowLeft, ArrowsIn, ArrowsOut, CaretUp, Paperclip, ShieldWarning, WarningCircle, WifiSlash } from "@phosphor-icons/react";
 import { HtmlBody, ZoomControls, hasRemoteImages, openExternal } from "./HtmlBody";
 import { PageLayout } from "./layout/primitives";
 import { parseContact } from "./ContactCard";
 import { addrOf } from "./aliases";
 import { fmtLong, shortDate } from "./dates";
 import { fmtSize } from "./format";
+import { suspiciousSender } from "./phishing";
 import { api, type Attachment, type MessageDetail, type MessageSummary, type Unsubscribe } from "./api";
+import { ImportanceMark } from "./ImportanceMark";
 import { toast } from "./toast";
 
 export const splitAddrs = (v: string) => v.split(/,(?=(?:[^"]*"[^"]*")*[^"]*$)/).map((x) => x.trim()).filter(Boolean);
@@ -42,6 +44,8 @@ export interface ReaderPaneProps {
   onToggleThread: (id: number) => void;
   onShowImages: (id: number) => void;
   onTrustSender: (addr: string) => void;
+  /** "Relatar phishing" do aviso de remetente suspeito: pede confirmação e move para o Spam. */
+  onReportPhishing: (d: MessageDetail) => void;
   onSaveAttachment: (id: number, a: Attachment) => void;
   /** Botão pressionado no anexo: arrastar para fora da janela entrega o arquivo ao sistema. */
   onDragAttachment: (e: React.PointerEvent, id: number, a: Attachment) => void;
@@ -116,6 +120,7 @@ function UnsubscribeBar({ id }: { id: number }) {
 function MessageView({ d, fold, p }: { d: MessageDetail; fold: boolean; p: ReaderPaneProps }) {
   const fromAddr = addrOf(d.from_addr);
   const remote = p.imagesOk.has(d.id) || p.imagesFrom.has(fromAddr);
+  const suspicious = d.role === "junk" ? null : suspiciousSender(d.from_name, d.from_addr, d.reply_addr);
   const sender = d.from_name ? `${d.from_name} <${d.from_addr}>` : d.from_addr;
   return (
     <>
@@ -141,6 +146,14 @@ function MessageView({ d, fold, p }: { d: MessageDetail; fold: boolean; p: Reade
       </div>
       <Recipients label="Para" v={d.to_addrs} onContact={p.onContact} />
       <Recipients label="Cc" v={d.cc_addrs} onContact={p.onContact} />
+      {suspicious && (
+        <div className="img-banner" role="status">
+          <span><ShieldWarning size={15} weight="bold" aria-hidden /> {suspicious} Confira antes de clicar em links ou responder.</span>
+          <span className="img-banner-actions">
+            <button type="button" className="btn" onClick={() => p.onReportPhishing(d)}>Relatar phishing</button>
+          </span>
+        </div>
+      )}
       {!p.threaded && d.id === p.selectedId && p.mobileActions}
       {!fold && <UnsubscribeBar id={d.id} />}
       {d.attachments.length > 0 && (
@@ -197,7 +210,7 @@ export function ReaderPane(p: ReaderPaneProps) {
             <button className="btn ghost small back" onClick={() => p.onBack()}>
               <ArrowLeft size={14} weight="bold" /> {p.full ? "Voltar" : p.folderLabel}
             </button>
-            <h1>{p.detail.subject || "(sem assunto)"}</h1>
+            <h1><ImportanceMark value={p.detail.importance} />{p.detail.subject || "(sem assunto)"}</h1>
             {p.threaded && p.mobileActions}
             {p.threaded ? (
               <div className="thread">

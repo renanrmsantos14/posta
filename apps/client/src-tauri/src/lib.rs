@@ -889,7 +889,7 @@ async fn cancel_subscription(app: AppHandle, id: i64, method: String) -> CmdResu
             "mailto" => {
                 let m = offer.mailto.as_deref().and_then(unsubscribe::parse_mailto).ok_or("endereço de cancelamento inválido")?;
                 let acc = st.account_with_password(&loc.account)?;
-                let out = Outgoing { to: m.to, subject: m.subject, body: m.body, html: None, cc: String::new(), bcc: String::new(), attachments: Vec::new(), from: None };
+                let out = Outgoing { to: m.to, subject: m.subject, body: m.body, html: None, cc: String::new(), bcc: String::new(), attachments: Vec::new(), from: None, importance: None };
                 send::send(&acc, &out, None).map(|_| ()).map_err(err)
             }
             _ => Err("forma de cancelamento não oferecida por esta mensagem".to_string()),
@@ -1423,7 +1423,7 @@ fn auto_reply(st: &AppState, acc: &ImapAccount, new: &[Candidate]) {
         }
         let reply = st.store.lk().reply_ref(c.id).ok().flatten();
         let subject = if vac.subject.trim().is_empty() { format!("Resposta automática: {}", c.subject) } else { vac.subject.clone() };
-        let out = Outgoing { to: addr.to_string(), subject, body: vac.body.clone(), html: None, cc: String::new(), bcc: String::new(), attachments: Vec::new(), from: None };
+        let out = Outgoing { to: addr.to_string(), subject, body: vac.body.clone(), html: None, cc: String::new(), bcc: String::new(), attachments: Vec::new(), from: None, importance: None };
         match send::send_auto(acc, &out, reply.as_ref()) {
             Ok(_) => {
                 st.store.lk().mark_vacation_replied(&acc.id, addr, now_ts()).ok();

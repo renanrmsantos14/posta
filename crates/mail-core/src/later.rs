@@ -230,7 +230,7 @@ mod tests {
     }
 
     fn out(to: &str) -> Outgoing {
-        Outgoing { to: to.into(), subject: "Oi".into(), body: "corpo".into(), html: None, cc: String::new(), bcc: String::new(), attachments: vec![], from: None }
+        Outgoing { to: to.into(), subject: "Oi".into(), body: "corpo".into(), html: None, cc: String::new(), bcc: String::new(), attachments: vec![], from: None, importance: None }
     }
 
     #[test]

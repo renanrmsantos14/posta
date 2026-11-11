@@ -283,6 +283,27 @@ fn parse(uid: u32, raw: &[u8], seen: bool, flagged: bool, fallback_date: i64, ow
         to_addrs: msg.as_ref().map(|m| addresses(m.to())).unwrap_or_default(),
         cc_addrs: msg.as_ref().map(|m| addresses(m.cc())).unwrap_or_default(),
         header_only: false,
+        importance: msg.as_ref().map(importance_of).unwrap_or(0),
+    }
+}
+
+/// Importância declarada: `Importance` (high/low), `X-Priority` (1–2 alta, 4–5 baixa) ou `Priority` (urgent/non-urgent).
+pub(crate) fn importance_of(m: &mail_parser::Message) -> i8 {
+    let raw = |n: &str| m.headers().value(n).and_then(|v| v.as_text().map(|t| t.trim().to_ascii_lowercase())).unwrap_or_default();
+    match raw("Importance").as_str() {
+        "high" => return 1,
+        "low" => return -1,
+        _ => {}
+    }
+    match raw("X-Priority").split_whitespace().next().and_then(|n| n.parse::<u8>().ok()) {
+        Some(1 | 2) => return 1,
+        Some(4 | 5) => return -1,
+        _ => {}
+    }
+    match raw("Priority").as_str() {
+        "urgent" => 1,
+        "non-urgent" => -1,
+        _ => 0,
     }
 }
 

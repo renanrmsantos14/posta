@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowBendUpLeft, ArrowBendDoubleUpLeft, ArrowBendUpRight, ArrowsClockwise, Archive, Copy, FolderOpen, FolderSimple, NotePencil, Star, Tag, Trash, EnvelopeSimple, EnvelopeSimpleOpen, FloppyDisk, Printer, PushPin, Clock } from "@phosphor-icons/react";
+import { ArrowBendUpLeft, ArrowBendDoubleUpLeft, ArrowBendUpRight, ArrowsClockwise, Archive, Copy, FolderOpen, FolderSimple, NotePencil, Star, Tag, Trash, EnvelopeSimple, EnvelopeSimpleOpen, FloppyDisk, Printer, PushPin, Clock, ShieldWarning } from "@phosphor-icons/react";
 import { api, isTauri, type Account, type Attachment, type MailDelta, type MessageDetail, type MessageSummary, type OutAttachment, type OutboxItem, type Role, type Settings, type StoredDraft, type UnreadCounts, type UserFolder, type View } from "./api";
 import { AccountDialog } from "./AccountDialog";
 import { colorKey } from "./accountColors";
@@ -7,6 +7,8 @@ import { accountColor, accountLabel, labelKey } from "./accountMeta";
 import { NavDrawer, useDrawer } from "./NavDrawer";
 import { parseCategories } from "./Categories";
 import { FolderDialog, type FolderDialogState } from "./FolderDialog";
+import { SearchDialog, type SearchDialogState } from "./SearchDialog";
+import { newSearchId, parseSavedSearches, serializeSavedSearches, suggestName, type SavedSearch } from "./savedSearches";
 import { OutboxPane, useQueue } from "./Offline";
 import { DraftList, ScheduledList } from "./DraftLists";
 import { boxView, catView, parseBox, parseCat, roleOf } from "./views";
@@ -16,7 +18,7 @@ import { justSwiped, swipeProps, type SwipeAction, type SwipeDir } from "./swipe
 import { escapeHtml, textToHtml } from "./richtext";
 import { Toaster, toast } from "./toast";
 import { watchOpenTarget, type OpenTarget } from "./notificationOpen";
-import { applyAppearance, themePref, watchSystem } from "./themes";
+import { applyAppearance, applyStyle, parseCustomThemes, themePref, watchSystem } from "./themes";
 import { FOLDERS, LOCAL_VIEWS, SHOWS_UNREAD, folderKey, folderTree, parseOpenMap, viewInfo, withStarred, type Dest, type FolderNode } from "./folders";
 import { DragGhost, placeGhost } from "./DragGhost";
 import { canDragOut, dragOut } from "./dragout";
@@ -143,6 +145,7 @@ export default function App() {
   const [popId, setPopId] = useState<number | null>(null);
   /** Mensagens da Lixeira à espera de "Excluir de vez?". */
   const [confirmDelete, setConfirmDelete] = useState<MessageSummary[] | null>(null);
+  const [confirmPhish, setConfirmPhish] = useState<MessageSummary[] | null>(null);
   /** Rascunhos locais, a configuração (assinaturas, notificações) e os filtros de visão. */
   const [drafts, setDrafts] = useState<StoredDraft[]>([]);
   const [settings, setSettings] = useState<Settings>({});
@@ -169,6 +172,7 @@ export default function App() {
   /** Pastas do usuário (todas as contas), o diálogo de criar/renomear e a exclusão à espera de confirmação. */
   const [userFolders, setUserFolders] = useState<UserFolder[]>([]);
   const [folderDialog, setFolderDialog] = useState<FolderDialogState | null>(null);
+  const [searchDialog, setSearchDialog] = useState<SearchDialogState | null>(null);
   const [folderDelete, setFolderDelete] = useState<{ node: FolderNode; count: number } | null>(null);
   const [folderBusy, setFolderBusy] = useState(false);
   /** Arrastar da lista para uma pasta: mensagens em arrasto e alvo sob o ponteiro. */
@@ -256,6 +260,7 @@ export default function App() {
   /** Conta de que a visão aberta faz parte: pastas do usuário pertencem a uma; as demais seguem a conta ativa. */
   const scopeAccount = multi ? parseBox(folder)?.account ?? accountFilter : null;
   const categories = useMemo(() => parseCategories(settings.categories), [settings.categories]);
+  const savedSearches = useMemo(() => parseSavedSearches(settings.searches), [settings.searches]);
   const templates = useMemo(() => parseTemplates(settings.templates), [settings.templates]);
   const fullTree = useMemo(() => folderTree(userFolders), [userFolders]);
   const tree = useMemo(() => (accountFilter ? fullTree.filter((f) => f.account === accountFilter) : fullTree), [fullTree, accountFilter]);
@@ -287,6 +292,8 @@ export default function App() {
   const listMax = () => Math.max(LIST.min, Math.min(LIST.max, (appRef.current?.clientWidth ?? 1200) - (appRef.current?.querySelector<HTMLElement>(".rail")?.offsetWidth ?? RAIL.def) - MIN_READER));
   const listHMax = () => Math.max(LIST_H.min, (appRef.current?.clientHeight ?? 800) - 220);
   const canArchive = (m: MessageSummary) => m.role !== "archive" && folderList.includes(archiveTo(m));
+  const canReport = (m: MessageSummary) => m.role !== "junk" && folderList.includes("junk");
+  const reportPhishing = (ms: MessageSummary[]) => { const l = ms.filter(canReport); if (l.length) setConfirmPhish(l); };
   const canTrash = (m: MessageSummary) => m.role === "trash" || folderList.includes("trash");
 
   /** Ajusta o contador na hora; `refreshCounts` confere com o banco depois. */
@@ -585,11 +592,14 @@ export default function App() {
   function navigate(view: View, account: string | null = null) {
     const acc = multi ? parseBox(view)?.account ?? account : null;
     setAccountFilter(acc);
-    if (acc && settings["rail:account"] !== acc) changeSetting("rail:account", acc);
+    if (acc && !openAccounts.includes(acc)) setOpenAccounts(oneAtATime ? [acc] : [...openAccounts, acc]);
     openFolder(view);
   }
-  /** Seção de conta aberta na barra lateral (uma por vez, guardada como as outras preferências). */
-  const openAccount = accounts?.some((a) => a.id === settings["rail:account"]) ? settings["rail:account"] : null;
+  /** "Uma por vez" (sanfona): abrir uma conta fecha as outras. */
+  const oneAtATime = settings.railAccounts === "one";
+  /** Seções de conta abertas na barra lateral (várias ao mesmo tempo, guardadas como as outras preferências). */
+  const openAccounts = (settings["rail:accounts"] ?? settings["rail:account"] ?? "").split("\n").filter((id) => accounts?.some((a) => a.id === id)).slice(0, oneAtATime ? 1 : undefined);
+  const setOpenAccounts = (ids: string[]) => changeSetting("rail:accounts", ids.join("\n"));
   const drawer = useDrawer();
   const menuRef = useRef<HTMLButtonElement>(null);
 
@@ -736,12 +746,17 @@ export default function App() {
 
   /** Tema, destaque e fonte vivem no <html>. Antes de as configurações chegarem vale o que o public/theme-init.js aplicou. */
   const [accentAdjusted, setAccentAdjusted] = useState(false);
+  const customThemes = useMemo(() => parseCustomThemes(settings.customThemes), [settings.customThemes]);
   useEffect(() => {
     if (!prefsReady) return;
-    const apply = () => setAccentAdjusted(applyAppearance(themePref(settings.theme), settings.accent)?.adjusted ?? false);
+    const pref = themePref(settings.theme, customThemes);
+    const apply = () => setAccentAdjusted(applyAppearance(pref, settings.accent, customThemes)?.adjusted ?? false);
     apply();
-    return themePref(settings.theme) === "system" ? watchSystem(apply) : undefined;
-  }, [prefsReady, settings.theme, settings.accent]);
+    return pref === "system" ? watchSystem(apply) : undefined;
+  }, [prefsReady, settings.theme, settings.accent, customThemes]);
+  useEffect(() => {
+    if (prefsReady) applyStyle(settings);
+  }, [prefsReady, settings.radius, settings.shadow, settings.font, settings.railDensity]);
   useEffect(() => {
     const root = document.documentElement;
     if (settings.size === "s" || settings.size === "l") root.dataset.size = settings.size;
@@ -770,6 +785,41 @@ export default function App() {
     setSettings((s) => ({ ...s, [key]: value }));
     api.setSetting(key, value).catch((e) => toast(`Não consegui salvar a configuração: ${e}`, "error"));
   }
+
+  const savedSearchesRef = useRef(savedSearches);
+  savedSearchesRef.current = savedSearches;
+  const writeSearches = (list: SavedSearch[]) => changeSetting("searches", serializeSavedSearches(list));
+  const activeSearch = savedSearches.find((s) => s.query === query.trim() && s.scope === scope && (scope === "all" || s.folder === folder))?.id ?? null;
+  function openSearch(s: SavedSearch) {
+    navigate(s.folder as View, s.account);
+    setScope(s.scope === "all" && multi ? "all" : "folder");
+    setQuery(s.query);
+  }
+  function submitSearch(name: string) {
+    if (!searchDialog) return;
+    if (searchDialog.mode === "rename") {
+      writeSearches(savedSearches.map((s) => (s.id === searchDialog.id ? { ...s, name } : s)));
+    } else {
+      writeSearches([...savedSearches, { id: newSearchId(), name, query: searchDialog.query.trim(), folder, scope, account: accountFilter }]);
+      toast(`Pesquisa “${name}” salva`, "info");
+    }
+  }
+  function deleteSearch(s: SavedSearch) {
+    const index = savedSearches.findIndex((x) => x.id === s.id);
+    writeSearches(savedSearches.filter((x) => x.id !== s.id));
+    // Desfazer reinsere só esta pesquisa, preservando mudanças feitas depois da exclusão.
+    toast(`Pesquisa “${s.name}” excluída`, "info", { action: { label: "Desfazer", onClick: () => {
+      const now = savedSearchesRef.current;
+      if (now.some((x) => x.id === s.id)) return;
+      const next = [...now];
+      next.splice(Math.min(Math.max(index, 0), next.length), 0, s);
+      writeSearches(next);
+    } } });
+  }
+  const searchContext = (x: number, y: number, s: SavedSearch) => setMenu({ x, y, label: "Ações da pesquisa", items: [
+    { label: "Renomear", icon: NotePencil, onSelect: () => setSearchDialog({ mode: "rename", id: s.id, query: s.query, name: s.name }) },
+    { label: "Excluir pesquisa", icon: Trash, danger: true, onSelect: () => deleteSearch(s) },
+  ] });
 
   const imagesFrom = useMemo(() => new Set(aliasLines(settings["images:trusted"]).map(addrOf)), [settings["images:trusted"]]);
   function trustSender(addr: string) {
@@ -1455,6 +1505,7 @@ export default function App() {
     items.push(
       { label: arch.length && archiveTo(arch[0]) === "inbox" ? "Mover para a entrada" : "Arquivar", icon: Archive, kbd: "E", disabled: !arch.length, onSelect: () => archive(ms) },
       { label: ms.every((m) => m.role === "trash") ? "Excluir de vez" : "Excluir", icon: Trash, kbd: "Delete", danger: true, disabled: !ms.some(canTrash), onSelect: () => remove(ms) },
+      { label: "Relatar phishing", icon: ShieldWarning, disabled: !ms.some(canReport), onSelect: () => reportPhishing(ms) },
       { label: "Mover para", icon: FolderOpen, items: moveItems(ms) },
       { separator: true },
       ms.every((m) => m.seen)
@@ -1517,9 +1568,13 @@ export default function App() {
   // ---- Atalhos (estilo Outlook + teclas simples) ----
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (dialog || compose || settingsOpen || update || folderDialog || menu || contact) return;
+      if (dialog || compose || settingsOpen || update || folderDialog || searchDialog || menu || contact) return;
       if (folderDelete) {
         if (e.key === "Escape" && !folderBusy) setFolderDelete(null);
+        return;
+      }
+      if (confirmPhish) {
+        if (e.key === "Escape") setConfirmPhish(null);
         return;
       }
       if (confirmDelete) {
@@ -1587,7 +1642,7 @@ export default function App() {
   const targets = checkedList.length ? checkedList : current ? withThread([current]) : [];
   const cmds = buildCommands({
     targets, current, hasCategories: categories.length > 0, canArchive, canTrash, archiveTo, writeNew, act, remove, archive, markSeen,
-    toggleStar, togglePin, moveItems, snoozeItems, categoryItems, saveEml,
+    toggleStar, togglePin, moveItems, snoozeItems, categoryItems, saveEml, reportPhishing, canReport,
   });
   /** Barra de ações do leitor: só no celular (no desktop quem cuida disso é a faixa de comandos). */
   const mobileActions = (
@@ -1610,9 +1665,11 @@ export default function App() {
       unread={(v) => (Object.hasOwn(FOLDERS, v) ? (unreadOf(v as Role | "starred") ?? 0) : 0)}
       unreadIn={(account, v) => (SHOWS_UNREAD.includes(v as Role) ? acctCounts[account]?.[v as Role] ?? 0 : 0)}
       open={navigate} drop={dropProps} openMap={openMap} onToggleFolder={toggleFolder} folderUnread={folderUnread} hoverView={dropKey}
-      onContext={folderContext} userFolders={userFolders} categories={categories} tree={fullTree} accounts={accounts}
+      onContext={folderContext} userFolders={userFolders} categories={categories} tree={fullTree}
+      searches={savedSearches} activeSearch={activeSearch} openSearch={openSearch} onSearchContext={searchContext} onDeleteSearch={deleteSearch}
+      onRenameSearch={(s) => setSearchDialog({ mode: "rename", id: s.id, query: s.query, name: s.name })} accounts={accounts}
       accountFilter={accountFilter} acctLabel={acctLabel} acctColor={acctColor}
-      openAccount={openAccount} onOpenAccount={(id) => changeSetting("rail:account", id ?? "")}
+      openAccounts={openAccounts} onToggleAccount={(id, open) => setOpenAccounts(open ? (oneAtATime ? [id] : [...openAccounts, id]) : openAccounts.filter((a) => a !== id))}
       drafts={drafts.length} scheduled={scheduled.length} outbox={net.outbox} showDrafts={showDrafts} showScheduled={showScheduled} showOutbox={showOutbox}
       openDrafts={inAll(openDrafts)} openScheduled={inAll(openScheduled)} openOutbox={inAll(openOutbox)}
       onNewFolder={(parent, account) => setFolderDialog({ mode: "create", account: parent?.account ?? account ?? accountFilter ?? undefined, parent: parent?.name })}
@@ -1631,6 +1688,7 @@ export default function App() {
       data-density={density} data-preview={settings.preview === "0" ? "0" : undefined} style={layoutVars}>
       <TopBar query={query} onQuery={setQuery} searchRef={searchRef} folderLabel={info.label} scope={scope}
         canScopeAll={(accounts?.length ?? 0) > 1} onScope={setScope} onFilter={(token) => setQuery(addFilter(query, token))}
+        onSaveSearch={() => setSearchDialog({ mode: "create", query, name: suggestName(query) })}
         net={net} syncing={syncing} canSync={!!accounts?.length} onSync={() => void sync(true)}
         onMenu={drawer.show} menuRef={menuRef} menuOpen={drawer.open}
         onAddAccount={() => setDialog(true)} onSettings={() => setSettingsOpen(true)} />
@@ -1717,7 +1775,19 @@ export default function App() {
           expanded={expanded} full={full} viaKeyboard={viaKeyboard} folderLabel={info.label} hasMessages={messages.length > 0} imagesOk={imagesOk} imagesFrom={imagesFrom}
           savingAtt={savingAtt} mobileActions={mobileActions} onFull={setFull} onBack={() => (full ? setFull(false) : setReaderOpen(false))}
           onContact={openContact} onReaderContext={readerContext} onToggleThread={(id) => void toggleThreadMsg(id)}
-          onShowImages={(id) => setImagesOk((s) => new Set(s).add(id))} onTrustSender={trustSender} onSaveAttachment={(id, att) => void saveAttachment(id, att)} onDragAttachment={dragAttachment}>
+          onShowImages={(id) => setImagesOk((s) => new Set(s).add(id))} onTrustSender={trustSender} onReportPhishing={(d) => reportPhishing([d])} onSaveAttachment={(id, att) => void saveAttachment(id, att)} onDragAttachment={dragAttachment}>
+          {confirmPhish && (
+            <div className="confirm scrim" onMouseDown={(e) => { if (e.target === e.currentTarget) setConfirmPhish(null); }}>
+              <div className="confirm-card" role="alertdialog" aria-labelledby="phish-title">
+                <p id="phish-title">{confirmPhish.length === 1 ? "Relatar como phishing?" : `Relatar ${confirmPhish.length} mensagens como phishing?`}</p>
+                <span>Vão para o Spam. Dá para desfazer logo depois.</span>
+                <div className="confirm-actions">
+                  <button type="button" className="btn" onClick={() => setConfirmPhish(null)} autoFocus>Cancelar</button>
+                  <button type="button" className="btn danger" onClick={() => { const l = confirmPhish; setConfirmPhish(null); moveToDest(l, "junk"); }}>Relatar</button>
+                </div>
+              </div>
+            </div>
+          )}
           {confirmDelete && (
             <div className="confirm scrim" onMouseDown={(e) => { if (e.target === e.currentTarget && !deleting) setConfirmDelete(null); }}>
               <div className="confirm-card" role="alertdialog" aria-labelledby="delete-title">
@@ -1761,6 +1831,7 @@ export default function App() {
       {folderDialog && (
         <FolderDialog state={folderDialog} accounts={accounts ?? []} folders={userFolders} onSubmit={submitFolder} onClose={() => setFolderDialog(null)} />
       )}
+      {searchDialog && <SearchDialog state={searchDialog} onSubmit={submitSearch} onClose={() => setSearchDialog(null)} />}
       {folderDelete && (
         <div className="confirm scrim" onMouseDown={(e) => { if (e.target === e.currentTarget && !folderBusy) setFolderDelete(null); }}>
           <div className="confirm-card" role="alertdialog" aria-labelledby="folder-delete-title">

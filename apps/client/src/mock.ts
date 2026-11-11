@@ -43,6 +43,7 @@ let messages: MockMessage[] = Array.from({ length: 60 }, (_, i) => {
     body_html: "",
     seen: i > 2 && i % 4 !== 0,
     flagged: i % 7 === 2,
+    importance: i % 11 === 1 ? 1 : i % 13 === 5 ? -1 : 0,
     reply_addr: from_addr,
     attachments: [],
     to_addrs: "renan@exemplo.com",
@@ -74,6 +75,14 @@ htmlSamples.forEach(([from_name, from_addr, subject, text, html, hoursAgo], i) =
 // Mensagem com anexos (e uma imagem inline `cid:` já embutida como data: URL, como o núcleo faz).
 const LOGO = "data:image/svg+xml;utf8," + encodeURIComponent(
   `<svg xmlns="http://www.w3.org/2000/svg" width="160" height="48"><rect width="160" height="48" rx="8" fill="#1f6c9f"/><text x="80" y="31" font-family="sans-serif" font-size="20" fill="#fff" text-anchor="middle">Lumen</text></svg>`);
+// Exemplo de remetente suspeito (Reply-To de outro domínio): mostra a faixa de aviso no leitor.
+messages.unshift({
+  id: 1101, account: accounts[0].id, uid: 1101, from_name: "Banco Aurora", from_addr: "avisos@bancoaurora.com.br",
+  subject: "Atualize seu cadastro hoje", date: now - Math.round(0.1 * H),
+  snippet: "Seu acesso será bloqueado. Responda com seus dados.", body_text: "Seu acesso será bloqueado. Responda com seus dados para manter a conta ativa.",
+  body_html: "", seen: false, flagged: false, reply_addr: "suporte@aurora-seguro.top", role: "inbox", thread_id: 0,
+  to_addrs: "renan@exemplo.com", cc_addrs: "", attachments: [],
+});
 messages.unshift({
   id: 1100, account: accounts[0].id, uid: 1100, from_name: "Marina Duarte", from_addr: "marina@lumenarquitetura.com.br",
   subject: "Planta e orçamento da sala de reunião", date: now - Math.round(0.2 * H),

@@ -1,12 +1,13 @@
-// Painel de pastas: Favoritos, "Todas as contas" e, com várias contas, uma seção recolhível por conta (pastas do sistema e do usuário).
+// Painel de pastas: Favoritos, "Todas as contas" e, com várias contas, uma seção recolhível por conta (pastas do sistema e do usuário),
+// no estilo do Outlook: cada conta abre e fecha por conta própria e o cabeçalho mostra o endereço.
 // Com uma conta só, é a lista simples de sempre. O mesmo componente serve de gaveta no celular (`variant="drawer"`).
-import { useEffect, useRef } from "react";
-import { CaretRight, FileText, PaperPlaneTilt, Plus, Clock, Stack } from "@phosphor-icons/react";
+import { CaretRight, FileText, MagnifyingGlass, PaperPlaneTilt, PencilSimple, Plus, Clock, Trash } from "@phosphor-icons/react";
 import type { Account, Category, UserFolder, View } from "./api";
 import { FolderTree } from "./FolderTree";
 import { PageLayout } from "./layout/primitives";
 import { viewInfo, type FolderNode, type OpenMap } from "./folders";
 import { parseBox } from "./views";
+import type { SavedSearch } from "./savedSearches";
 
 type NavView = "inbox" | "starred" | "sent" | "archive" | "trash" | "junk";
 /** Visões da seção "Todas as contas". */
@@ -27,15 +28,22 @@ interface Props {
   onContext: (x: number, y: number, view: View) => void;
   userFolders: UserFolder[];
   categories: Category[];
+  searches: SavedSearch[];
+  /** Pesquisa salva que corresponde à busca atual. */
+  activeSearch: string | null;
+  openSearch: (s: SavedSearch) => void;
+  onRenameSearch: (s: SavedSearch) => void;
+  onDeleteSearch: (s: SavedSearch) => void;
+  onSearchContext: (x: number, y: number, s: SavedSearch) => void;
   tree: FolderNode[];
   accounts: Account[] | null;
   /** Conta ativa (null = todas). */
   accountFilter: string | null;
   acctLabel: (id: string) => string;
   acctColor: (id: string) => string;
-  /** Seção de conta aberta (uma por vez) e a troca dela. */
-  openAccount: string | null;
-  onOpenAccount: (id: string | null) => void;
+  /** Seções de conta abertas (várias ao mesmo tempo) e a troca de uma delas. */
+  openAccounts: string[];
+  onToggleAccount: (id: string, open: boolean) => void;
   drafts: number;
   scheduled: number;
   outbox: number;
@@ -62,7 +70,6 @@ export function Rail(p: Props) {
   const accounts = p.accounts ?? [];
   const multi = accounts.length > 1;
   const drawer = p.variant === "drawer";
-  const sections = useRef(new Map<string, HTMLElement>());
   const go = (run: () => void) => { run(); p.onNavigate?.(); };
   /** Conta da visão: pastas do usuário já pertencem a uma conta; as demais seguem a seção onde o item está. */
   const here = (v: View, account: string | null) =>
@@ -106,43 +113,21 @@ export function Rail(p: Props) {
       openMap={p.openMap} onToggle={p.onToggleFolder} unread={p.folderUnread} hoverView={p.hoverView} />
   );
 
-  // Várias contas: faixa de atalhos, seção "Todas as contas" e uma seção recolhível por conta.
+  // Várias contas: seção "Todas as contas" e uma seção recolhível por conta.
   const inboxOf = (id: string) => p.unreadIn(id, "inbox");
-  const strip = (
-    <nav className="acct-strip" aria-label="Contas">
-      {[null, ...accounts.map((a) => a.id)].map((id) => {
-        const n = id ? inboxOf(id) : p.unread("inbox");
-        const label = id ? p.acctLabel(id) : "Todas as contas";
-        return (
-          <button key={id ?? "all"} type="button" className="acct-chip" title={label}
-            aria-label={n > 0 ? `${label}, ${n} não lidas` : label} aria-current={p.accountFilter === id && p.inList ? "true" : undefined}
-            onClick={() => go(() => p.open("inbox", id))}>
-            <span className="avatar" data-color={id ? p.acctColor(id) : undefined} data-all={id ? undefined : ""} aria-hidden>{id ? p.acctLabel(id)[0]?.toUpperCase() : <Stack size={14} weight="bold" />}</span>
-            {n > 0 && <span className="acct-n" aria-hidden>{n > 99 ? "99+" : n}</span>}
-          </button>
-        );
-      })}
-    </nav>
-  );
-
-  // Ao abrir uma seção (pela faixa, por exemplo), ela aparece inteira na barra lateral.
-  useEffect(() => {
-    if (p.openAccount) sections.current.get(p.openAccount)?.scrollIntoView({ block: "nearest" });
-  }, [p.openAccount]);
 
   const section = (id: string) => {
-    const open = p.openAccount === id;
+    const open = p.openAccounts.includes(id);
     const n = inboxOf(id);
-    const label = p.acctLabel(id);
+    const label = accounts.find((a) => a.id === id)?.username || p.acctLabel(id);
     return (
-      <section key={id} className="acct-sec" data-open={open || undefined} data-acct-color={p.acctColor(id)} aria-label={label}
-        ref={(el) => { if (el) sections.current.set(id, el); else sections.current.delete(id); }}>
-        <button type="button" className="acct-head" aria-expanded={open} aria-controls={`acct-${p.variant ?? "rail"}-${id}`} title={accounts.find((a) => a.id === id)?.username}
-          aria-label={n > 0 ? `${label}, ${n} não lidas` : label} onClick={() => p.onOpenAccount(open ? null : id)}>
+      <section key={id} className="acct-sec" data-open={open || undefined} data-acct-color={p.acctColor(id)} aria-label={label}>
+        <button type="button" className="acct-head" aria-expanded={open} aria-controls={`acct-${p.variant ?? "rail"}-${id}`} title={label}
+          aria-label={n > 0 ? `${label} ${n} não lidas` : label} onClick={() => p.onToggleAccount(id, !open)}>
           <CaretRight size={11} weight="bold" className="acct-caret" aria-hidden />
           <span className="acct-dot" aria-hidden />
           <span className="acct-name">{label}</span>
-          {n > 0 && <span className="count" aria-hidden>{n}</span>}
+          {n > 0 && <>{" "}<span className="count" aria-hidden>{n}</span></>}
         </button>
         <div className="acct-body" id={`acct-${p.variant ?? "rail"}-${id}`}>
           <div className="acct-inner">
@@ -156,7 +141,6 @@ export function Rail(p: Props) {
 
   const body = (
     <>
-      {multi && strip}
       {p.favorites.length > 0 && (
         <nav className="rail-section" aria-label="Favoritos">
           <div className="rail-label">Favoritos</div>
@@ -168,6 +152,28 @@ export function Rail(p: Props) {
         {(multi ? p.navFolders.filter((r) => ALL_VIEWS.includes(r as NavView)) : p.navFolders).map((r) => item(r))}
         {extras}
       </nav>
+      {p.searches.length > 0 && (
+        <nav className="rail-section" aria-label="Pesquisas">
+          <div className="rail-label">Pesquisas</div>
+          {p.searches.map((s) => (
+            <div key={s.id} className="folder-row">
+              <button type="button" className="nav-item" title={s.query} aria-current={p.activeSearch === s.id ? "page" : undefined}
+                onClick={() => go(() => p.openSearch(s))} onContextMenu={(e) => { e.preventDefault(); p.onSearchContext(e.clientX, e.clientY, s); }}>
+                <span className="nav-icon"><MagnifyingGlass size={16} weight="bold" /></span>
+                <span className="nav-label">{s.name}</span>
+              </button>
+              <span className="folder-actions">
+                <button type="button" className="icon-btn" aria-label={`Renomear ${s.name}`} title="Renomear" onClick={() => p.onRenameSearch(s)}>
+                  <PencilSimple size={12} weight="bold" />
+                </button>
+                <button type="button" className="icon-btn" aria-label={`Excluir ${s.name}`} title="Excluir" onClick={() => p.onDeleteSearch(s)}>
+                  <Trash size={12} weight="bold" />
+                </button>
+              </span>
+            </div>
+          ))}
+        </nav>
+      )}
       {multi ? (
         <>
           <div className="acct-list">{accounts.map((a) => section(a.id))}</div>

@@ -95,6 +95,7 @@ fn msg(acc: &ImapAccount, n: usize) -> lettre::Message {
         bcc: String::new(),
         attachments: vec![],
         from: None,
+        importance: None,
     };
     send::build(acc, &out, None).unwrap()
 }
