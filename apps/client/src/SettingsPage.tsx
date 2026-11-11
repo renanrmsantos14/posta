@@ -18,6 +18,8 @@ import build from "./version.json";
 interface Props {
   accounts: Account[];
   settings: Settings;
+  /** Seção aberta ao entrar (padrão: contas). */
+  initialSection?: string;
   onSetting: (key: string, value: string) => void;
   /** Resolve quando a conta foi removida; rejeita com a mensagem de erro. */
   onRemoveAccount: (id: string) => Promise<void>;
@@ -68,8 +70,8 @@ const SWIPE_OPTIONS: [string, string][] = [["archive", "Arquivar"], ["trash", "E
 const DESKTOP = !/Android/i.test(navigator.userAgent);
 const OFFLINE_OPTIONS = ["50", "200", "500", "1000"];
 
-export function SettingsPage({ accounts, settings, onSetting, onRemoveAccount, onAddAccount, onAccountSaved, onClose, onUpdate, onApplyRules, onPreview, accentAdjusted }: Props) {
-  const [section, setSection] = useState<SectionId>("accounts");
+export function SettingsPage({ initialSection, accounts, settings, onSetting, onRemoveAccount, onAddAccount, onAccountSaved, onClose, onUpdate, onApplyRules, onPreview, accentAdjusted }: Props) {
+  const [section, setSection] = useState<SectionId>(SECTIONS.some((x) => x.id === initialSection) ? (initialSection as SectionId) : "accounts");
   const [auto, setAuto] = useState(autoCheck);
   const [checking, setChecking] = useState(false);
   const [sigAccount, setSigAccount] = useState(accounts[0]?.id ?? "");

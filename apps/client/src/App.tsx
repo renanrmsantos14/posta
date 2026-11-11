@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowBendUpLeft, ArrowBendDoubleUpLeft, ArrowBendUpRight, ArrowsClockwise, Archive, Copy, FolderOpen, FolderSimple, NotePencil, Star, Tag, Trash, EnvelopeSimple, EnvelopeSimpleOpen, FloppyDisk, Printer, PushPin, Clock, ShieldWarning } from "@phosphor-icons/react";
+import { ArrowBendUpLeft, ArrowBendDoubleUpLeft, ArrowBendUpRight, ArrowsClockwise, Archive, Copy, FolderOpen, FolderSimple, NotePencil, Star, Tag, Trash, EnvelopeSimple, EnvelopeSimpleOpen, FloppyDisk, Printer, PushPin, Clock, ShieldWarning, Prohibit, FunnelSimple } from "@phosphor-icons/react";
 import { api, isTauri, type Account, type Attachment, type MailDelta, type MessageDetail, type MessageSummary, type OutAttachment, type OutboxItem, type Role, type Settings, type StoredDraft, type UnreadCounts, type UserFolder, type View } from "./api";
 import { AccountDialog } from "./AccountDialog";
 import { colorKey } from "./accountColors";
@@ -27,7 +27,7 @@ import { Resizer } from "./Resizer";
 import { SettingsPage } from "./SettingsPage";
 import { UpdateDialog } from "./UpdateDialog";
 import { autoCheck, checkUpdate, CHECK_EVERY_MS, skip, skipped, type Update } from "./updater";
-import { addFilter, hasFilters, parseTemplates, whenLabel, whenPresets, type ScheduledItem } from "./productivity";
+import { addFilter, hasFilters, parseRules, parseTemplates, whenLabel, whenPresets, type ScheduledItem } from "./productivity";
 import { AppShell, RouteLayout, PageLayout } from "./layout/primitives";
 import { TopBar, type SearchScope } from "./TopBar";
 import { CommandBar } from "./CommandBar";
@@ -116,6 +116,8 @@ export default function App() {
   const [compose, setCompose] = useState<ComposeInit | null>(null);
   const [savingAtt, setSavingAtt] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  /** Seção que a Configuração abre (ex.: "rules" depois de "Criar regra"). */
+  const [settingsSection, setSettingsSection] = useState<string | undefined>();
   /** Só a mensagem, ocupando a janela (clique duplo, botão expandir ou painel desligado). */
   const [full, setFull] = useState(false);
   /** As preferências chegam do backend: até lá a janela fica invisível para não piscar o tema. */
@@ -149,6 +151,8 @@ export default function App() {
   /** Rascunhos locais, a configuração (assinaturas, notificações) e os filtros de visão. */
   const [drafts, setDrafts] = useState<StoredDraft[]>([]);
   const [settings, setSettings] = useState<Settings>({});
+  const settingsRef = useRef(settings);
+  settingsRef.current = settings;
   const [showDrafts, setShowDrafts] = useState(false);
   const [showScheduled, setShowScheduled] = useState(false);
   const [scheduled, setScheduled] = useState<ScheduledItem[]>([]);
@@ -1175,6 +1179,25 @@ export default function App() {
     }
   }
 
+  /** Bloquear: regra "remetente → Lixeira", já aplicada à Entrada; "Desfazer" tira só esta regra. */
+  function blockSender(m: MessageSummary) {
+    const id = `r${Date.now().toString(36)}`;
+    const rules = parseRules(settings.rules);
+    changeSetting("rules", JSON.stringify([...rules, { id, field: "from", contains: m.from_addr, action: "trash", arg: "", enabled: true }]));
+    void api.applyRulesNow().then(() => reload(messages.length)).catch(() => {});
+    toast(`${m.from_addr} bloqueado: as mensagens vão para a Lixeira`, "info", { action: { label: "Desfazer", onClick: () => {
+      changeSetting("rules", JSON.stringify(parseRules(settingsRef.current.rules).filter((r) => r.id !== id)));
+    } } });
+  }
+
+  /** Cria a regra desligada, com o remetente preenchido, e abre as Regras para escolher a ação. */
+  function ruleFromSender(m: MessageSummary) {
+    const rules = parseRules(settings.rules);
+    changeSetting("rules", JSON.stringify([...rules, { id: `r${Date.now().toString(36)}`, field: "from", contains: m.from_addr, action: "read", arg: "", enabled: false }]));
+    setSettingsSection("rules");
+    setSettingsOpen(true);
+  }
+
   async function applyRules() {
     try {
       const n = await api.applyRulesNow();
@@ -1507,6 +1530,13 @@ export default function App() {
       { label: ms.every((m) => m.role === "trash") ? "Excluir de vez" : "Excluir", icon: Trash, kbd: "Delete", danger: true, disabled: !ms.some(canTrash), onSelect: () => remove(ms) },
       { label: "Relatar phishing", icon: ShieldWarning, disabled: !ms.some(canReport), onSelect: () => reportPhishing(ms) },
       { label: "Mover para", icon: FolderOpen, items: moveItems(ms) },
+      ...(() => {
+        const head = ms.find((m) => m.id === headId);
+        return head?.from_addr ? [
+          { label: "Criar regra com este remetente", icon: FunnelSimple, onSelect: () => ruleFromSender(head) },
+          { label: "Bloquear remetente", icon: Prohibit, danger: true, onSelect: () => blockSender(head) },
+        ] : [];
+      })(),
       { separator: true },
       ms.every((m) => m.seen)
         ? { label: "Marcar como não lida", icon: EnvelopeSimple, kbd: "Ctrl+U", onSelect: () => void markSeen(ms, false) }
@@ -1825,8 +1855,8 @@ export default function App() {
         <Composer key={composeKey} init={compose} accounts={accounts} settings={settings} onSend={send} onSchedule={schedule} templates={templates} onDiscard={() => setCompose(null)} />
       )}
       {settingsOpen && (
-        <SettingsPage accounts={accounts ?? []} settings={settings} onSetting={changeSetting} onRemoveAccount={removeAccount}
-          onAddAccount={() => setDialog(true)} onAccountSaved={accountSaved} onClose={() => setSettingsOpen(false)} onUpdate={showUpdate} onApplyRules={applyRules} accentAdjusted={accentAdjusted} onPreview={previewSetting} />
+        <SettingsPage initialSection={settingsSection} accounts={accounts ?? []} settings={settings} onSetting={changeSetting} onRemoveAccount={removeAccount}
+          onAddAccount={() => setDialog(true)} onAccountSaved={accountSaved} onClose={() => { setSettingsOpen(false); setSettingsSection(undefined); }} onUpdate={showUpdate} onApplyRules={applyRules} accentAdjusted={accentAdjusted} onPreview={previewSetting} />
       )}
       {folderDialog && (
         <FolderDialog state={folderDialog} accounts={accounts ?? []} folders={userFolders} onSubmit={submitFolder} onClose={() => setFolderDialog(null)} />

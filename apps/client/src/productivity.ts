@@ -5,7 +5,7 @@ export interface Rule {
   id: string;
   field: "from" | "subject" | "to";
   contains: string;
-  action: "move" | "read" | "star" | "category" | "archive";
+  action: "move" | "read" | "star" | "category" | "archive" | "trash";
   /** Pasta (`move`) ou id da categoria (`category`). */
   arg: string;
   enabled: boolean;
@@ -40,7 +40,7 @@ export interface ScheduledItem {
 
 export const FIELD_LABEL: Record<Rule["field"], string> = { from: "Remetente", subject: "Assunto", to: "Destinatário" };
 export const ACTION_LABEL: Record<Rule["action"], string> = {
-  move: "Mover para a pasta", read: "Marcar como lida", star: "Marcar com estrela", category: "Aplicar categoria", archive: "Arquivar",
+  move: "Mover para a pasta", read: "Marcar como lida", star: "Marcar com estrela", category: "Aplicar categoria", archive: "Arquivar", trash: "Mover para a Lixeira",
 };
 
 function parseList<T>(raw: string | undefined, ok: (x: Record<string, unknown>) => boolean): T[] {

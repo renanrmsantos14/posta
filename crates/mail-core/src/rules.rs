@@ -16,7 +16,7 @@ pub struct Rule {
     /// `from`, `subject` ou `to`.
     pub field: String,
     pub contains: String,
-    /// `move`, `read`, `star`, `category` ou `archive`.
+    /// `move`, `read`, `star`, `category`, `archive` ou `trash` (bloquear remetente).
     pub action: String,
     /// Pasta (`move`) ou id da categoria (`category`).
     #[serde(default)]
@@ -51,6 +51,8 @@ pub struct Plan {
     pub star: bool,
     pub category: Option<String>,
     pub archive: bool,
+    /// Vai para a Lixeira; vence mover e arquivar.
+    pub trash: bool,
     /// Pasta do usuário de destino. Só a primeira regra de mover vale.
     pub move_to: Option<String>,
 }
@@ -90,6 +92,7 @@ pub fn plan(rules: &[Rule], c: &Candidate) -> Plan {
             "read" => p.read = true,
             "star" => p.star = true,
             "archive" => p.archive = true,
+            "trash" => p.trash = true,
             "category" if p.category.is_none() && !r.arg.is_empty() => p.category = Some(r.arg.clone()),
             "move" if p.move_to.is_none() && !r.arg.is_empty() => p.move_to = Some(r.arg.clone()),
             _ => {}
@@ -165,6 +168,12 @@ mod tests {
     }
 
     #[test]
+    fn bloquear_manda_para_a_lixeira() {
+        let p = plan(&[rule("from", "itau", "trash", ""), rule("from", "itau", "archive", "")], &cand());
+        assert!(p.trash && !p.is_empty());
+    }
+
+    #[test]
     fn plano_junta_acoes_e_a_primeira_de_mover_vence() {
         let rules = vec![
             rule("from", "itau", "move", "Bancos"),
@@ -177,7 +186,7 @@ mod tests {
         let p = plan(&rules, &cand());
         assert_eq!(
             p,
-            Plan { read: false, star: true, category: Some("c1".into()), archive: true, move_to: Some("Bancos".into()) }
+            Plan { read: false, star: true, category: Some("c1".into()), archive: true, trash: false, move_to: Some("Bancos".into()) }
         );
         assert!(plan(&rules[5..], &cand()).is_empty());
     }

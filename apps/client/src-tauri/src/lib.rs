@@ -1443,7 +1443,7 @@ fn auto_reply(st: &AppState, acc: &ImapAccount, new: &[Candidate]) {
 /// Aplica as regras ativas às mensagens e devolve quantas mudaram. Falha em uma ação não impede as outras.
 fn apply_rules(st: &AppState, msgs: &[Candidate]) -> usize {
     let rules = rules::parse_rules(setting_of(st, "rules").as_deref());
-    let (mut read, mut star, mut archive) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut read, mut star, mut archive, mut trash) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     let mut cats: HashMap<String, Vec<i64>> = HashMap::new();
     let mut moves: HashMap<(String, String), Vec<i64>> = HashMap::new();
     let mut touched: HashSet<i64> = HashSet::new();
@@ -1464,6 +1464,7 @@ fn apply_rules(st: &AppState, msgs: &[Candidate]) -> usize {
             cats.entry(cat).or_default().push(c.id);
         }
         match plan.move_to {
+            _ if plan.trash => trash.push(c.id),
             Some(f) if user_folders.iter().any(|u| u.account == c.account && u.name == f) => moves.entry((c.account.clone(), f)).or_default().push(c.id),
             _ if plan.archive => archive.push(c.id),
             _ => {}
@@ -1489,6 +1490,9 @@ fn apply_rules(st: &AppState, msgs: &[Candidate]) -> usize {
     }
     if !archive.is_empty() {
         log("arquivar", move_to_role(st, &archive, Role::Archive));
+    }
+    if !trash.is_empty() {
+        log("lixeira", move_to_role(st, &trash, Role::Trash));
     }
     touched.len()
 }
