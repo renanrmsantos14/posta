@@ -1,12 +1,13 @@
 // Painel de pastas: Favoritos, "Todas as contas" e, com várias contas, uma seção recolhível por conta (pastas do sistema e do usuário),
 // no estilo do Outlook: cada conta abre e fecha por conta própria e o cabeçalho mostra o endereço.
 // Com uma conta só, é a lista simples de sempre. O mesmo componente serve de gaveta no celular (`variant="drawer"`).
-import { CaretRight, FileText, PaperPlaneTilt, Plus, Clock } from "@phosphor-icons/react";
+import { CaretRight, FileText, MagnifyingGlass, PaperPlaneTilt, PencilSimple, Plus, Clock, Trash } from "@phosphor-icons/react";
 import type { Account, Category, UserFolder, View } from "./api";
 import { FolderTree } from "./FolderTree";
 import { PageLayout } from "./layout/primitives";
 import { viewInfo, type FolderNode, type OpenMap } from "./folders";
 import { parseBox } from "./views";
+import type { SavedSearch } from "./savedSearches";
 
 type NavView = "inbox" | "starred" | "sent" | "archive" | "trash" | "junk";
 /** Visões da seção "Todas as contas". */
@@ -27,6 +28,13 @@ interface Props {
   onContext: (x: number, y: number, view: View) => void;
   userFolders: UserFolder[];
   categories: Category[];
+  searches: SavedSearch[];
+  /** Pesquisa salva que corresponde à busca atual. */
+  activeSearch: string | null;
+  openSearch: (s: SavedSearch) => void;
+  onRenameSearch: (s: SavedSearch) => void;
+  onDeleteSearch: (s: SavedSearch) => void;
+  onSearchContext: (x: number, y: number, s: SavedSearch) => void;
   tree: FolderNode[];
   accounts: Account[] | null;
   /** Conta ativa (null = todas). */
@@ -144,6 +152,28 @@ export function Rail(p: Props) {
         {(multi ? p.navFolders.filter((r) => ALL_VIEWS.includes(r as NavView)) : p.navFolders).map((r) => item(r))}
         {extras}
       </nav>
+      {p.searches.length > 0 && (
+        <nav className="rail-section" aria-label="Pesquisas">
+          <div className="rail-label">Pesquisas</div>
+          {p.searches.map((s) => (
+            <div key={s.id} className="folder-row">
+              <button type="button" className="nav-item" title={s.query} aria-current={p.activeSearch === s.id ? "page" : undefined}
+                onClick={() => go(() => p.openSearch(s))} onContextMenu={(e) => { e.preventDefault(); p.onSearchContext(e.clientX, e.clientY, s); }}>
+                <span className="nav-icon"><MagnifyingGlass size={16} weight="bold" /></span>
+                <span className="nav-label">{s.name}</span>
+              </button>
+              <span className="folder-actions">
+                <button type="button" className="icon-btn" aria-label={`Renomear ${s.name}`} title="Renomear" onClick={() => p.onRenameSearch(s)}>
+                  <PencilSimple size={12} weight="bold" />
+                </button>
+                <button type="button" className="icon-btn" aria-label={`Excluir ${s.name}`} title="Excluir" onClick={() => p.onDeleteSearch(s)}>
+                  <Trash size={12} weight="bold" />
+                </button>
+              </span>
+            </div>
+          ))}
+        </nav>
+      )}
       {multi ? (
         <>
           <div className="acct-list">{accounts.map((a) => section(a.id))}</div>
