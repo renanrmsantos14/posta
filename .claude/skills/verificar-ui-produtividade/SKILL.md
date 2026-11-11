@@ -14,5 +14,6 @@ description: Verifica a UI de produtividade do Posta (regras, busca com filtros,
    - Mensagem aberta: "Adiar" > "Amanhã" tira a linha e mostra toast "Adiada até ..." com Desfazer. O menu abre alinhado à esquerda, sem ficar sob a lista.
    - Tecla `p` fixa a linha selecionada no topo com a marca de alfinete; `p` de novo desafixa.
    - Novo email: botão "Modelos de resposta" insere o texto no editor; "Enviar mais tarde" > "Próxima semana" fecha o painel; "Agendados" na barra lista a mensagem com a hora e "Cancelar envio" (volta para Rascunhos). Destinatário com "erro" deixa o painel aberto com a mensagem de erro.
+   - Clique direito numa mensagem: "Criar regra com este remetente" abre Configurações > Regras com uma regra desligada (Remetente = endereço da linha); "Bloquear remetente" mostra o toast com Desfazer, e a ação "Mover para a Lixeira" existe no seletor de ação.
    - Console sem erro nem aviso.
 4. Prints: `posta-regras.png`, `posta-busca.png` e `posta-adiar.png` em `/home/renan/.t3/userdata/attachments/`. Encerre o vite ao terminar e remova o `node_modules` do worktree.
