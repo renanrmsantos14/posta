@@ -284,6 +284,7 @@ fn parse(uid: u32, raw: &[u8], seen: bool, flagged: bool, fallback_date: i64, ow
         cc_addrs: msg.as_ref().map(|m| addresses(m.cc())).unwrap_or_default(),
         header_only: false,
         importance: msg.as_ref().map(importance_of).unwrap_or(0),
+        unsub: crate::unsubscribe::header_lines(raw),
     }
 }
 
