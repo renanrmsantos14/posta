@@ -96,6 +96,13 @@ export interface OutAttachment {
   data: string;
 }
 
+/** Cancelamento de inscrição oferecido pelo cabeçalho `List-Unsubscribe`. */
+export interface Unsubscribe {
+  url: string | null;
+  mailto: string | null;
+  one_click: boolean;
+}
+
 export interface MessageDetail extends MessageSummary {
   body_text: string;
   /** HTML original; vazio quando a mensagem só tem texto. */
@@ -341,6 +348,8 @@ export const api = isTauri
       saveAttachment: (id: number, index: number, open: boolean) =>
         invoke<string>("save_attachment", { id, index, open }),
       saveEml: (id: number) => invoke<string>("save_eml", { id }),
+      unsubscribeInfo: (id: number) => invoke<Unsubscribe | null>("unsubscribe_info", { id }),
+      cancelSubscription: (id: number, method: "one-click" | "mailto") => invoke<void>("cancel_subscription", { id, method }),
       getAutostart: () => invoke<boolean>("get_autostart"),
       setAutostart: (enabled: boolean) => invoke<void>("set_autostart", { enabled }),
       forwardAttachments: (id: number) => invoke<OutAttachment[]>("forward_attachments", { id }),

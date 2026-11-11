@@ -1,5 +1,5 @@
 // Dados de exemplo para rodar a UI no navegador (pnpm dev), sem Tauri e sem rede.
-import type { Account, CheckFailure, CheckStep, Detection, FailKind, Contact, Draft, FlushReport, MailDelta, MessagePage, OutboxItem, QueueStatus, Provider, OauthConfig, OauthConfigView, MessageDetail, MessageSummary, NewAccount, OutAttachment, Role, ScheduledEdit, SendReport, Settings, StoredDraft, SyncResult, UnreadAll, UserFolder, View, DragFiles, FolderUnread } from "./api";
+import type { Account, CheckFailure, CheckStep, Detection, FailKind, Contact, Draft, FlushReport, MailDelta, MessagePage, OutboxItem, QueueStatus, Provider, OauthConfig, OauthConfigView, MessageDetail, MessageSummary, NewAccount, Unsubscribe, OutAttachment, Role, ScheduledEdit, SendReport, Settings, StoredDraft, SyncResult, UnreadAll, UserFolder, View, DragFiles, FolderUnread } from "./api";
 import { parseRules, type ScheduledItem } from "./productivity";
 import { parseBox, parseCat } from "./views";
 
@@ -422,6 +422,14 @@ export const mockApi = {
   async saveEml(_id: number): Promise<string> {
     return "/home/renan/Downloads/mensagem.eml";
   },
+  /** Só a primeira mensagem de exemplo parece boletim; as outras não oferecem cancelamento. */
+  async unsubscribeInfo(id: number): Promise<Unsubscribe | null> {
+    const m = messages.find((x) => x.id === id);
+    return m && /newsletter|boletim|ofertas/i.test(`${m.from_addr} ${m.subject}`)
+      ? { url: "https://exemplo.com/sair", mailto: "sair@exemplo.com", one_click: true }
+      : null;
+  },
+  async cancelSubscription(_id: number, _method: "one-click" | "mailto"): Promise<void> {},
   async getAutostart(): Promise<boolean> {
     return autostart;
   },

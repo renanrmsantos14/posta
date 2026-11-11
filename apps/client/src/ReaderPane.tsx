@@ -1,13 +1,14 @@
 // Painel de leitura: cabeçalho, destinatários (com cartão de contato), anexos, corpo (HtmlBody) e a conversa dobrável.
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { ArrowLeft, ArrowsIn, ArrowsOut, CaretUp, Paperclip, WarningCircle, WifiSlash } from "@phosphor-icons/react";
-import { HtmlBody, ZoomControls, hasRemoteImages } from "./HtmlBody";
+import { HtmlBody, ZoomControls, hasRemoteImages, openExternal } from "./HtmlBody";
 import { PageLayout } from "./layout/primitives";
 import { parseContact } from "./ContactCard";
 import { addrOf } from "./aliases";
 import { fmtLong, shortDate } from "./dates";
 import { fmtSize } from "./format";
-import type { Attachment, MessageDetail, MessageSummary } from "./api";
+import { api, type Attachment, type MessageDetail, type MessageSummary, type Unsubscribe } from "./api";
+import { toast } from "./toast";
 
 export const splitAddrs = (v: string) => v.split(/,(?=(?:[^"]*"[^"]*")*[^"]*$)/).map((x) => x.trim()).filter(Boolean);
 
@@ -61,6 +62,57 @@ function Recipients({ label, v, onContact }: { label: string; v: string; onConta
   );
 }
 
+/** "Cancelar inscrição" para mensagens de lista (`List-Unsubscribe`). Só age num clique; por email, pede confirmação antes. */
+function UnsubscribeBar({ id }: { id: number }) {
+  const [offer, setOffer] = useState<Unsubscribe | null>(null);
+  const [confirm, setConfirm] = useState(false);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    let live = true;
+    setOffer(null);
+    setConfirm(false);
+    api.unsubscribeInfo(id).then((o) => live && setOffer(o), () => {}); // sem rede: sem botão
+    return () => { live = false; };
+  }, [id]);
+  if (!offer) return null;
+  const mailto = offer.mailto?.slice(7).split("?")[0] ?? "";
+  const run = async (method: "one-click" | "mailto") => {
+    setBusy(true);
+    try {
+      await api.cancelSubscription(id, method);
+      toast(method === "mailto" ? "Pedido de cancelamento enviado" : "Inscrição cancelada", "success");
+      setOffer(null);
+    } catch (e) {
+      toast(`Não foi possível cancelar a inscrição: ${String(e)}`, "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+  const start = () => {
+    if (offer.one_click) void run("one-click");
+    else if (offer.url) openExternal(offer.url).catch((e) => toast(`Não foi possível abrir o link: ${String(e)}`, "error"));
+    else setConfirm(true);
+  };
+  return (
+    <div className="unsub" role="status">
+      {confirm ? (
+        <>
+          <span>Enviar um email de cancelamento para {mailto}?</span>
+          <span className="unsub-actions">
+            <button type="button" className="btn" disabled={busy} onClick={() => void run("mailto")} autoFocus>Enviar</button>
+            <button type="button" className="btn ghost" disabled={busy} onClick={() => setConfirm(false)}>Cancelar</button>
+          </span>
+        </>
+      ) : (
+        <>
+          <span>Esta mensagem vem de uma lista de envio.</span>
+          <button type="button" className="btn" disabled={busy} onClick={start}>Cancelar inscrição</button>
+        </>
+      )}
+    </div>
+  );
+}
+
 function MessageView({ d, fold, p }: { d: MessageDetail; fold: boolean; p: ReaderPaneProps }) {
   const fromAddr = addrOf(d.from_addr);
   const remote = p.imagesOk.has(d.id) || p.imagesFrom.has(fromAddr);
@@ -90,6 +142,7 @@ function MessageView({ d, fold, p }: { d: MessageDetail; fold: boolean; p: Reade
       <Recipients label="Para" v={d.to_addrs} onContact={p.onContact} />
       <Recipients label="Cc" v={d.cc_addrs} onContact={p.onContact} />
       {!p.threaded && d.id === p.selectedId && p.mobileActions}
+      {!fold && <UnsubscribeBar id={d.id} />}
       {d.attachments.length > 0 && (
         <ul className="attachments" aria-label="Anexos">
           {d.attachments.map((a) => (
