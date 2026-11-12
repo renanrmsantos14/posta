@@ -61,6 +61,8 @@ const UNDO_MS = 4000;
 const DELTA_GRACE_MS = 2000;
 /** Quantos emails abertos ficam em memória para reabrir na hora. */
 const DETAIL_CACHE = 50;
+/** Depois disto sem resposta, o leitor mostra erro com "Tentar de novo" em vez de esperar para sempre. */
+const OPEN_TIMEOUT_MS = 25_000;
 /** Larguras padrão e limites das colunas (px); o resto da janela fica com a leitura. */
 const RAIL = { def: 232, min: 180, max: 360 };
 const LIST = { def: 360, min: 280, max: 720 };
@@ -106,6 +108,8 @@ export default function App() {
   const [detail, setDetail] = useState<MessageDetail | null>(null);
   /** Falha ao abrir a mensagem selecionada (ex.: sem rede e sem o corpo baixado): o leitor mostra o motivo e "Tentar de novo". */
   const [openError, setOpenError] = useState<{ id: number; msg: string } | null>(null);
+  /** Mensagem cujo corpo está sendo buscado agora (o leitor mostra "Abrindo…" em vez de "Selecione uma mensagem"). */
+  const [opening, setOpening] = useState<number | null>(null);
   /** Seleção por teclado troca o conteúdo sem animação. */
   const [viaKeyboard, setViaKeyboard] = useState(false);
   /** Mensagens cujas imagens remotas o usuário liberou (só nesta sessão). */
@@ -629,6 +633,13 @@ export default function App() {
     refreshCounts();
   };
 
+  /** `api.open` com prazo: uma conexão presa não deixa o leitor esperando para sempre (o resultado atrasado é descartado). */
+  const openWithin = (id: number, ms: number) => {
+    let timer: ReturnType<typeof setTimeout>;
+    const late = new Promise<never>((_, reject) => { timer = setTimeout(() => reject("Demorou demais para abrir este email."), ms); });
+    return Promise.race([api.open(id), late]).finally(() => clearTimeout(timer));
+  };
+
   async function select(id: number, keyboard = false) {
     setViaKeyboard(keyboard);
     setSelectedId(id);
@@ -644,11 +655,14 @@ export default function App() {
       const sum = rowOf.get(id)?.members.find((m) => m.id === id);
       if (sum && !sum.seen) void markSeen([sum], true, false);
     } else {
+      setOpening(id);
       try {
-        d = await api.open(id);
+        d = await openWithin(id, OPEN_TIMEOUT_MS);
       } catch (e) {
         if (selectedRef.current === id) { setDetail(null); setOpenError({ id, msg: String(e) }); }
         return;
+      } finally {
+        setOpening((cur) => (cur === id ? null : cur));
       }
       if (selectedRef.current !== id) return;
       setDetail(d);
@@ -1800,7 +1814,7 @@ export default function App() {
           </div>
         )}
 
-        <ReaderPane detail={detail && detail.id === selectedId ? detail : null} error={openError && openError.id === selectedId ? openError.msg : null}
+        <ReaderPane detail={detail && detail.id === selectedId ? detail : null} error={openError && openError.id === selectedId ? openError.msg : null} opening={opening !== null && opening === selectedId}
           onRetry={() => selectedId !== null && void select(selectedId)} selectedId={selectedId} threaded={threaded} thread={thread} bodies={bodies}
           expanded={expanded} full={full} viaKeyboard={viaKeyboard} folderLabel={info.label} hasMessages={messages.length > 0} imagesOk={imagesOk} imagesFrom={imagesFrom}
           savingAtt={savingAtt} mobileActions={mobileActions} onFull={setFull} onBack={() => (full ? setFull(false) : setReaderOpen(false))}

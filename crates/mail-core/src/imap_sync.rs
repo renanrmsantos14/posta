@@ -1,6 +1,6 @@
 //! Sincronização IMAP → Store. Uma conexão por chamada; `idle_wait` espera novidades (IMAP IDLE).
 
-use imap::{ClientBuilder, ConnectionMode, Session};
+use imap::Session;
 use mail_parser::{MessageParser, PartKind};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashSet};
@@ -145,12 +145,8 @@ pub(crate) fn connect(acc: &ImapAccount) -> Result<ImapSession> {
 }
 
 fn connect_once(acc: &ImapAccount) -> Result<ImapSession> {
-    let mode = match acc.security {
-        Security::Tls => ConnectionMode::Tls,
-        Security::StartTls => ConnectionMode::StartTls,
-        Security::Plaintext => ConnectionMode::Plaintext,
-    };
-    let client = ClientBuilder::new(acc.host.as_str(), acc.port).mode(mode).connect()?;
+    // Conexão própria (crate::net): o `ClientBuilder` do imap não tem timeout de conexão, leitura nem escrita.
+    let client = crate::net::connect(&acc.host, acc.port, &acc.security)?;
     match acc.auth {
         AuthMode::Password => client.login(&acc.username, &acc.password),
         _ => client.authenticate("XOAUTH2", &XOauth2::new(&acc.username, &acc.password)),

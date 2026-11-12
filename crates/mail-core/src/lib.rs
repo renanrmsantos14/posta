@@ -4,6 +4,7 @@ pub mod attachments;
 pub mod folders;
 pub mod imap_sync;
 pub mod later;
+pub(crate) mod net;
 pub mod oauth;
 pub mod rules;
 pub mod session;
