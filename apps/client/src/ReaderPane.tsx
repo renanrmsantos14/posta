@@ -14,11 +14,23 @@ import { toast } from "./toast";
 
 export const splitAddrs = (v: string) => v.split(/,(?=(?:[^"]*"[^"]*")*[^"]*$)/).map((x) => x.trim()).filter(Boolean);
 
+/** "Abrindo…" só depois de 300 ms: abrir do cache não pisca. */
+function Opening() {
+  const [show, setShow] = useState(false);
+  useEffect(() => {
+    const t = setTimeout(() => setShow(true), 300);
+    return () => clearTimeout(t);
+  }, []);
+  return <div className="reader-empty" role="status" aria-live="polite"><p className="reader-opening">{show ? "Abrindo…" : ""}</p></div>;
+}
+
 export interface ReaderPaneProps {
   /** Mensagem aberta (já filtrada pela seleção); null mostra o painel vazio. */
   detail: MessageDetail | null;
   /** Motivo de a mensagem selecionada não ter aberto; mostra um estado vazio com "Tentar de novo". */
   error: string | null;
+  /** A mensagem selecionada ainda está sendo aberta (busca do corpo no servidor). */
+  opening: boolean;
   onRetry: () => void;
   selectedId: number | null;
   threaded: boolean;
@@ -242,6 +254,8 @@ export function ReaderPane(p: ReaderPaneProps) {
             <p>{p.error}</p>
             <button type="button" className="btn" onClick={() => p.onRetry()} autoFocus>Tentar de novo</button>
           </div>
+        ) : p.opening ? (
+          <Opening key={p.selectedId} />
         ) : (
           <div className="reader-empty">
             <p>{p.hasMessages ? "Selecione uma mensagem" : ""}</p>

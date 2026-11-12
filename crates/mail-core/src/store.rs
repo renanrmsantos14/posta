@@ -951,7 +951,8 @@ impl Store {
         Ok(ids)
     }
 
-    /// Guarda o corpo baixado sob demanda de uma mensagem que só tinha os cabeçalhos. Devolve o id local.
+    /// Guarda o corpo baixado de uma mensagem que só tinha os cabeçalhos. Devolve o id local. Como veio a mensagem inteira,
+    /// grava também as linhas List-Unsubscribe (`m.unsub`) se ainda eram NULL: abrir não precisa ir ao servidor buscá-las.
     pub fn set_body(&mut self, account: &str, mailbox: &str, uid: u32, m: &NewMessage) -> Result<Option<i64>> {
         let id: Option<i64> = self
             .conn
@@ -963,13 +964,15 @@ impl Store {
             .optional()?;
         let Some(id) = id else { return Ok(None) };
         self.conn.execute(
-            "UPDATE messages SET body_text = ?2, body_html = ?3, snippet = ?4, attachments = ?5, body_loaded = 1 WHERE id = ?1",
+            "UPDATE messages SET body_text = ?2, body_html = ?3, snippet = ?4, attachments = ?5, body_loaded = 1,
+             unsub = COALESCE(unsub, ?6) WHERE id = ?1",
             params![
                 id,
                 m.body_text,
                 m.body_html,
                 snippet(&m.body_text),
-                serde_json::to_string(&m.attachments).unwrap_or_else(|_| "[]".into())
+                serde_json::to_string(&m.attachments).unwrap_or_else(|_| "[]".into()),
+                m.unsub
             ],
         )?;
         Ok(Some(id))

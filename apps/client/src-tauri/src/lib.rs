@@ -2,7 +2,7 @@
 
 use mail_core::rules::{self, Candidate};
 use mail_core::{search, unsubscribe, vacation};
-use mail_core::{imap_sync, outbox, Delta, Hub, Kind, Page, send, Contact, DraftRecord, FlushReport, IdleEnd, ImapAccount, MessageDetail, MessageSummary, MsgFlag, OpKind, Outgoing, OutboxItem, ReplyRef, Role, SendReport, Store, UserFolder};
+use mail_core::{imap_sync, outbox, Delta, Hub, Kind, Page, send, Contact, DraftRecord, FlushReport, IdleEnd, ImapAccount, Live, MessageDetail, MessageSummary, MsgFlag, OpKind, Outgoing, OutboxItem, ReplyRef, Role, SendReport, Store, UserFolder};
 use serde::{Deserialize, Serialize};
 use std::{collections::{HashMap, HashSet}, fs, path::PathBuf, sync::{atomic::{AtomicBool, Ordering}, Mutex}, time::{Duration, Instant}};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -39,6 +39,8 @@ struct AppState {
     prefetching: Mutex<HashSet<String>>,
     /// Destino do último clique numa notificação, até a UI buscar (`take_pending_open`).
     pending_open: Mutex<Option<OpenTarget>>,
+    /// Mensagens enviadas por mim cujo destinatário já foi buscado no servidor nesta execução (no máximo uma vez cada).
+    own_to_fetched: Mutex<HashSet<i64>>,
 }
 
 /// Travas que sobrevivem ao pânico de outra thread. Com `lock().unwrap()`, um pânico segurando o `store` (num sync em
@@ -94,6 +96,7 @@ impl AppState {
             hub: Hub::new(),
             prefetching: Mutex::new(HashSet::new()),
             pending_open: Mutex::new(None),
+            own_to_fetched: Mutex::new(HashSet::new()),
         }
     }
 }
@@ -729,13 +732,30 @@ async fn load_body_now(app: &AppHandle, id: i64) -> CmdResult<MessageDetail> {
 /// Abre a mensagem e, se estava não lida, marca como lida aqui e no servidor.
 #[tauri::command]
 async fn open_message(app: AppHandle, id: i64) -> CmdResult<Option<MessageDetail>> {
+    // O vigia (`diag::timed`) só mede comandos síncronos; este é assíncrono, então mede-se aqui.
+    let started = Instant::now();
+    let mut downloaded = false;
+    let r = open_message_inner(&app, id, &mut downloaded).await;
+    let ms = started.elapsed().as_millis();
+    if ms > 1000 {
+        diag::log(&format!("open_message lento: id={id} {ms} ms, baixou corpo={downloaded}, ok={}", r.is_ok()));
+    }
+    r
+}
+
+async fn open_message_inner(app: &AppHandle, id: i64, downloaded: &mut bool) -> CmdResult<Option<MessageDetail>> {
     let st = app.state::<AppState>();
     let cached = st.store.lk().get(id).map_err(err)?;
     let Some(cached) = cached else { return Ok(None) };
     // Só cabeçalho no cache: baixa o corpo agora, pela sessão persistente. Sem corpo e sem como baixar,
     // o erro é explícito (a mensagem continua não lida) em vez de abrir uma tela vazia.
-    let cached = if cached.body_loaded { cached } else { load_body_now(&app, id).await? };
-    let (mut detail, loc) = {
+    let cached = if cached.body_loaded {
+        cached
+    } else {
+        *downloaded = true;
+        load_body_now(app, id).await.inspect_err(|e| diag::log(&format!("open_message: corpo não baixado (id={id}): {e}")))?
+    };
+    let (detail, loc) = {
         let store = st.store.lk();
         let mut d = cached;
         let was_seen = d.summary.seen;
@@ -751,23 +771,22 @@ async fn open_message(app: AppHandle, id: i64) -> CmdResult<Option<MessageDetail
     let acc = st.account_with_password(&account);
     // Mensagem enviada por mim, baixada antes da correção: busca o destinatário real.
     let own = acc.as_ref().ok().filter(|a| detail.reply_addr.eq_ignore_ascii_case(&a.username)).cloned();
-    if let Some(own) = own {
-        let mailbox = mailbox.clone();
-        let loader = app.clone();
-        let to = tauri::async_runtime::spawn_blocking(move || {
-            let hub = &loader.state::<AppState>().hub;
-            hub.with(&own, Kind::Read, |l| imap_sync::fetch_to_on(l, &mailbox, uid))
-        })
-        .await
-            .map_err(err)?;
-        match to {
-            Ok(Some(to)) => {
-                st.store.lk().set_reply_addr(id, &to).map_err(err)?;
-                detail.reply_addr = to;
+    // O detalhe volta na hora; o destinatário vem em segundo plano, uma vez por mensagem por execução,
+    // para não ocupar a sessão Read a cada abertura (a próxima abertura já o encontra gravado).
+    if let Some(own) = own.filter(|_| st.own_to_fetched.lk().insert(id)) {
+        let (mailbox, loader) = (mailbox.clone(), app.clone());
+        tauri::async_runtime::spawn_blocking(move || {
+            let st = loader.state::<AppState>();
+            match st.hub.with(&own, Kind::Read, |l| imap_sync::fetch_to_on(l, &mailbox, uid)) {
+                Ok(Some(to)) => {
+                    if let Err(e) = st.store.lk().set_reply_addr(id, &to) {
+                        eprintln!("gravar destinatário falhou ({}/{uid}): {e}", own.id);
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => eprintln!("buscar destinatário falhou ({}/{uid}): {e}", own.id),
             }
-            Ok(None) => {}
-            Err(e) => eprintln!("buscar destinatário falhou ({account}/{uid}): {e}"),
-        }
+        });
     }
     if !was_seen {
         tauri::async_runtime::spawn_blocking(move || {
@@ -874,7 +893,8 @@ fn unsubscribe_offer(st: &AppState, id: i64) -> CmdResult<(ReplyRef, Option<unsu
         Some(l) => l,
         None => {
             let acc = st.account_with_password(&loc.account)?;
-            let l = st.hub.with(&acc, Kind::Read, |l| unsubscribe::fetch_on(l, &loc.mailbox, loc.uid)).map_err(err)?;
+            // Conexão avulsa: esta busca é rara (mensagem antiga) e na sessão Read o próximo email aberto esperaria atrás dela.
+            let l = Live::once(&acc, |l| unsubscribe::fetch_on(l, &loc.mailbox, loc.uid)).map_err(err)?;
             st.store.lk().set_unsub(id, &l).map_err(err)?;
             l
         }
