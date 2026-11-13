@@ -258,6 +258,19 @@ fn serve(conn: TcpStream, srv: Shared) {
         } else if up.starts_with("UID EXPUNGE") || up == "EXPUNGE" {
             let only: Option<Vec<u32>> = cmd.split(' ').nth(2).map(|set| select(set, s.boxm(&sel)).iter().map(|m| m.uid).collect());
             s.boxm(&sel).retain(|m| !(m.deleted && only.as_ref().is_none_or(|o| o.contains(&m.uid))));
+        } else if up.starts_with("LIST") {
+            // Imita o Courier: tudo mora sob "INBOX.", com "." como separador.
+            resp += "* LIST () \".\" INBOX\r\n";
+            for name in s.others.keys() {
+                resp += &format!("* LIST () \".\" \"{name}\"\r\n");
+            }
+        } else if up.starts_with("CREATE") {
+            let name = cmd[7..].trim().trim_matches('"').to_string();
+            if !name.starts_with("INBOX.") {
+                out.write_all(format!("{tag} NO Client tried to access nonexistent namespace.\r\n").as_bytes()).unwrap();
+                continue;
+            }
+            s.boxm(&name);
         } else if up == "LOGOUT" {
             out.write_all(format!("* BYE bye\r\n{tag} OK logout\r\n").as_bytes()).ok();
             return;
@@ -704,4 +717,18 @@ fn excluir_de_vez_repetido_e_sucesso() {
     mail_core::outbox::apply_op_via(&hub, &acc, "INBOX", &[1], mail_core::OpKind::Delete, "").unwrap();
     mail_core::outbox::apply_op_via(&hub, &acc, "INBOX", &[1], mail_core::OpKind::Delete, "").unwrap();
     assert_eq!(count_in(&srv, "INBOX"), 1);
+}
+
+#[test]
+fn servidor_com_namespace_inbox_cria_pasta_de_sistema_com_prefixo() {
+    // Conta só com a INBOX num Courier: "Sent" e "Archive" são recusados; o app cria "INBOX.Sent" e "INBOX.Archive".
+    let (acc, srv, _) = start("IDLE");
+    let folders = imap_sync::discover_folders(&acc).unwrap();
+    let name = |r| folders.iter().find(|f| f.role == r).map(|f| f.name.as_str());
+    assert_eq!(name(mail_core::Role::Sent), Some("INBOX.Sent"), "{folders:?}");
+    assert_eq!(name(mail_core::Role::Archive), Some("INBOX.Archive"), "{folders:?}");
+    let log = cmds(&srv);
+    assert!(log.iter().any(|c| c == "CREATE \"Sent\"" || c == "CREATE Sent"), "{log:?}");
+    let s = srv.lock().unwrap();
+    assert!(s.others.contains_key("INBOX.Sent") && s.others.contains_key("INBOX.Archive"));
 }

@@ -41,6 +41,8 @@ struct AppState {
     pending_open: Mutex<Option<OpenTarget>>,
     /// Mensagens enviadas por mim cujo destinatário já foi buscado no servidor nesta execução (no máximo uma vez cada).
     own_to_fetched: Mutex<HashSet<i64>>,
+    /// Contas sem Enviados que já tentaram descobrir as pastas de novo nesta execução.
+    rediscovered: Mutex<HashSet<String>>,
 }
 
 /// Travas que sobrevivem ao pânico de outra thread. Com `lock().unwrap()`, um pânico segurando o `store` (num sync em
@@ -97,6 +99,7 @@ impl AppState {
             prefetching: Mutex::new(HashSet::new()),
             pending_open: Mutex::new(None),
             own_to_fetched: Mutex::new(HashSet::new()),
+            rediscovered: Mutex::new(HashSet::new()),
         }
     }
 }
@@ -155,11 +158,17 @@ impl AppState {
         Ok(())
     }
 
-    /// Pastas da conta; descobre no servidor na primeira vez.
+    /// Pastas da conta; descobre no servidor na primeira vez. Conta salva sem Enviados (ex.: Courier só com a
+    /// INBOX, de antes de o app saber criar "INBOX.Sent") tenta de novo uma vez por execução, sem travar o sync.
     fn ensure_folders(&self, store: &mut Store, acc: &ImapAccount) -> CmdResult<()> {
-        if store.folders(&acc.id).map_err(err)?.is_empty() {
+        let saved = store.folders(&acc.id).map_err(err)?;
+        if saved.is_empty() {
             let found = imap_sync::discover_folders(acc).map_err(err)?;
             store.set_folders(&acc.id, &found).map_err(err)?;
+        } else if !saved.iter().any(|f| f.role == Role::Sent) && self.rediscovered.lk().insert(acc.id.clone()) {
+            if let Ok(found) = imap_sync::discover_folders(acc) {
+                store.set_folders(&acc.id, &found).map_err(err)?;
+            }
         }
         Ok(())
     }

@@ -80,11 +80,22 @@ pub fn pick(listed: &[Listed]) -> Vec<Folder> {
     out
 }
 
-/// Nome para criar o Arquivo: segue o prefixo "INBOX." quando o servidor organiza tudo sob a Caixa de entrada.
-pub fn archive_name(listed: &[Listed], delimiter: Option<&str>) -> String {
-    match delimiter {
-        Some(d) if listed.iter().any(|l| l.name.starts_with(&format!("INBOX{d}"))) => format!("INBOX{d}Archive"),
-        _ => "Archive".into(),
+/// O servidor já organiza as pastas sob a Caixa de entrada ("INBOX." ou "INBOX/")?
+fn under_inbox(listed: &[Listed], d: &str) -> bool {
+    let prefix = format!("INBOX{d}");
+    listed.iter().any(|l| l.name.starts_with(&prefix))
+}
+
+/// Nomes a tentar, em ordem, para criar uma pasta de sistema (ex.: "Sent", "Archive"). Primeiro segue o
+/// prefixo "INBOX." quando o servidor já organiza tudo sob a Caixa de entrada; a outra forma fica de reserva,
+/// porque servidores como o Courier recusam pasta fora de "INBOX." mesmo quando só existe a INBOX.
+pub fn system_names(listed: &[Listed], delimiter: Option<&str>, leaf: &str) -> Vec<String> {
+    let Some(d) = delimiter else { return vec![leaf.into()] };
+    let prefixed = format!("INBOX{d}{leaf}");
+    if under_inbox(listed, d) {
+        vec![prefixed, leaf.into()]
+    } else {
+        vec![leaf.into(), prefixed]
     }
 }
 
@@ -131,7 +142,7 @@ pub fn new_name(listed: &[Listed], delimiter: Option<&str>, parent: Option<&str>
     let name = match (delimiter, parent) {
         (Some(d), Some(p)) => format!("{p}{d}{leaf}"),
         (None, Some(_)) => return Err(Error::Invalid("este servidor não aceita subpastas".into())),
-        (Some(d), None) if listed.iter().any(|l| l.name.starts_with(&format!("INBOX{d}"))) => format!("INBOX{d}{leaf}"),
+        (Some(d), None) if under_inbox(listed, d) => format!("INBOX{d}{leaf}"),
         _ => leaf,
     };
     if listed.iter().any(|l| l.name.eq_ignore_ascii_case(&name)) {
@@ -256,10 +267,12 @@ mod tests {
     }
 
     #[test]
-    fn nome_do_arquivo_a_criar() {
-        assert_eq!(archive_name(&[l("INBOX", None), l("INBOX.Sent", None)], Some(".")), "INBOX.Archive");
-        assert_eq!(archive_name(&[l("INBOX", None), l("Sent", None)], Some("/")), "Archive");
-        assert_eq!(archive_name(&[], None), "Archive");
+    fn nomes_para_criar_pasta_de_sistema() {
+        assert_eq!(system_names(&[l("INBOX", None), l("INBOX.Sent", None)], Some("."), "Archive"), ["INBOX.Archive", "Archive"]);
+        assert_eq!(system_names(&[l("INBOX", None), l("Sent", None)], Some("/"), "Archive"), ["Archive", "INBOX/Archive"]);
+        // Só a INBOX: não dá para saber o namespace; tenta sem prefixo e depois com.
+        assert_eq!(system_names(&[l("INBOX", None)], Some("."), "Sent"), ["Sent", "INBOX.Sent"]);
+        assert_eq!(system_names(&[], None, "Sent"), ["Sent"]);
     }
 
     #[test]
