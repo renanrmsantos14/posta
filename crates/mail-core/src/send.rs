@@ -301,12 +301,11 @@ fn server_saves_sent(acc: &ImapAccount) -> bool {
 }
 
 fn sent_folder(session: &mut ImapSession) -> Result<String> {
-    let (listed, _) = crate::imap_sync::list_folders(session)?;
+    let (listed, delimiter) = crate::imap_sync::list_folders(session)?;
     if let Some(f) = pick(&listed).into_iter().find(|f| f.role == Role::Sent) {
         return Ok(f.name);
     }
-    session.create("Sent")?;
-    Ok("Sent".into())
+    crate::imap_sync::create_system_folder(session, &listed, delimiter.as_deref(), "Sent")
 }
 
 fn after_send(acc: &ImapAccount, raw: &[u8], reply: Option<&ReplyRef>) -> Result<bool> {

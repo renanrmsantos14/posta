@@ -12,7 +12,7 @@ use imap_proto::NameAttribute;
 
 use crate::attachments;
 use crate::oauth::{Provider, XOauth2};
-use crate::folders::{archive_name, is_system, new_name, pick, renamed, user_folders, with_children, Folder, Listed, Role};
+use crate::folders::{is_system, new_name, pick, renamed, system_names, user_folders, with_children, Folder, Listed, Role};
 use crate::session::{Hub, Kind, Live};
 use crate::store::{Delta, NewMessage, Store};
 use crate::Result;
@@ -589,20 +589,48 @@ pub(crate) fn list_folders(session: &mut ImapSession) -> Result<(Vec<Listed>, Op
     Ok((listed, delimiter))
 }
 
-/// Descobre as pastas padrão. Sem Arquivo, tenta criar e assinar um; se o servidor recusar, segue sem Arquivo.
+/// Cria e assina uma pasta de sistema, tentando os nomes de `system_names`. Devolve o nome que o servidor aceitou.
+/// Se o nome já existe (ex.: pasta que o LIST não mostrou), usa esse em vez de criar a outra forma ao lado.
+/// Na falha, devolve o erro do primeiro nome: é o que explica a recusa.
+pub(crate) fn create_system_folder(session: &mut ImapSession, listed: &[Listed], delimiter: Option<&str>, leaf: &str) -> Result<String> {
+    let mut first = None;
+    for name in system_names(listed, delimiter, leaf) {
+        match session.create(&name) {
+            Ok(()) => {
+                session.subscribe(&name).ok();
+                return Ok(name);
+            }
+            Err(e) if already_exists(&e) => return Ok(name),
+            Err(e) => {
+                first.get_or_insert(e);
+            }
+        }
+    }
+    Err(first.expect("system_names devolve ao menos um nome").into())
+}
+
+/// CREATE recusado porque a pasta já existe (código `ALREADYEXISTS` da RFC 5530 ou texto equivalente).
+fn already_exists(e: &imap::Error) -> bool {
+    let imap::Error::No(no) = e else { return false };
+    let text = no.information.to_ascii_lowercase();
+    text.contains("alreadyexists") || text.contains("already exists")
+}
+
+/// Descobre as pastas padrão. Sem Enviados ou Arquivo, tenta criar e assinar; se o servidor recusar, segue sem ela.
 pub fn discover_folders(acc: &ImapAccount) -> Result<Vec<Folder>> {
     let mut session = connect(acc)?;
     let (listed, delimiter) = list_folders(&mut session)?;
     let mut folders = pick(&listed);
-    if !folders.iter().any(|f| f.role == Role::Archive) {
-        let name = archive_name(&listed, delimiter.as_deref());
+    for (role, leaf) in [(Role::Sent, "Sent"), (Role::Archive, "Archive")] {
+        if folders.iter().any(|f| f.role == role) {
+            continue;
+        }
         // Servidor que não deixa criar pasta não pode esconder Enviados/Lixeira já descobertos.
-        if session.create(&name).is_ok() {
-            session.subscribe(&name).ok();
-            folders.push(Folder { role: Role::Archive, name });
-            folders.sort_by_key(|f| Role::ALL.iter().position(|r| *r == f.role));
+        if let Ok(name) = create_system_folder(&mut session, &listed, delimiter.as_deref(), leaf) {
+            folders.push(Folder { role, name });
         }
     }
+    folders.sort_by_key(|f| Role::ALL.iter().position(|r| *r == f.role));
     session.logout().ok();
     Ok(folders)
 }
