@@ -88,13 +88,13 @@ jobs:
         with:
           projectPath: apps/client
           tagName: ${{ needs.versao.outputs.tag || github.ref_name }}
-          releaseName: Posta ${{ needs.versao.outputs.tag || github.ref_name }}
+          releaseName: RenanMail ${{ needs.versao.outputs.tag || github.ref_name }}
           releaseBody: |
             Baixe o instalador do seu sistema em **Assets**:
-            - **Windows**: `Posta_*_x64-setup.exe`
-            - **Linux**: `Posta_*_amd64.AppImage` (ou `.deb` no Ubuntu/Debian)
+            - **Windows**: `RenanMail_*_x64-setup.exe`
+            - **Linux**: `RenanMail_*_amd64.AppImage` (ou `.deb` no Ubuntu/Debian)
 
-            No Windows, o SmartScreen pode avisar na primeira instalação: clique em *Mais informações* → *Executar assim mesmo*. Quem já tem o Posta instalado recebe esta versão pelo próprio app.
+            No Windows, o SmartScreen pode avisar na primeira instalação: clique em *Mais informações* → *Executar assim mesmo*. Quem já tem o RenanMail instalado recebe esta versão pelo próprio app.
           releaseDraft: false
           prerelease: false
           includeUpdaterJson: true
@@ -170,9 +170,9 @@ jobs:
           mkdir -p dist-android
           "$BT/zipalign" -f -p 4 "$UNSIGNED" dist-android/aligned.apk
           "$BT/apksigner" sign --ks "$KS" --ks-pass env:ANDROID_KEYSTORE_PASSWORD --key-pass env:ANDROID_KEY_PASSWORD \
-            --ks-key-alias "$ANDROID_KEY_ALIAS" --out "dist-android/Posta_${VERSION}_android.apk" dist-android/aligned.apk
+            --ks-key-alias "$ANDROID_KEY_ALIAS" --out "dist-android/RenanMail_${VERSION}_android.apk" dist-android/aligned.apk
           rm -f dist-android/aligned.apk dist-android/*.idsig "$KS"
-          "$BT/apksigner" verify --print-certs "dist-android/Posta_${VERSION}_android.apk" | head -3
+          "$BT/apksigner" verify --print-certs "dist-android/RenanMail_${VERSION}_android.apk" | head -3
 
       - name: Anexa ao release
         env:

@@ -1,6 +1,6 @@
 ---
 name: verificar-conforto
-description: Verifica bandeja do sistema, gestos de deslizar, imprimir/salvar .eml e aliases de remetente do Posta. Use ao mudar src-tauri/src/tray.rs, autostart em lib.rs, apps/client/src/{swipe,aliases}.ts, o bloco @media print do styles.css, save_eml, Outgoing.from em mail-core/send.rs ou a seção Sistema/aliases da SettingsPage.
+description: Verifica bandeja do sistema, gestos de deslizar, imprimir/salvar .eml e aliases de remetente do RenanMail. Use ao mudar src-tauri/src/tray.rs, autostart em lib.rs, apps/client/src/{swipe,aliases}.ts, o bloco @media print do styles.css, save_eml, Outgoing.from em mail-core/send.rs ou a seção Sistema/aliases da SettingsPage.
 ---
 
 # Verificar conforto (bandeja, gestos, imprimir, aliases)

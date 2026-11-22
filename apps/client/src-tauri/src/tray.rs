@@ -46,7 +46,7 @@ fn build(app: &AppHandle) -> tauri::Result<()> {
         ],
     )?;
     let mut b = TrayIconBuilder::with_id(ID)
-        .tooltip("Posta")
+        .tooltip("RenanMail")
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, e| match e.id().as_ref() {
@@ -77,9 +77,9 @@ fn build(app: &AppHandle) -> tauri::Result<()> {
 pub fn show_unread(app: &AppHandle, unread: u32) {
     if let Some(t) = app.tray_by_id(ID) {
         let tip = match unread {
-            0 => "Posta".to_string(),
-            1 => "Posta: 1 não lida".to_string(),
-            n => format!("Posta: {n} não lidas"),
+            0 => "RenanMail".to_string(),
+            1 => "RenanMail: 1 não lida".to_string(),
+            n => format!("RenanMail: {n} não lidas"),
         };
         t.set_tooltip(Some(tip)).ok();
     }

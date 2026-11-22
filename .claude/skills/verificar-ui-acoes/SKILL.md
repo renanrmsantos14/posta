@@ -1,6 +1,6 @@
 ---
 name: verificar-ui-acoes
-description: Verifica as ações em mensagens do Posta (lida/não lida, estrela, responder a todos, encaminhar, seleção em lote, atalhos) em modo mock. Use ao mudar App.tsx, mock.ts, folders.ts, api.ts ou styles.css nessas ações.
+description: Verifica as ações em mensagens do RenanMail (lida/não lida, estrela, responder a todos, encaminhar, seleção em lote, atalhos) em modo mock. Use ao mudar App.tsx, mock.ts, folders.ts, api.ts ou styles.css nessas ações.
 ---
 
 # Verificar UI de ações em mensagens (mock)

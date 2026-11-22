@@ -21,4 +21,4 @@ const confUrl = new URL("../src-tauri/tauri.conf.json", import.meta.url);
 const conf = JSON.parse(readFileSync(confUrl, "utf8"));
 conf.version = pkg.version;
 writeFileSync(confUrl, JSON.stringify(conf, null, 2) + "\n");
-console.log(`Posta v${pkg.version} · ${builtAt}`);
+console.log(`RenanMail v${pkg.version} · ${builtAt}`);

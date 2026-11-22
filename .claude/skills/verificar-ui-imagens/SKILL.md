@@ -1,6 +1,6 @@
 ---
 name: verificar-ui-imagens
-description: Verifica o bloqueio de imagens remotas no leitor do Posta e a liberação por remetente ("Sempre mostrar de …", setting `images:trusted`, lista em Configurações › Leitura e layout) em modo mock. Use ao mudar a faixa `.img-banner` em ReaderPane.tsx, HtmlBody.tsx (`hasRemoteImages`/CSP), `imagesOk`/`imagesFrom`/`trustSender` em App.tsx ou o campo em SettingsPage.tsx.
+description: Verifica o bloqueio de imagens remotas no leitor do RenanMail e a liberação por remetente ("Sempre mostrar de …", setting `images:trusted`, lista em Configurações › Leitura e layout) em modo mock. Use ao mudar a faixa `.img-banner` em ReaderPane.tsx, HtmlBody.tsx (`hasRemoteImages`/CSP), `imagesOk`/`imagesFrom`/`trustSender` em App.tsx ou o campo em SettingsPage.tsx.
 ---
 
 # Verificar imagens remotas (mock)

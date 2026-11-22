@@ -1,4 +1,4 @@
-/* Temas da Posta. Cada preset sobrescreve os tokens de cor; o resto do app só lê var(--...).
+/* Temas do RenanMail. Cada preset sobrescreve os tokens de cor; o resto do app só lê var(--...).
    [data-theme] vale em qualquer elemento (as miniaturas em Configurações > Aparência reaproveitam os mesmos tokens).
    Claro e escuro "Padrão" são a base; as famílias abaixo trazem os tokens semânticos e os presets só trocam o núcleo.
    Contraste: AA (4,5:1) em todos os pares de texto; os de alto contraste, AAA (7:1). Conferido por verificar-ui-temas. */

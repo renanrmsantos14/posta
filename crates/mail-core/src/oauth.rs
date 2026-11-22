@@ -143,8 +143,8 @@ pub fn xoauth2(user: &str, access_token: &str) -> String {
     format!("user={user}\x01auth=Bearer {access_token}\x01\x01")
 }
 
-const PAGE: &str = "<!doctype html><meta charset=utf-8><title>Posta</title>\
-<body style=\"font-family:system-ui;text-align:center;margin-top:20vh\"><h2>MSG</h2><p>Pode fechar esta aba e voltar ao Posta.</p>";
+const PAGE: &str = "<!doctype html><meta charset=utf-8><title>RenanMail</title>\
+<body style=\"font-family:system-ui;text-align:center;margin-top:20vh\"><h2>MSG</h2><p>Pode fechar esta aba e voltar ao RenanMail.</p>";
 
 fn respond(stream: &mut TcpStream, status: &str, msg: &str) {
     let body = PAGE.replace("MSG", msg);
@@ -170,8 +170,8 @@ pub(crate) fn parse_redirect(request: &str, state: &str) -> Option<Result<String
     if let Some(e) = get("error") {
         let aadsts = get("error_description").as_deref().and_then(aadsts_of);
         let hint = match (e.as_str(), aadsts.as_deref()) {
-            (_, Some("65001" | "90094" | "65004")) => " O administrador do Microsoft 365 precisa aprovar o Posta para esta organização.",
-            ("access_denied", _) => " Se for conta Google, confirme que ela está na lista de usuários de teste do app; se for Microsoft 365, o administrador pode precisar aprovar o Posta.",
+            (_, Some("65001" | "90094" | "65004")) => " O administrador do Microsoft 365 precisa aprovar o RenanMail para esta organização.",
+            ("access_denied", _) => " Se for conta Google, confirme que ela está na lista de usuários de teste do app; se for Microsoft 365, o administrador pode precisar aprovar o RenanMail.",
             _ => "",
         };
         return Some(Err(Error::Invalid(format!("Login recusado ({e}).{hint}"))));
@@ -281,13 +281,13 @@ fn explain(p: Provider, f: &TokenFailure) -> Option<String> {
     let admin = matches!(f.aadsts.as_deref(), Some("65001" | "90094" | "65004" | "500011"));
     if p == Provider::Microsoft && admin {
         return Some(
-            "O Microsoft 365 desta conta exige aprovação do administrador para o Posta. Peça a ele para conceder o consentimento ao aplicativo (permissões IMAP.AccessAsUser.All e SMTP.Send) e entre de novo."
+            "O Microsoft 365 desta conta exige aprovação do administrador para o RenanMail. Peça a ele para conceder o consentimento ao aplicativo (permissões IMAP.AccessAsUser.All e SMTP.Send) e entre de novo."
                 .into(),
         );
     }
     match (p, f.code.as_str()) {
         (Provider::Google, "invalid_grant") => Some(
-            "O Google encerrou o acesso do Posta a esta conta (token expirado ou revogado). Se o app do Google Cloud ainda está em modo de teste, o acesso vale só 7 dias. Entre de novo."
+            "O Google encerrou o acesso do RenanMail a esta conta (token expirado ou revogado). Se o app do Google Cloud ainda está em modo de teste, o acesso vale só 7 dias. Entre de novo."
                 .into(),
         ),
         (Provider::Microsoft, "invalid_grant" | "interaction_required" | "consent_required" | "login_required") => Some(
@@ -373,7 +373,7 @@ fn explain_server_refusal(acc: &crate::ImapAccount, e: Error) -> Error {
     if acc.auth == crate::AuthMode::Microsoft {
         if text.contains("5.7.139") || text.contains("SmtpClientAuthentication") {
             return Error::Invalid(
-                "O SMTP AUTH está desativado nesta caixa do Microsoft 365. O administrador precisa ativá-lo (Exchange admin > usuário > Gerenciar aplicativos de email) para o Posta enviar.".into(),
+                "O SMTP AUTH está desativado nesta caixa do Microsoft 365. O administrador precisa ativá-lo (Exchange admin > usuário > Gerenciar aplicativos de email) para o RenanMail enviar.".into(),
             );
         }
         if text.contains("not connected") {

@@ -1,6 +1,6 @@
 ---
 name: verificar-ui-temas
-description: Verifica os temas do Posta (18 presets, Seguir o sistema, cor de destaque, densidade e fonte em Configurações > Aparência) em modo mock: contraste WCAG por preset, troca instantânea, persistência, ausência de flash ao abrir e axe em claro, escuro e alto contraste. Use ao mudar themes.css, themes.ts, public/theme-init.js, AppearanceSettings.tsx, SettingsPage.tsx, o efeito de tema do App.tsx ou qualquer cor em styles.css.
+description: Verifica os temas do RenanMail (18 presets, Seguir o sistema, cor de destaque, densidade e fonte em Configurações > Aparência) em modo mock: contraste WCAG por preset, troca instantânea, persistência, ausência de flash ao abrir e axe em claro, escuro e alto contraste. Use ao mudar themes.css, themes.ts, public/theme-init.js, AppearanceSettings.tsx, SettingsPage.tsx, o efeito de tema do App.tsx ou qualquer cor em styles.css.
 ---
 
 # Verificar UI de temas (mock)

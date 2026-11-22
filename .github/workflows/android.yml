@@ -85,7 +85,7 @@ jobs:
         run: |
           mkdir -p ~/.android
           keytool -genkeypair -keystore ~/.android/posta-debug.keystore -storepass android -keypass android \
-            -alias posta-debug -keyalg RSA -keysize 2048 -validity 36500 -dname "CN=Posta Debug,O=Posta,C=BR"
+            -alias posta-debug -keyalg RSA -keysize 2048 -validity 36500 -dname "CN=RenanMail Debug,O=RenanMail,C=BR"
 
       - name: Alinha e assina
         run: |
@@ -96,9 +96,9 @@ jobs:
           mkdir -p dist-android
           "$BT/zipalign" -f -p 4 "$UNSIGNED" dist-android/aligned.apk
           "$BT/apksigner" sign --ks ~/.android/posta-debug.keystore --ks-pass pass:android --key-pass pass:android \
-            --ks-key-alias posta-debug --out "dist-android/Posta_${VERSION}_android.apk" dist-android/aligned.apk
+            --ks-key-alias posta-debug --out "dist-android/RenanMail_${VERSION}_android.apk" dist-android/aligned.apk
           rm -f dist-android/aligned.apk dist-android/*.idsig
-          "$BT/apksigner" verify --print-certs "dist-android/Posta_${VERSION}_android.apk" | head -3
+          "$BT/apksigner" verify --print-certs "dist-android/RenanMail_${VERSION}_android.apk" | head -3
           ls -la dist-android
 
       - uses: actions/upload-artifact@v4

@@ -1,6 +1,6 @@
 ---
 name: verificar-desempenho
-description: Verifica o desempenho do backend do Posta (store SQLite, sync IMAP incremental, sessão persistente do Hub). Use ao mudar crates/mail-core (store.rs, imap_sync.rs, session.rs, outbox.rs) ou os comandos de lista/sync em apps/client/src-tauri/src/lib.rs.
+description: Verifica o desempenho do backend do RenanMail (store SQLite, sync IMAP incremental, sessão persistente do Hub). Use ao mudar crates/mail-core (store.rs, imap_sync.rs, session.rs, outbox.rs) ou os comandos de lista/sync em apps/client/src-tauri/src/lib.rs.
 ---
 
 # Verificar desempenho (backend)

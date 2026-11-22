@@ -1,6 +1,6 @@
 ---
 name: verificar-ui-pesquisas
-description: Verifica pesquisas salvas do Posta (salvar, abrir, renomear, excluir) no mock e a lógica de `savedSearches.ts`. Use ao mudar savedSearches.ts, SearchDialog.tsx, TopBar.tsx (botão Salvar pesquisa), Rail.tsx (seção Pesquisas) ou o trecho de pesquisas em App.tsx.
+description: Verifica pesquisas salvas do RenanMail (salvar, abrir, renomear, excluir) no mock e a lógica de `savedSearches.ts`. Use ao mudar savedSearches.ts, SearchDialog.tsx, TopBar.tsx (botão Salvar pesquisa), Rail.tsx (seção Pesquisas) ou o trecho de pesquisas em App.tsx.
 ---
 
 # Verificar pesquisas salvas

@@ -1,17 +1,19 @@
-# Posta
+# RenanMail
 
 Cliente de email pessoal, rápido e personalizado. Windows, Linux e Android (iOS depois), com Tauri 2 + React e núcleo em Rust.
+
+> Antes se chamava **Posta**. Os identificadores internos continuam com o nome antigo de propósito, para quem já usa o app atualizar sem perder nada: o identificador `br.com.renan.posta` (pasta de dados, pacote do Android), o serviço `posta` do cofre de senhas, as chaves `posta.*` do localStorage, as variáveis `POSTA_*` e o repositório. No Windows, o instalador do RenanMail remove o "Posta" antigo e leva junto o "iniciar com o Windows" (`src-tauri/windows/hooks.nsh`).
 
 ## Baixar
 
 Instaladores na página de [Releases](https://github.com/renanrmsantos14/posta/releases/latest):
 
-- **Windows**: `Posta_x.y.z_x64-setup.exe`. Sem certificado pago, o SmartScreen avisa na primeira vez: *Mais informações* → *Executar assim mesmo*.
-- **Linux**: `Posta_x.y.z_amd64.AppImage` (dar permissão de execução) ou `.deb` no Ubuntu/Debian.
+- **Windows**: `RenanMail_x.y.z_x64-setup.exe`. Sem certificado pago, o SmartScreen avisa na primeira vez: *Mais informações* → *Executar assim mesmo*.
+- **Linux**: `RenanMail_x.y.z_amd64.AppImage` (dar permissão de execução) ou `.deb` no Ubuntu/Debian.
 
-- **Android**: `Posta_x.y.z_android.apk` (nos Releases, ou no artefato `posta-android-apk` da execução do workflow *Android*). Baixe no celular, abra o arquivo e permita "instalar apps desconhecidos" para o navegador/gerenciador quando o Android pedir. O APK do release é assinado com uma chave estável (secrets `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD`; o job `android` do workflow Release falha sem eles; gere a chave com `keytool -genkeypair -v -keystore posta-release.keystore -alias posta -keyalg RSA -keysize 2048 -validity 36500` e o secret com `base64 -w0 posta-release.keystore`), e o app avisa "Nova versão vX disponível" ao abrir, ao voltar para o app e a cada 2 min, com o botão Atualizar que baixa o APK (o Android pede para instalar por cima). Builds de PR (workflow *Android*) usam chave de debug e não atualizam por cima do release: desinstale antes. A senha da conta fica no Android Keystore (SharedPreferences cifrado). Não há sincronização em segundo plano: o app sincroniza ao abrir, ao voltar para o primeiro plano e a cada 60 s enquanto aberto (WorkManager fica para depois).
+- **Android**: `RenanMail_x.y.z_android.apk` (nos Releases, ou no artefato `posta-android-apk` da execução do workflow *Android*). Baixe no celular, abra o arquivo e permita "instalar apps desconhecidos" para o navegador/gerenciador quando o Android pedir. O APK do release é assinado com uma chave estável (secrets `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD`; o job `android` do workflow Release falha sem eles; gere a chave com `keytool -genkeypair -v -keystore posta-release.keystore -alias posta -keyalg RSA -keysize 2048 -validity 36500` e o secret com `base64 -w0 posta-release.keystore`), e o app avisa "Nova versão vX disponível" ao abrir, ao voltar para o app e a cada 2 min, com o botão Atualizar que baixa o APK (o Android pede para instalar por cima). Builds de PR (workflow *Android*) usam chave de debug e não atualizam por cima do release: desinstale antes. A senha da conta fica no Android Keystore (SharedPreferences cifrado). Não há sincronização em segundo plano: o app sincroniza ao abrir, ao voltar para o primeiro plano e a cada 60 s enquanto aberto (WorkManager fica para depois).
 
-Depois de instalado no desktop, o Posta se atualiza sozinho: procura versão nova ao abrir, ao voltar para o app e a cada 2 min, mostra as novidades e pergunta antes de instalar. Em **Configurações** (engrenagem) dá para procurar na hora ou desligar a checagem automática.
+Depois de instalado no desktop, o RenanMail se atualiza sozinho: procura versão nova ao abrir, ao voltar para o app e a cada 2 min, mostra as novidades e pergunta antes de instalar. Em **Configurações** (engrenagem) dá para procurar na hora ou desligar a checagem automática.
 
 ## Como funciona
 

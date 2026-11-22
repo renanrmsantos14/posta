@@ -1,6 +1,6 @@
 ---
 name: verificar-offline
-description: Verifica o modo offline do Posta (fila de ações, Caixa de saída, selo Offline, baixar corpo das últimas N) e o sync em segundo plano do Android. Use ao mudar crates/mail-core/src/outbox.rs, src-tauri/src/lib.rs (run_op, flush_queue), android_sync.rs, SyncWorker.kt, src/Offline.tsx ou a configuração offlineN.
+description: Verifica o modo offline do RenanMail (fila de ações, Caixa de saída, selo Offline, baixar corpo das últimas N) e o sync em segundo plano do Android. Use ao mudar crates/mail-core/src/outbox.rs, src-tauri/src/lib.rs (run_op, flush_queue), android_sync.rs, SyncWorker.kt, src/Offline.tsx ou a configuração offlineN.
 ---
 
 # Verificar offline

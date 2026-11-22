@@ -1,10 +1,10 @@
 // Android edge-to-edge: a WebView devolve 0 em env(safe-area-inset-*). A MainActivity expõe as barras do sistema
-// (e o teclado, em `bottom`) por `window.PostaInsets` e avisa mudanças com o evento "posta-insets".
+// (e o teclado, em `bottom`) por `window.RenanMailInsets` e avisa mudanças com o evento "renanmail-insets".
 // Aqui viram as variáveis --sa-top/--sa-right/--sa-bottom/--sa-left; fora do Android vale o env() do styles.css.
 
 declare global {
   interface Window {
-    PostaInsets?: { get(): string };
+    RenanMailInsets?: { get(): string };
   }
 }
 
@@ -15,7 +15,7 @@ const SIDES = ["top", "right", "bottom", "left"] as const;
 function apply() {
   let raw: Record<string, unknown>;
   try {
-    raw = JSON.parse(window.PostaInsets?.get() || "null") ?? {};
+    raw = JSON.parse(window.RenanMailInsets?.get() || "null") ?? {};
   } catch {
     return;
   }
@@ -25,7 +25,7 @@ function apply() {
   }
 }
 
-if (window.PostaInsets) {
+if (window.RenanMailInsets) {
   apply();
-  window.addEventListener("posta-insets", apply);
+  window.addEventListener("renanmail-insets", apply);
 }

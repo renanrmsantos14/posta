@@ -5,6 +5,7 @@ import android.os.Bundle
 import android.util.Log
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
+import androidx.activity.OnBackPressedCallback
 import androidx.activity.enableEdgeToEdge
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
@@ -20,6 +21,15 @@ class MainActivity : TauriActivity() {
     synchronized(SyncWorker.CONTEXT_LOCK) { super.onCreate(savedInstanceState) }
     Log.i(UiLog.TAG, "activity: onCreate fim")
     SyncWorker.schedule(applicationContext)
+    // O Voltar padrão (AppPlugin do Tauri), sem histórico na WebView, encerra a Activity; reabrir recria Activity e
+    // WebView num processo em que o núcleo Rust já roda, o caminho da tela branca/presa e da abertura lenta.
+    // Sem histórico, o Voltar só manda o app para o fundo, como o Início. Registrado depois: roda antes do AppPlugin.
+    onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+      override fun handleOnBackPressed() {
+        val wv = webView
+        if (wv != null && wv.canGoBack()) wv.goBack() else moveTaskToBack(true)
+      }
+    })
     // Girar a tela recria a Activity com o mesmo Intent: só o toque novo (sem estado salvo) abre o email.
     if (savedInstanceState == null) NotificationOpen.take(intent)
   }
@@ -28,20 +38,20 @@ class MainActivity : TauriActivity() {
   override fun onNewIntent(intent: Intent) {
     super.onNewIntent(intent)
     if (NotificationOpen.take(intent)) {
-      webView?.post { webView?.evaluateJavascript("window.dispatchEvent(new Event('posta-open'))", null) }
+      webView?.post { webView?.evaluateJavascript("window.dispatchEvent(new Event('renanmail-open'))", null) }
     }
   }
 
-  /** Ponte `window.PostaNative`: a UI busca o pedido de abertura ao carregar (cobre o app iniciado pela notificação). */
+  /** Ponte `window.RenanMailNative`: a UI busca o pedido de abertura ao carregar (cobre o app iniciado pela notificação). */
   override fun onWebViewCreate(webView: WebView) {
     super.onWebViewCreate(webView)
     this.webView = webView
-    webView.addJavascriptInterface(NotificationOpen, "PostaNative")
-    webView.addJavascriptInterface(SafeArea, "PostaInsets")
-    webView.addJavascriptInterface(UiLog, "PostaLog")
+    webView.addJavascriptInterface(NotificationOpen, "RenanMailNative")
+    webView.addJavascriptInterface(SafeArea, "RenanMailInsets")
+    webView.addJavascriptInterface(UiLog, "RenanMailLog")
     Log.i(UiLog.TAG, "activity: WebView criada")
     // Edge-to-edge: a WebView do Android devolve 0 em env(safe-area-inset-*), então a UI recebe as barras do sistema
-    // (e o teclado, embaixo) em px CSS por `window.PostaInsets.get()` e pelo evento "posta-insets".
+    // (e o teclado, embaixo) em px CSS por `window.RenanMailInsets.get()` e pelo evento "renanmail-insets".
     ViewCompat.setOnApplyWindowInsetsListener(webView) { view, insets ->
       val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
       val ime = insets.getInsets(WindowInsetsCompat.Type.ime())
@@ -50,7 +60,7 @@ class MainActivity : TauriActivity() {
         .put("top", bars.top / d).put("right", bars.right / d)
         .put("bottom", maxOf(bars.bottom, ime.bottom) / d).put("left", bars.left / d)
         .toString()
-      view.post { (view as WebView).evaluateJavascript("window.dispatchEvent(new Event('posta-insets'))", null) }
+      view.post { (view as WebView).evaluateJavascript("window.dispatchEvent(new Event('renanmail-insets'))", null) }
       insets
     }
   }
@@ -73,9 +83,9 @@ class MainActivity : TauriActivity() {
   }
 }
 
-/** Etapas da abertura vindas da UI (`window.PostaLog.log`), no logcat com a tag "PostaUI". */
+/** Etapas da abertura vindas da UI (`window.RenanMailLog.log`), no logcat com a tag "RenanMailUI". */
 object UiLog {
-  const val TAG = "PostaUI"
+  const val TAG = "RenanMailUI"
 
   @JavascriptInterface
   fun log(msg: String) {
@@ -115,7 +125,7 @@ object NotificationOpen {
     return true
   }
 
-  /** Chamado pela UI (`window.PostaNative.takePending()`): o JSON do destino, uma vez; vazio se não há. */
+  /** Chamado pela UI (`window.RenanMailNative.takePending()`): o JSON do destino, uma vez; vazio se não há. */
   @JavascriptInterface
   fun takePending(): String = pending.also { pending = null } ?: ""
 }

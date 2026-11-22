@@ -342,7 +342,7 @@ fn notify_new(app: &AppHandle, st: &AppState, account: &str, fetched: usize) {
     };
     if new.len() > 3 {
         let target = OpenTarget::folder(account, "inbox");
-        note().title("Posta").body(format!("{} mensagens novas em {account}", new.len())).extra(open_target::EXTRA, target).show().ok();
+        note().title("RenanMail").body(format!("{} mensagens novas em {account}", new.len())).extra(open_target::EXTRA, target).show().ok();
         return;
     }
     for m in new {
@@ -455,8 +455,8 @@ async fn check_account(account: ImapAccount, step: mail_core::setup::Step) -> Re
 }
 
 #[tauri::command]
-fn list_accounts(state: State<'_, AppState>) -> CmdResult<Vec<ImapAccount>> {
-    state.accounts()
+async fn list_accounts(app: AppHandle) -> CmdResult<Vec<ImapAccount>> {
+    blocking(app, move |state| state.accounts()).await
 }
 
 #[derive(Serialize, Default)]
@@ -508,19 +508,22 @@ async fn sync_inbox(app: AppHandle) -> CmdResult<SyncResult> {
 
 /// Papéis presentes em ao menos uma conta (Inbox sempre), na ordem de `Role::ALL`.
 #[tauri::command]
-fn list_folders(state: State<'_, AppState>) -> CmdResult<Vec<Role>> {
-    let accounts = state.accounts()?;
-    let store = state.store.lk();
-    let mut present = vec![Role::Inbox];
-    for acc in accounts {
-        for f in store.folders(&acc.id).map_err(err)? {
-            if !present.contains(&f.role) {
-                present.push(f.role);
+async fn list_folders(app: AppHandle) -> CmdResult<Vec<Role>> {
+    blocking(app, move |state| {
+        let accounts = state.accounts()?;
+        let store = state.store.lk();
+        let mut present = vec![Role::Inbox];
+        for acc in accounts {
+            for f in store.folders(&acc.id).map_err(err)? {
+                if !present.contains(&f.role) {
+                    present.push(f.role);
+                }
             }
         }
-    }
-    present.sort_by_key(|r| Role::ALL.iter().position(|x| x == r));
-    Ok(present)
+        present.sort_by_key(|r| Role::ALL.iter().position(|x| x == r));
+        Ok(present)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -553,47 +556,48 @@ async fn sync_folder(app: AppHandle, role: Role, keep: usize) -> CmdResult<SyncR
 }
 
 #[tauri::command]
-fn list_messages(state: State<'_, AppState>, role: Role, limit: u32, offset: u32) -> CmdResult<Vec<MessageSummary>> {
-    state.store.lk().list_folder(role, limit, offset).map_err(err)
+async fn list_messages(app: AppHandle, role: Role, limit: u32, offset: u32) -> CmdResult<Vec<MessageSummary>> {
+    blocking(app, move |state| state.store.lk().list_folder(role, limit, offset).map_err(err)).await
 }
 
 /// Página por cursor (custo O(limit), estável com chegada de mensagens). `cursor` vem do `next` da página anterior.
 #[tauri::command]
-fn list_messages_page(state: State<'_, AppState>, folder: Role, cursor: Option<String>, limit: u32) -> CmdResult<Page> {
-    state.store.lk().list_folder_page(folder, cursor.as_deref(), limit).map_err(err)
+async fn list_messages_page(app: AppHandle, folder: Role, cursor: Option<String>, limit: u32) -> CmdResult<Page> {
+    blocking(app, move |state| state.store.lk().list_folder_page(folder, cursor.as_deref(), limit).map_err(err)).await
 }
 
 /// Resumos por id (aplica o `mail-delta` sem recarregar a lista). Ids ausentes ou adiados não voltam.
 #[tauri::command]
-fn get_summaries(state: State<'_, AppState>, ids: Vec<i64>) -> CmdResult<Vec<MessageSummary>> {
-    state.store.lk().summaries(&ids).map_err(err)
+async fn get_summaries(app: AppHandle, ids: Vec<i64>) -> CmdResult<Vec<MessageSummary>> {
+    blocking(app, move |state| state.store.lk().summaries(&ids).map_err(err)).await
 }
 
 /// Pasta virtual "Com estrela": todas as contas, fora Lixeira e Spam.
 #[tauri::command]
-fn list_starred(state: State<'_, AppState>, limit: u32, offset: u32) -> CmdResult<Vec<MessageSummary>> {
-    state.store.lk().list_starred(limit, offset).map_err(err)
+async fn list_starred(app: AppHandle, limit: u32, offset: u32) -> CmdResult<Vec<MessageSummary>> {
+    blocking(app, move |state| state.store.lk().list_starred(limit, offset).map_err(err)).await
 }
 
 /// Mensagens do mesmo fio (conversa) da mensagem `id`, da mais antiga à mais nova.
 #[tauri::command]
-fn thread_messages(state: State<'_, AppState>, id: i64) -> CmdResult<Vec<MessageSummary>> {
-    state.store.lk().thread(id).map_err(err)
+async fn thread_messages(app: AppHandle, id: i64) -> CmdResult<Vec<MessageSummary>> {
+    blocking(app, move |state| state.store.lk().thread(id).map_err(err)).await
 }
 
 #[tauri::command]
-fn search_starred(state: State<'_, AppState>, query: String) -> CmdResult<Vec<MessageSummary>> {
-    state.store.lk().search_starred(&query, 200).map_err(err)
+async fn search_starred(app: AppHandle, query: String) -> CmdResult<Vec<MessageSummary>> {
+    blocking(app, move |state| state.store.lk().search_starred(&query, 200).map_err(err)).await
 }
 
 /// Não lidas por id de conta e papel de pasta (chaves `inbox`, `sent`...); a bandeja recebe a soma da Entrada.
 #[tauri::command]
-fn unread_counts(app: AppHandle, state: State<'_, AppState>) -> CmdResult<HashMap<String, HashMap<String, u32>>> {
-    let by = state.store.lk().unread_by_account().map_err(err)?;
+async fn unread_counts(app: AppHandle) -> CmdResult<HashMap<String, HashMap<String, u32>>> {
+    let handle = app.clone();
+    let by = blocking(app, |state| state.store.lk().unread_by_account().map_err(err)).await?;
     #[cfg(desktop)]
-    tray::show_unread(&app, by.iter().filter(|(_, r, _)| *r == Role::Inbox).map(|(_, _, n)| n).sum());
+    tray::show_unread(&handle, by.iter().filter(|(_, r, _)| *r == Role::Inbox).map(|(_, _, n)| n).sum());
     #[cfg(not(desktop))]
-    let _ = &app;
+    let _ = &handle;
     let mut by_account: HashMap<String, HashMap<String, u32>> = HashMap::new();
     for (account, role, n) in by {
         by_account.entry(account).or_default().insert(role.as_str().to_string(), n);
@@ -680,8 +684,8 @@ async fn delete_forever_many(app: AppHandle, ids: Vec<i64>) -> CmdResult<()> {
 }
 
 #[tauri::command]
-fn search_messages(state: State<'_, AppState>, query: String, role: Role) -> CmdResult<Vec<MessageSummary>> {
-    state.store.lk().search_folder(&query, role, 200).map_err(err)
+async fn search_messages(app: AppHandle, query: String, role: Role) -> CmdResult<Vec<MessageSummary>> {
+    blocking(app, move |state| state.store.lk().search_folder(&query, role, 200).map_err(err)).await
 }
 
 /// Move para a pasta do papel na mesma conta. A cópia local sai só depois do OK do servidor.
@@ -1087,8 +1091,8 @@ fn all_user_folders(st: &AppState) -> CmdResult<Vec<UserFolder>> {
 
 /// Pastas criadas pelo usuário, de todas as contas (cópia local; o sync as atualiza).
 #[tauri::command]
-fn list_user_folders(state: State<'_, AppState>) -> CmdResult<Vec<UserFolder>> {
-    all_user_folders(&state)
+async fn list_user_folders(app: AppHandle) -> CmdResult<Vec<UserFolder>> {
+    blocking(app, move |state| all_user_folders(&state)).await
 }
 
 /// Cria a pasta (ou subpasta, com `parent`) no servidor e devolve a lista atualizada.
@@ -1166,18 +1170,18 @@ async fn sync_user_folder(app: AppHandle, account: String, folder: String, keep:
 
 /// Não lidas por pasta do usuário (para o contador da árvore de pastas).
 #[tauri::command]
-fn user_folder_unread(state: State<'_, AppState>) -> CmdResult<Vec<mail_core::FolderUnread>> {
-    state.store.lk().user_folder_unread().map_err(err)
+async fn user_folder_unread(app: AppHandle) -> CmdResult<Vec<mail_core::FolderUnread>> {
+    blocking(app, move |state| state.store.lk().user_folder_unread().map_err(err)).await
 }
 
 #[tauri::command]
-fn list_user_folder(state: State<'_, AppState>, account: String, folder: String, limit: u32, offset: u32) -> CmdResult<Vec<MessageSummary>> {
-    state.store.lk().list_box(&account, &folder, limit, offset).map_err(err)
+async fn list_user_folder(app: AppHandle, account: String, folder: String, limit: u32, offset: u32) -> CmdResult<Vec<MessageSummary>> {
+    blocking(app, move |state| state.store.lk().list_box(&account, &folder, limit, offset).map_err(err)).await
 }
 
 #[tauri::command]
-fn search_user_folder(state: State<'_, AppState>, account: String, folder: String, query: String) -> CmdResult<Vec<MessageSummary>> {
-    state.store.lk().search_box(&account, &folder, &query, 200).map_err(err)
+async fn search_user_folder(app: AppHandle, account: String, folder: String, query: String) -> CmdResult<Vec<MessageSummary>> {
+    blocking(app, move |state| state.store.lk().search_box(&account, &folder, &query, 200).map_err(err)).await
 }
 
 /// Move para uma pasta do usuário. Só mensagens da mesma conta da pasta; devolve quantas foram movidas.
@@ -1242,18 +1246,18 @@ async fn copy_to_folder(app: AppHandle, ids: Vec<i64>, account: String, folder: 
 
 /// Aplica (ou tira, com `None`) a categoria colorida. Só local.
 #[tauri::command]
-fn set_category(state: State<'_, AppState>, ids: Vec<i64>, category: Option<String>) -> CmdResult<()> {
-    state.store.lk().set_category(&ids, category.as_deref()).map_err(err)
+async fn set_category(app: AppHandle, ids: Vec<i64>, category: Option<String>) -> CmdResult<()> {
+    blocking(app, move |state| state.store.lk().set_category(&ids, category.as_deref()).map_err(err)).await
 }
 
 #[tauri::command]
-fn list_category(state: State<'_, AppState>, category: String, limit: u32, offset: u32) -> CmdResult<Vec<MessageSummary>> {
-    state.store.lk().list_category(&category, limit, offset).map_err(err)
+async fn list_category(app: AppHandle, category: String, limit: u32, offset: u32) -> CmdResult<Vec<MessageSummary>> {
+    blocking(app, move |state| state.store.lk().list_category(&category, limit, offset).map_err(err)).await
 }
 
 #[tauri::command]
-fn search_category(state: State<'_, AppState>, category: String, query: String) -> CmdResult<Vec<MessageSummary>> {
-    state.store.lk().search_category(&category, &query, 200).map_err(err)
+async fn search_category(app: AppHandle, category: String, query: String) -> CmdResult<Vec<MessageSummary>> {
+    blocking(app, move |state| state.store.lk().search_category(&category, &query, 200).map_err(err)).await
 }
 
 /// Edita a conta: nome, senha (só se vier uma nova), servidores e portas. IMAP e SMTP são testados antes de gravar;
@@ -1298,34 +1302,34 @@ async fn update_account(app: AppHandle, account: ImapAccount, password: Option<S
 }
 
 #[tauri::command]
-fn save_draft(state: State<'_, AppState>, draft: DraftRecord) -> CmdResult<()> {
-    state.store.lk().save_draft(&draft).map_err(err)
+async fn save_draft(app: AppHandle, draft: DraftRecord) -> CmdResult<()> {
+    blocking(app, move |state| state.store.lk().save_draft(&draft).map_err(err)).await
 }
 
 #[tauri::command]
-fn list_drafts(state: State<'_, AppState>) -> CmdResult<Vec<DraftRecord>> {
-    state.store.lk().list_drafts().map_err(err)
+async fn list_drafts(app: AppHandle) -> CmdResult<Vec<DraftRecord>> {
+    blocking(app, move |state| state.store.lk().list_drafts().map_err(err)).await
 }
 
 #[tauri::command]
-fn suggest_contacts(state: State<'_, AppState>, query: String, limit: Option<usize>) -> CmdResult<Vec<Contact>> {
-    state.store.lk().suggest_contacts(&query, limit.unwrap_or(8).min(50)).map_err(err)
+async fn suggest_contacts(app: AppHandle, query: String, limit: Option<usize>) -> CmdResult<Vec<Contact>> {
+    blocking(app, move |state| state.store.lk().suggest_contacts(&query, limit.unwrap_or(8).min(50)).map_err(err)).await
 }
 
 #[tauri::command]
-fn delete_draft(state: State<'_, AppState>, id: String) -> CmdResult<()> {
-    state.store.lk().delete_draft(&id).map_err(err)
+async fn delete_draft(app: AppHandle, id: String) -> CmdResult<()> {
+    blocking(app, move |state| state.store.lk().delete_draft(&id).map_err(err)).await
 }
 
 /// Assinaturas por conta (`signature:<id>`) e `notify` ("0" desliga as notificações).
 #[tauri::command]
-fn get_settings(state: State<'_, AppState>) -> CmdResult<HashMap<String, String>> {
-    state.store.lk().settings().map_err(err)
+async fn get_settings(app: AppHandle) -> CmdResult<HashMap<String, String>> {
+    blocking(app, move |state| state.store.lk().settings().map_err(err)).await
 }
 
 #[tauri::command]
-fn set_setting(state: State<'_, AppState>, key: String, value: String) -> CmdResult<()> {
-    state.store.lk().set_setting(&key, &value).map_err(err)
+async fn set_setting(app: AppHandle, key: String, value: String) -> CmdResult<()> {
+    blocking(app, move |state| state.store.lk().set_setting(&key, &value).map_err(err)).await
 }
 
 #[derive(Serialize)]
@@ -1358,13 +1362,13 @@ async fn flush_queue(app: AppHandle) -> CmdResult<FlushReport> {
 }
 
 #[tauri::command]
-fn list_outbox(state: State<'_, AppState>) -> CmdResult<Vec<OutboxItem>> {
-    state.store.lk().outbox().map_err(err)
+async fn list_outbox(app: AppHandle) -> CmdResult<Vec<OutboxItem>> {
+    blocking(app, move |state| state.store.lk().outbox().map_err(err)).await
 }
 
 #[tauri::command]
-fn discard_outbox(state: State<'_, AppState>, id: i64) -> CmdResult<()> {
-    state.store.lk().drop_outbox(id).map_err(err)
+async fn discard_outbox(app: AppHandle, id: i64) -> CmdResult<()> {
+    blocking(app, move |state| state.store.lk().drop_outbox(id).map_err(err)).await
 }
 
 /// Limpa o erro de um envio recusado e tenta de novo.
@@ -1414,8 +1418,10 @@ fn set_autostart(app: AppHandle, enabled: bool) -> CmdResult<()> {
 
 /// Pede a permissão de notificações (Android 13+ mostra o diálogo do sistema); true se concedida.
 #[tauri::command]
-fn request_notify_permission(app: AppHandle) -> CmdResult<bool> {
-    let state = app.notification().request_permission().map_err(err)?;
+async fn request_notify_permission(app: AppHandle) -> CmdResult<bool> {
+    // No Android espera o usuário responder ao pedido do sistema: fora da ponte JS, senão a página congela junto.
+    let handle = app.clone();
+    let state = blocking(app, move |_| handle.notification().request_permission().map_err(err)).await?;
     Ok(state == tauri_plugin_notification::PermissionState::Granted)
 }
 
@@ -1545,9 +1551,12 @@ async fn apply_rules_now(app: AppHandle) -> CmdResult<usize> {
 
 /// Busca com filtros (`de:`, `para:`, `assunto:`, `tem:anexo`, `é:não-lida`, `antes:`, `depois:`) no que está no banco local.
 #[tauri::command]
-fn search_filtered(state: State<'_, AppState>, scope: search::Scope, query: String) -> CmdResult<Vec<MessageSummary>> {
-    let f = search::parse(&query);
-    state.store.lk().search_filtered(&scope, &f, 200).map_err(err)
+async fn search_filtered(app: AppHandle, scope: search::Scope, query: String) -> CmdResult<Vec<MessageSummary>> {
+    blocking(app, move |state| {
+        let f = search::parse(&query);
+        state.store.lk().search_filtered(&scope, &f, 200).map_err(err)
+    })
+    .await
 }
 
 /// "Buscar no servidor": IMAP SEARCH nas pastas do escopo; o que ainda não estava no banco é baixado.
@@ -1591,18 +1600,18 @@ async fn search_server(app: AppHandle, scope: search::Scope, query: String) -> C
 
 /// Esconde as mensagens até `until` (Unix, segundos); depois voltam ao topo como não lidas.
 #[tauri::command]
-fn snooze_messages(state: State<'_, AppState>, ids: Vec<i64>, until: i64) -> CmdResult<()> {
-    state.store.lk().snooze(&ids, until).map_err(err)
+async fn snooze_messages(app: AppHandle, ids: Vec<i64>, until: i64) -> CmdResult<()> {
+    blocking(app, move |state| state.store.lk().snooze(&ids, until).map_err(err)).await
 }
 
 #[tauri::command]
-fn unsnooze_messages(state: State<'_, AppState>, ids: Vec<i64>) -> CmdResult<()> {
-    state.store.lk().unsnooze(&ids).map_err(err)
+async fn unsnooze_messages(app: AppHandle, ids: Vec<i64>) -> CmdResult<()> {
+    blocking(app, move |state| state.store.lk().unsnooze(&ids).map_err(err)).await
 }
 
 #[tauri::command]
-fn set_pinned(state: State<'_, AppState>, ids: Vec<i64>, pinned: bool) -> CmdResult<()> {
-    state.store.lk().set_pinned(&ids, pinned).map_err(err)
+async fn set_pinned(app: AppHandle, ids: Vec<i64>, pinned: bool) -> CmdResult<()> {
+    blocking(app, move |state| state.store.lk().set_pinned(&ids, pinned).map_err(err)).await
 }
 
 /// O remetente alternativo só vale se for o endereço da conta ou um alias cadastrado.
@@ -1633,8 +1642,8 @@ async fn schedule_send(app: AppHandle, id: String, send_at: i64, draft: Draft) -
 }
 
 #[tauri::command]
-fn list_scheduled(state: State<'_, AppState>) -> CmdResult<Vec<mail_core::later::ScheduledItem>> {
-    state.store.lk().list_scheduled().map_err(err)
+async fn list_scheduled(app: AppHandle) -> CmdResult<Vec<mail_core::later::ScheduledItem>> {
+    blocking(app, move |state| state.store.lk().list_scheduled().map_err(err)).await
 }
 
 #[derive(Serialize)]
@@ -1649,9 +1658,12 @@ struct ScheduledEdit {
 
 /// Tira da fila e devolve o conteúdo: serve para cancelar e para editar (a UI reabre no Composer).
 #[tauri::command]
-fn take_scheduled(state: State<'_, AppState>, id: String) -> CmdResult<Option<ScheduledEdit>> {
-    let taken = state.store.lk().take_scheduled(&id).map_err(err)?;
-    Ok(taken.map(|s| ScheduledEdit { id: s.id, account: s.account, reply_to: s.reply_to, send_at: s.send_at, message: s.out }))
+async fn take_scheduled(app: AppHandle, id: String) -> CmdResult<Option<ScheduledEdit>> {
+    blocking(app, move |state| {
+        let taken = state.store.lk().take_scheduled(&id).map_err(err)?;
+        Ok(taken.map(|s| ScheduledEdit { id: s.id, account: s.account, reply_to: s.reply_to, send_at: s.send_at, message: s.out }))
+    })
+    .await
 }
 
 /// Adiadas que venceram voltam não lidas (a marca de lida também sai no servidor); devolve se algo mudou.
@@ -1869,7 +1881,7 @@ pub fn run() {
             take_scheduled
         ]))
         .build(tauri::generate_context!())
-        .expect("erro ao iniciar o Posta")
+        .expect("erro ao iniciar o RenanMail")
         .run(|_, event| match event {
             tauri::RunEvent::ExitRequested { code, .. } => diag::log(&format!("saída pedida (código {code:?})")),
             tauri::RunEvent::Exit => diag::log("saída: encerrando"),

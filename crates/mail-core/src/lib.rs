@@ -1,4 +1,4 @@
-//! Núcleo do Posta: sincronização de email e cópia local pesquisável.
+//! Núcleo do RenanMail: sincronização de email e cópia local pesquisável.
 
 pub mod attachments;
 pub mod folders;

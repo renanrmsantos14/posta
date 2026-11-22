@@ -68,7 +68,7 @@ class SyncWorker(context: Context, params: WorkerParameters) : Worker(context, p
     // Cada linha: conta, id local, remetente, assunto (ver android_sync.rs).
     val items = lines.drop(1).filter { it.isNotBlank() }.map { it.split("\t", limit = 4) }.filter { it.size == 4 }
     val single = total == 1 && items.size == 1
-    val (title, body) = if (single) items[0][2] to items[0][3] else "Posta" to "$total mensagens novas"
+    val (title, body) = if (single) items[0][2] to items[0][3] else "RenanMail" to "$total mensagens novas"
     // Tocar na notificação abre o app: no email, se for um só; na Entrada da conta, se agrupar vários.
     val open = ctx.packageManager.getLaunchIntentForPackage(ctx.packageName)?.apply {
       flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
@@ -90,7 +90,7 @@ class SyncWorker(context: Context, params: WorkerParameters) : Worker(context, p
   }
 
   companion object {
-    private const val TAG = "PostaSync"
+    private const val TAG = "RenanMailSync"
     private const val CHANNEL = "posta_novas"
     private const val NOTIFICATION_ID = 4101
     private const val UNIQUE = "posta-sync"

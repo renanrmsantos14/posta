@@ -1,6 +1,6 @@
 ---
 name: verificar-ui-conta
-description: Verifica o assistente Adicionar conta do Posta (email, login por provedor, teste com progresso, personalizar) em modo mock e o núcleo em Rust. Use ao mudar AccountDialog.tsx, AccountSteps.tsx, accountSetup.ts, accountColors.ts, api.ts (detectProvider/checkAccount), mock.ts, setup.rs ou o CSS do assistente.
+description: Verifica o assistente Adicionar conta do RenanMail (email, login por provedor, teste com progresso, personalizar) em modo mock e o núcleo em Rust. Use ao mudar AccountDialog.tsx, AccountSteps.tsx, accountSetup.ts, accountColors.ts, api.ts (detectProvider/checkAccount), mock.ts, setup.rs ou o CSS do assistente.
 ---
 
 # Verificar o assistente de conta

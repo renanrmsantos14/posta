@@ -94,7 +94,7 @@ export function AccountDialog({ onClose, onAdded, onDone, onSetting }: Props) {
     setExisting(accounts);
     if (accounts.some((a) => a.username.toLowerCase() === address.toLowerCase())) {
       setDetecting(false);
-      fail("Esta conta já está cadastrada no Posta.");
+      fail("Esta conta já está cadastrada no RenanMail.");
       return;
     }
     const s = await detectSetup(address);
@@ -223,7 +223,7 @@ export function AccountDialog({ onClose, onAdded, onDone, onSetting }: Props) {
               <span>Qual é o seu email?</span>
               <input type="email" required autoFocus autoComplete="username" value={email} onChange={(e) => { setEmail(e.target.value); setError(""); }} placeholder="voce@gmail.com" />
             </label>
-            <p className="hint">O Posta descobre sozinho o servidor. Só o domínio é consultado, nunca a senha.</p>
+            <p className="hint">O RenanMail descobre sozinho o servidor. Só o domínio é consultado, nunca a senha.</p>
             {error && <p key={errorKey} className="form-error" role="alert">{error}</p>}
             <button className="btn primary wide" disabled={detecting}>
               {detecting ? <><span className="spinner" aria-hidden />Procurando seu provedor…</> : "Continuar"}

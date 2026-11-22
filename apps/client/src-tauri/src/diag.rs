@@ -1,5 +1,5 @@
-//! Diagnóstico da abertura: etapas e travas vão para o logcat (tag "Posta") no Android e para o stderr no desktop.
-//! Ler no celular: `adb logcat -s Posta PostaUI`.
+//! Diagnóstico da abertura: etapas e travas vão para o logcat (tag "RenanMail") no Android e para o stderr no desktop.
+//! Ler no celular: `adb logcat -s RenanMail RenanMailUI`.
 
 use std::{sync::{mpsc, Mutex}, time::{Duration, Instant}};
 use tauri::{ipc::Invoke, AppHandle, Runtime};
@@ -27,7 +27,7 @@ pub fn init_file(data_dir: &std::path::Path, version: &str) {
         std::fs::rename(&file, dir.join("posta.log.old")).ok();
     }
     LOG_FILE.set(file).ok();
-    log(&format!("--- Posta {version} iniciado (pid {}) ---", std::process::id()));
+    log(&format!("--- RenanMail {version} iniciado (pid {}) ---", std::process::id()));
 }
 
 /// Registra pânicos (thread, local e mensagem) antes de o processo seguir ou cair.
@@ -55,7 +55,7 @@ pub fn log(msg: &str) {
     #[cfg(target_os = "android")]
     if let Ok(text) = std::ffi::CString::new(msg) {
         // 4 = ANDROID_LOG_INFO
-        unsafe { __android_log_write(4, c"Posta".as_ptr(), text.as_ptr()) };
+        unsafe { __android_log_write(4, c"RenanMail".as_ptr(), text.as_ptr()) };
     }
     #[cfg(not(target_os = "android"))]
     {
@@ -72,8 +72,10 @@ fn running() -> std::sync::MutexGuard<'static, Vec<(u64, String, Instant)>> {
     RUNNING.lock().unwrap_or_else(|p| p.into_inner())
 }
 
-/// Envolve o despacho de comandos. Os síncronos rodam dentro de `handler` (no Android, numa thread da WebView, não no
-/// laço de eventos), então o tempo medido é o deles e o vigia vê qual está preso.
+/// Envolve o despacho de comandos. No Android, `handler` roda dentro da chamada `window.ipc.postMessage` (ponte
+/// JavaScript da WebView), que é síncrona: enquanto ela não volta, o JavaScript da página fica parado. Por isso todo
+/// comando que toca banco, rede ou cofre é `async` (vai para `spawn_blocking`); se um aparecer aqui como lento ou
+/// preso, é um comando síncrono que voltou a fazer trabalho de verdade.
 pub fn timed<R: Runtime>(handler: impl Fn(Invoke<R>) -> bool + Send + Sync + 'static) -> impl Fn(Invoke<R>) -> bool + Send + Sync + 'static {
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     move |invoke| {

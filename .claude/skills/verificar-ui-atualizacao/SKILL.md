@@ -1,6 +1,6 @@
 ---
 name: verificar-ui-atualizacao
-description: Verifica em modo mock o modal "Nova versão do Posta" (novidades agrupadas por versão, tamanho, fechar, progresso) e o agrupamento real dos commits por versão no GitHub. Use ao mudar UpdateDialog.tsx, updater.ts, os estilos .dialog.update/.update-* em styles.css ou o commit "Lança vX" do release.yml.
+description: Verifica em modo mock o modal "Nova versão do RenanMail" (novidades agrupadas por versão, tamanho, fechar, progresso) e o agrupamento real dos commits por versão no GitHub. Use ao mudar UpdateDialog.tsx, updater.ts, os estilos .dialog.update/.update-* em styles.css ou o commit "Lança vX" do release.yml.
 ---
 
 # Verificar o modal de atualização

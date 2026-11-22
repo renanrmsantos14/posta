@@ -1,6 +1,6 @@
 ---
 name: verificar-ui-lista-paginada
-description: Verifica a lista paginada por cursor e a atualização por delta do Posta em modo mock (navegador, sem Tauri). Use ao mudar useMessageList.ts, MessageList.tsx, mock.ts (listPage, summaries, arrive), api.ts (listPage, summaries, MailDelta), o listener de mail-delta em App.tsx ou os comandos list_messages_page/get_summaries.
+description: Verifica a lista paginada por cursor e a atualização por delta do RenanMail em modo mock (navegador, sem Tauri). Use ao mudar useMessageList.ts, MessageList.tsx, mock.ts (listPage, summaries, arrive), api.ts (listPage, summaries, MailDelta), o listener de mail-delta em App.tsx ou os comandos list_messages_page/get_summaries.
 ---
 
 # Verificar lista paginada e delta (mock)

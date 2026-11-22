@@ -1,6 +1,6 @@
 ---
 name: verificar-ui-multiconta
-description: Verifica a navegação entre várias contas do Posta (Rail em árvore por conta no estilo Outlook, "Todas as contas", contadores por conta, gaveta do celular, apelido e cor) em modo mock. Use ao mudar Rail.tsx, NavDrawer.tsx, accountMeta.ts, FolderTree.tsx, ListParts.tsx (ListHead/scope), MessageList.tsx (listra da conta), TopBar.tsx, a contagem por conta em App.tsx, `unread_counts`/`unread_by_account` ou o CSS `.acct-*`/`.drawer-*`.
+description: Verifica a navegação entre várias contas do RenanMail (Rail em árvore por conta no estilo Outlook, "Todas as contas", contadores por conta, gaveta do celular, apelido e cor) em modo mock. Use ao mudar Rail.tsx, NavDrawer.tsx, accountMeta.ts, FolderTree.tsx, ListParts.tsx (ListHead/scope), MessageList.tsx (listra da conta), TopBar.tsx, a contagem por conta em App.tsx, `unread_counts`/`unread_by_account` ou o CSS `.acct-*`/`.drawer-*`.
 ---
 
 # Verificar a navegação multiconta (mock)

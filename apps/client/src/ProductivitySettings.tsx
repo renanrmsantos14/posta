@@ -111,7 +111,7 @@ export function VacationSection({ settings, onSetting }: Props) {
   return (
     <section className="settings-group" aria-label="Férias">
       <p className="settings-sub">
-        Responde sozinha, uma vez por remetente no período, enquanto o Posta estiver aberto. Não responde a listas, endereços “não responda” nem mensagens automáticas.
+        Responde sozinha, uma vez por remetente no período, enquanto o RenanMail estiver aberto. Não responde a listas, endereços “não responda” nem mensagens automáticas.
       </p>
       <label className="settings-row vacation-on">
         <span className="settings-strong">Resposta automática ligada</span>

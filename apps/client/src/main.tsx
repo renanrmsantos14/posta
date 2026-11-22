@@ -11,11 +11,11 @@ import App from "./App";
 declare global {
   interface Window {
     /** Etapas da abertura para o logcat (public/boot-guard.js); ausente se o vigia não carregou. */
-    postaBootLog?: (msg: string) => void;
+    renanmailBootLog?: (msg: string) => void;
   }
 }
 
-window.postaBootLog?.("ui: bundle iniciou");
+window.renanmailBootLog?.("ui: bundle iniciou");
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>

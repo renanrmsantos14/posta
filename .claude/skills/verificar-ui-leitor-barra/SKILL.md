@@ -1,6 +1,6 @@
 ---
 name: verificar-ui-leitor-barra
-description: Verifica em modo mock o ajuste à largura e o zoom do corpo HTML no leitor do Posta (botões − / % / +, Ctrl+roda, Ctrl+0, persistência em `posta.readerZoom`) e as preferências da barra de ferramentas em Configurações › Aparência (tamanho, rótulos, botões visíveis). Use ao mudar HtmlBody.tsx (fit/zoom), ReaderPane.tsx (ZoomControls), CommandBar.tsx, TOOLBAR_ITEMS/hiddenTools em commands.ts, AppearanceSettings.tsx ou o CSS de `.cmdbar`/`.zoom` em styles.css.
+description: Verifica em modo mock o ajuste à largura e o zoom do corpo HTML no leitor do RenanMail (botões − / % / +, Ctrl+roda, Ctrl+0, persistência em `posta.readerZoom`) e as preferências da barra de ferramentas em Configurações › Aparência (tamanho, rótulos, botões visíveis). Use ao mudar HtmlBody.tsx (fit/zoom), ReaderPane.tsx (ZoomControls), CommandBar.tsx, TOOLBAR_ITEMS/hiddenTools em commands.ts, AppearanceSettings.tsx ou o CSS de `.cmdbar`/`.zoom` em styles.css.
 ---
 
 # Verificar leitor (ajuste e zoom) e barra de ferramentas (mock)
