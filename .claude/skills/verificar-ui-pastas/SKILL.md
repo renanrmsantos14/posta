@@ -1,6 +1,6 @@
 ---
 name: verificar-ui-pastas
-description: Verifica a UI de pastas (criar, renomear, excluir, arrastar), categorias, editar conta, arquivar, desfazer e excluir do Posta em modo mock (navegador, sem Tauri). Use ao mudar App.tsx, FolderTree, FolderDialog, Categories, AccountEditDialog, SettingsPage, mock.ts, folders.ts ou styles.css.
+description: Verifica a UI de pastas (criar, renomear, excluir, arrastar), categorias, editar conta, arquivar, desfazer e excluir do RenanMail em modo mock (navegador, sem Tauri). Use ao mudar App.tsx, FolderTree, FolderDialog, Categories, AccountEditDialog, SettingsPage, mock.ts, folders.ts ou styles.css.
 ---
 
 # Verificar UI de pastas (mock)

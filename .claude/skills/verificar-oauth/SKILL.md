@@ -1,6 +1,6 @@
 ---
 name: verificar-oauth
-description: Verifica o login Google/Microsoft do Posta (OAuth, XOAUTH2, renovação de token, mensagens "Entrar de novo") sem credenciais reais. Use ao mudar crates/mail-core/src/oauth.rs, apps/client/src-tauri/src/secret.rs, a ligação com imap_sync/send, apps/client/src-tauri/src/oauth_app.rs, toast.tsx ou OauthSettings.tsx.
+description: Verifica o login Google/Microsoft do RenanMail (OAuth, XOAUTH2, renovação de token, mensagens "Entrar de novo") sem credenciais reais. Use ao mudar crates/mail-core/src/oauth.rs, apps/client/src-tauri/src/secret.rs, a ligação com imap_sync/send, apps/client/src-tauri/src/oauth_app.rs, toast.tsx ou OauthSettings.tsx.
 ---
 
 # Verificar OAuth (sem credenciais)

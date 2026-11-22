@@ -1,6 +1,6 @@
 ---
 name: verificar-ui-produtividade
-description: Verifica a UI de produtividade do Posta (regras, busca com filtros, adiar, enviar mais tarde/Agendados, fixar, respostas prontas, férias) em modo mock (navegador, sem Tauri). Use ao mudar App.tsx, Composer.tsx, WhenMenu, ProductivitySettings, productivity.ts, SettingsPage, mock.ts ou styles.css.
+description: Verifica a UI de produtividade do RenanMail (regras, busca com filtros, adiar, enviar mais tarde/Agendados, fixar, respostas prontas, férias) em modo mock (navegador, sem Tauri). Use ao mudar App.tsx, Composer.tsx, WhenMenu, ProductivitySettings, productivity.ts, SettingsPage, mock.ts ou styles.css.
 ---
 
 # Verificar UI de produtividade (mock)

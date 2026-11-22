@@ -1,6 +1,6 @@
 ---
 name: verificar-ui-rascunhos
-description: Verifica rascunhos, assinatura, remoção de conta, filtro por conta e notificações do Posta em modo mock (navegador, sem Tauri). Use ao mudar Composer.tsx, SettingsDialog.tsx, App.tsx (rascunhos/contas/título), mock.ts, api.ts, styles.css ou os comandos de rascunho/configuração/notificação em src-tauri/src/lib.rs.
+description: Verifica rascunhos, assinatura, remoção de conta, filtro por conta e notificações do RenanMail em modo mock (navegador, sem Tauri). Use ao mudar Composer.tsx, SettingsDialog.tsx, App.tsx (rascunhos/contas/título), mock.ts, api.ts, styles.css ou os comandos de rascunho/configuração/notificação em src-tauri/src/lib.rs.
 ---
 
 # Verificar rascunhos, contas e notificações (mock)

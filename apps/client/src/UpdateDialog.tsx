@@ -52,7 +52,7 @@ export function UpdateDialog({ update, onLater }: Props) {
     <div className="overlay" data-leaving={leaving || undefined} onPointerDown={(e) => e.target === e.currentTarget && requestClose()}>
       <div className="dialog update" role="dialog" aria-modal="true" aria-labelledby="upd-title">
         <header className="dialog-head">
-          <h2 id="upd-title">Nova versão do Posta</h2>
+          <h2 id="upd-title">Nova versão do RenanMail</h2>
           <button type="button" className="icon-btn" aria-label="Fechar" onClick={requestClose} disabled={busy}>
             <X size={16} weight="bold" />
           </button>

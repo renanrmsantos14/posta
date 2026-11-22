@@ -1,6 +1,6 @@
 ---
 name: verificar-ui-oauth
-description: Verifica os botões Entrar com Google/Microsoft do assistente Adicionar conta do Posta em modo mock (navegador, sem Tauri). Use ao mudar api.ts (oauth*) ou a disponibilidade dos providers; o fluxo completo do assistente está em verificar-ui-conta.
+description: Verifica os botões Entrar com Google/Microsoft do assistente Adicionar conta do RenanMail em modo mock (navegador, sem Tauri). Use ao mudar api.ts (oauth*) ou a disponibilidade dos providers; o fluxo completo do assistente está em verificar-ui-conta.
 ---
 
 # Verificar diálogo de conta (OAuth, mock)

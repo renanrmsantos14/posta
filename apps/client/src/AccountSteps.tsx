@@ -25,7 +25,7 @@ export function GmailGuide() {
     <ol className="guide">
       <li>Ative a verificação em duas etapas na sua conta Google.</li>
       <li><button type="button" className="link-btn" onClick={() => openExternal("https://myaccount.google.com/apppasswords")}>Gerar senha de app</button> (16 letras).</li>
-      <li>Cole abaixo. Os espaços podem ficar, o Posta os remove.</li>
+      <li>Cole abaixo. Os espaços podem ficar, o RenanMail os remove.</li>
     </ol>
   );
 }

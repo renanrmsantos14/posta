@@ -4,7 +4,7 @@ Data: 10/11/2026 · Decisão: variante B (árvore por conta + atalhos no topo), 
 
 ## Objetivo
 
-Quem usa 4 a 6 contas no Posta precisa saber, a qualquer momento, **em qual conta está**, **quantas não lidas cada conta tem** e **trocar de conta também no celular**, sem misturar as pastas de contas diferentes.
+Quem usa 4 a 6 contas no RenanMail precisa saber, a qualquer momento, **em qual conta está**, **quantas não lidas cada conta tem** e **trocar de conta também no celular**, sem misturar as pastas de contas diferentes.
 
 ## Problemas atuais (com local no código)
 

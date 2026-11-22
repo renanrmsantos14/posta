@@ -342,7 +342,7 @@ fn notify_new(app: &AppHandle, st: &AppState, account: &str, fetched: usize) {
     };
     if new.len() > 3 {
         let target = OpenTarget::folder(account, "inbox");
-        note().title("Posta").body(format!("{} mensagens novas em {account}", new.len())).extra(open_target::EXTRA, target).show().ok();
+        note().title("RenanMail").body(format!("{} mensagens novas em {account}", new.len())).extra(open_target::EXTRA, target).show().ok();
         return;
     }
     for m in new {
@@ -1869,7 +1869,7 @@ pub fn run() {
             take_scheduled
         ]))
         .build(tauri::generate_context!())
-        .expect("erro ao iniciar o Posta")
+        .expect("erro ao iniciar o RenanMail")
         .run(|_, event| match event {
             tauri::RunEvent::ExitRequested { code, .. } => diag::log(&format!("saída pedida (código {code:?})")),
             tauri::RunEvent::Exit => diag::log("saída: encerrando"),

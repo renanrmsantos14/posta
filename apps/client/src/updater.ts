@@ -126,7 +126,7 @@ async function mockCheck(): Promise<Update | null> {
   if (!q.has("update")) return null;
   // ?update=android simula o aviso do Android (APK) no navegador.
   if (q.get("update") === "android") {
-    return { version: "0.1.2", releases: [], apkUrl: "https://example.invalid/Posta_0.1.2_android.apk", install: async () => {} };
+    return { version: "0.1.2", releases: [], apkUrl: "https://example.invalid/RenanMail_0.1.2_android.apk", install: async () => {} };
   }
   return {
     version: "0.1.1",

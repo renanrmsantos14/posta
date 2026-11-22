@@ -1,6 +1,6 @@
 ---
 name: verificar-anexos
-description: Verifica anexos e Cc/Bcc do Posta (parsing, multipart, IMAP real e UI em modo mock). Use ao mudar crates/mail-core/src/{attachments,send,imap_sync,store}.rs, o comando save_attachment, Composer.tsx, format.ts ou o bloco de anexos do App.tsx/mock.ts.
+description: Verifica anexos e Cc/Bcc do RenanMail (parsing, multipart, IMAP real e UI em modo mock). Use ao mudar crates/mail-core/src/{attachments,send,imap_sync,store}.rs, o comando save_attachment, Composer.tsx, format.ts ou o bloco de anexos do App.tsx/mock.ts.
 ---
 
 # Verificar anexos e Cc/Bcc

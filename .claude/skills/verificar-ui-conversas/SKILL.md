@@ -1,6 +1,6 @@
 ---
 name: verificar-ui-conversas
-description: Verifica conversas agrupadas (fio) e a caixa unificada "Todas as caixas" do Posta em modo mock (navegador, sem Tauri). Use ao mudar threads.rs, store.rs (thread_id, thread), imap_sync.rs (refs), mock.ts, App.tsx (rows, thread, view "all") ou a opção "Agrupar por conversa" em SettingsPage.tsx.
+description: Verifica conversas agrupadas (fio) e a caixa unificada "Todas as caixas" do RenanMail em modo mock (navegador, sem Tauri). Use ao mudar threads.rs, store.rs (thread_id, thread), imap_sync.rs (refs), mock.ts, App.tsx (rows, thread, view "all") ou a opção "Agrupar por conversa" em SettingsPage.tsx.
 ---
 
 # Verificar conversas e caixa unificada (mock)

@@ -44,7 +44,7 @@ export function TopBar(p: Props) {
         aria-haspopup="dialog" aria-expanded={p.menuOpen} onClick={p.onMenu}>
         <List size={18} weight="bold" />
       </button>
-      <div className="brand">Posta</div>
+      <div className="brand">RenanMail</div>
       <div className="searchbox" ref={root}>
         <label className="search">
           <MagnifyingGlass size={16} weight="bold" aria-hidden />

@@ -1,6 +1,6 @@
 ---
 name: verificar-ui-editor
-description: Verifica o editor formatado do Composer, os chips de destinatários com autocompletar e o envio multipart/alternative do Posta (mock no navegador + testes do mail-core). Use ao mudar Composer.tsx, Recipients.tsx, richtext.ts, App.tsx (resposta/encaminhar/assinatura), api.ts, mock.ts, styles.css, send.rs, store.rs (contatos, rascunhos) ou o comando suggest_contacts em src-tauri/src/lib.rs.
+description: Verifica o editor formatado do Composer, os chips de destinatários com autocompletar e o envio multipart/alternative do RenanMail (mock no navegador + testes do mail-core). Use ao mudar Composer.tsx, Recipients.tsx, richtext.ts, App.tsx (resposta/encaminhar/assinatura), api.ts, mock.ts, styles.css, send.rs, store.rs (contatos, rascunhos) ou o comando suggest_contacts em src-tauri/src/lib.rs.
 ---
 
 # Verificar editor formatado e destinatários

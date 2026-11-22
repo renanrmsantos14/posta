@@ -117,7 +117,7 @@ export function SettingsPage({ initialSection, accounts, settings, onSetting, on
     onSetting("notify", on ? "1" : "0");
     if (!on) return;
     try {
-      if (!(await api.requestNotifyPermission())) toast("O sistema bloqueou as notificações do Posta", "error");
+      if (!(await api.requestNotifyPermission())) toast("O sistema bloqueou as notificações do RenanMail", "error");
     } catch (e) {
       toast(`Não consegui pedir permissão de notificações: ${e}`, "error");
     }
@@ -311,7 +311,7 @@ export function SettingsPage({ initialSection, accounts, settings, onSetting, on
                 <>
                   <label className="settings-row switch-row">
                     <div>
-                      <div className="settings-strong">Fechar a janela mantém o Posta na bandeja</div>
+                      <div className="settings-strong">Fechar a janela mantém o RenanMail na bandeja</div>
                       <div className="settings-sub">Continua recebendo e avisando de email novo. Sair de vez: menu da bandeja</div>
                     </div>
                     <input type="checkbox" role="switch" className="switch" checked={settings.closeToTray !== "0"}
@@ -355,7 +355,7 @@ export function SettingsPage({ initialSection, accounts, settings, onSetting, on
 
           {section === "about" && (
             <section className="settings-group" aria-label="Atualizações">
-              <Row title={`Posta v${build.version}`} sub={`Compilado em ${build.builtAt}`}>
+              <Row title={`RenanMail v${build.version}`} sub={`Compilado em ${build.builtAt}`}>
                 <button type="button" className="btn" onClick={check} disabled={checking} data-busy={checking || undefined}>
                   <ArrowsClockwise size={15} weight="bold" className="sync-icon" />
                   {checking ? "Procurando…" : "Procurar atualizações"}
@@ -399,7 +399,7 @@ export function SettingsPage({ initialSection, accounts, settings, onSetting, on
         <div className="confirm scrim" onMouseDown={(e) => { if (e.target === e.currentTarget && !removeBusy) setRemoving(null); }}>
           <div className="confirm-card" role="alertdialog" aria-labelledby="remove-title">
             <p id="remove-title">Remover conta?</p>
-            <span>{removing.username} sai do Posta: a senha, as mensagens e os rascunhos desta conta apagam deste aparelho. Os emails continuam no servidor.</span>
+            <span>{removing.username} sai do RenanMail: a senha, as mensagens e os rascunhos desta conta apagam deste aparelho. Os emails continuam no servidor.</span>
             <div className="confirm-actions">
               <button type="button" className="btn" onClick={() => setRemoving(null)} disabled={removeBusy} autoFocus>Cancelar</button>
               <button type="button" className="btn danger" onClick={confirmRemove} disabled={removeBusy}>Remover</button>

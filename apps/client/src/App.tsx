@@ -368,7 +368,7 @@ export default function App() {
   const refreshScheduled = useCallback(() => api.listScheduled().then(setScheduled).catch(() => {}), []);
 
   useEffect(() => {
-    api.listAccounts().then(setAccounts).catch((e) => window.postaBootLog?.(`ui: list_accounts falhou: ${e}`));
+    api.listAccounts().then(setAccounts).catch((e) => window.renanmailBootLog?.(`ui: list_accounts falhou: ${e}`));
     api.folders().then((r) => setFolderList(withStarred(r))).catch(() => {});
     api.userFolders().then(setUserFolders).catch(() => {});
     refreshDrafts();
@@ -377,7 +377,7 @@ export default function App() {
       setSettings(s);
       // Android 13+ só mostra notificações depois do aceite; no desktop a chamada é inofensiva.
       if (s.notify !== "0") api.listAccounts().then((a) => (a.length ? api.requestNotifyPermission() : false)).catch(() => {});
-    }).catch((e) => window.postaBootLog?.(`ui: get_settings falhou: ${e}`)).finally(() => setPrefsReady(true));
+    }).catch((e) => window.renanmailBootLog?.(`ui: get_settings falhou: ${e}`)).finally(() => setPrefsReady(true));
   }, [refreshDrafts, refreshScheduled]);
 
   // Fechar ou enviar o painel muda os rascunhos salvos e a fila de agendados.
@@ -407,7 +407,7 @@ export default function App() {
   // Contagem de não lidas no título da janela.
   useEffect(() => {
     const inboxUnread = counts.inbox ?? 0;
-    const title = inboxUnread > 0 ? `(${inboxUnread}) Posta` : "Posta";
+    const title = inboxUnread > 0 ? `(${inboxUnread}) RenanMail` : "RenanMail";
     document.title = title;
     if (!isTauri) return;
     import("@tauri-apps/api/window").then(({ getCurrentWindow }) => getCurrentWindow().setTitle(title)).catch(() => {});
@@ -1107,7 +1107,7 @@ export default function App() {
     });
   }
 
-  /** Agenda o envio: o app guarda a mensagem e manda na hora marcada (com o Posta aberto). */
+  /** Agenda o envio: o app guarda a mensagem e manda na hora marcada (com o RenanMail aberto). */
   async function schedule(d: ComposeInit, at: number) {
     const { title: _t, restored: _r, draftId, ...draft } = d;
     await api.scheduleSend(draftId ?? crypto.randomUUID(), at, draft);

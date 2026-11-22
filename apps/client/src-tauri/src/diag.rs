@@ -1,5 +1,5 @@
-//! Diagnóstico da abertura: etapas e travas vão para o logcat (tag "Posta") no Android e para o stderr no desktop.
-//! Ler no celular: `adb logcat -s Posta PostaUI`.
+//! Diagnóstico da abertura: etapas e travas vão para o logcat (tag "RenanMail") no Android e para o stderr no desktop.
+//! Ler no celular: `adb logcat -s RenanMail RenanMailUI`.
 
 use std::{sync::{mpsc, Mutex}, time::{Duration, Instant}};
 use tauri::{ipc::Invoke, AppHandle, Runtime};
@@ -27,7 +27,7 @@ pub fn init_file(data_dir: &std::path::Path, version: &str) {
         std::fs::rename(&file, dir.join("posta.log.old")).ok();
     }
     LOG_FILE.set(file).ok();
-    log(&format!("--- Posta {version} iniciado (pid {}) ---", std::process::id()));
+    log(&format!("--- RenanMail {version} iniciado (pid {}) ---", std::process::id()));
 }
 
 /// Registra pânicos (thread, local e mensagem) antes de o processo seguir ou cair.
@@ -55,7 +55,7 @@ pub fn log(msg: &str) {
     #[cfg(target_os = "android")]
     if let Ok(text) = std::ffi::CString::new(msg) {
         // 4 = ANDROID_LOG_INFO
-        unsafe { __android_log_write(4, c"Posta".as_ptr(), text.as_ptr()) };
+        unsafe { __android_log_write(4, c"RenanMail".as_ptr(), text.as_ptr()) };
     }
     #[cfg(not(target_os = "android"))]
     {

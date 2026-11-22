@@ -1,7 +1,7 @@
 // Clique numa notificação de email novo: o destino (conta, pasta e, se for um só email, o id) chega por três caminhos.
 // Desktop e Android com o app vivo: o backend guarda o pedido (`take_pending_open`) e emite "open-target".
-// Android aberto pela notificação: o Intent vem pela ponte `window.PostaNative` e o evento "posta-open" (MainActivity.kt).
-// No mock, "posta-open" com `detail` simula o clique.
+// Android aberto pela notificação: o Intent vem pela ponte `window.RenanMailNative` e o evento "renanmail-open" (MainActivity.kt).
+// No mock, "renanmail-open" com `detail` simula o clique.
 import { invoke } from "@tauri-apps/api/core";
 import { isTauri, type View } from "./api";
 
@@ -15,7 +15,7 @@ export interface OpenTarget {
 declare global {
   interface Window {
     /** Só no Android: devolve o JSON do destino do toque, uma vez ("" se não há). */
-    PostaNative?: { takePending(): string };
+    RenanMailNative?: { takePending(): string };
   }
 }
 
@@ -30,7 +30,7 @@ export function parseOpenTarget(raw: unknown): OpenTarget | null {
 
 async function takePending(): Promise<OpenTarget | null> {
   try {
-    const native = window.PostaNative?.takePending();
+    const native = window.RenanMailNative?.takePending();
     if (native) return parseOpenTarget(JSON.parse(native));
     return isTauri ? parseOpenTarget(await invoke("take_pending_open")) : null;
   } catch {
@@ -49,7 +49,7 @@ export function watchOpenTarget(run: (t: OpenTarget) => void): () => void {
       if (t) run(t);
     } else drain();
   };
-  window.addEventListener("posta-open", onWindow);
+  window.addEventListener("renanmail-open", onWindow);
   let off: (() => void) | undefined;
   if (isTauri) {
     import("@tauri-apps/api/event")
@@ -59,7 +59,7 @@ export function watchOpenTarget(run: (t: OpenTarget) => void): () => void {
   drain();
   return () => {
     alive = false;
-    window.removeEventListener("posta-open", onWindow);
+    window.removeEventListener("renanmail-open", onWindow);
     off?.();
   };
 }
