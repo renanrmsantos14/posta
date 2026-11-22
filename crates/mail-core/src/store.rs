@@ -597,18 +597,23 @@ impl Store {
 
     /// Ajustes por conexão (não persistem no arquivo, exceto o modo WAL): cache e mmap grandes, WAL e fsync relaxado.
     fn tune(conn: &Connection) -> Result<()> {
+        // No celular o app abre várias conexões (UI, sync, IDLE por conta, pré-busca, fila): 64 MB de cache e 256 MB
+        // de mmap em cada uma pesam na memória e o Android passa a matar ou estrangular o processo.
+        #[cfg(target_os = "android")]
+        const MEM: &str = "PRAGMA cache_size = -16384; PRAGMA mmap_size = 67108864;";
+        #[cfg(not(target_os = "android"))]
+        const MEM: &str = "PRAGMA cache_size = -65536; PRAGMA mmap_size = 268435456;";
         conn.execute_batch(
             // busy_timeout primeiro: trocar o journal_mode pode esbarrar na conexão do sync em segundo plano (o Worker
             // do Android) e, sem espera, falha na hora com "database is locked", derrubando a abertura do app.
             "PRAGMA busy_timeout = 5000;
              PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;
-             PRAGMA cache_size = -65536;
-             PRAGMA mmap_size = 268435456;
              PRAGMA wal_autocheckpoint = 262144;
              PRAGMA journal_size_limit = 134217728;
              PRAGMA temp_store = MEMORY;",
         )?;
+        conn.execute_batch(MEM)?;
         Ok(())
     }
 

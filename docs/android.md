@@ -25,3 +25,11 @@ Instale o APK assinado, abra o app, adicione uma conta, feche-o e envie um e-mai
 ## Tela branca ao abrir
 
 A UI fica invisível até as configurações chegarem do núcleo (`.app[data-ready]`). Se isso não acontece em 8 s, `public/boot-guard.js` mostra "O RenanMail está demorando para abrir" com o botão Recarregar. Para saber onde a abertura parou, com o cabo ligado logo depois de reproduzir: `adb logcat -d -s RenanMail RenanMailUI RenanMailSync`. `RenanMail` vem do Rust (`src/diag.rs`: etapas do `setup`, comandos lentos ou presos, laço de eventos sem resposta); `RenanMailUI` traz o ciclo da Activity e as etapas da página (`html carregado`, `bundle iniciou`, `pronta`).
+
+## Travamentos: comandos e ponte JS
+
+No Android o Tauri leva cada chamada da UI ao núcleo por `window.ipc.postMessage`, uma `@JavascriptInterface` do wry. Essa chamada é síncrona para a página: até o Rust devolver, o JavaScript não roda, não desenha e não responde ao toque. Um comando síncrono (`fn`) roda inteiro ali dentro; um `async fn` só é despachado e responde depois. Por isso todo comando que lê o banco, a rede ou o cofre é `async` e usa `blocking(...)` (`spawn_blocking`). Comando síncrono, só para coisa instantânea (`set_focused`, `take_pending_open`). Antes, a abertura disparava uma dúzia de leituras síncronas na mesma trava do banco, e uma sync em andamento bastava para a tela ficar parada em "carregando".
+
+Voltar: sem histórico na WebView, o Voltar manda o app para o fundo (`moveTaskToBack`) em vez de encerrar a Activity. Reabrir depois de encerrada recriava Activity e WebView num processo em que o núcleo já rodava, o caminho mais comum da tela branca.
+
+SQLite: no Android cada conexão usa 16 MB de cache e 64 MB de mmap (no desktop, 64 MB e 256 MB). O app abre várias conexões ao mesmo tempo (UI, sync, IDLE por conta, pré-busca, fila).

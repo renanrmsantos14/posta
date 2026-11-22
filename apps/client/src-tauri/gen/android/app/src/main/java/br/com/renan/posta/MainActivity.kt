@@ -5,6 +5,7 @@ import android.os.Bundle
 import android.util.Log
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
+import androidx.activity.OnBackPressedCallback
 import androidx.activity.enableEdgeToEdge
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
@@ -20,6 +21,15 @@ class MainActivity : TauriActivity() {
     synchronized(SyncWorker.CONTEXT_LOCK) { super.onCreate(savedInstanceState) }
     Log.i(UiLog.TAG, "activity: onCreate fim")
     SyncWorker.schedule(applicationContext)
+    // O Voltar padrão (AppPlugin do Tauri), sem histórico na WebView, encerra a Activity; reabrir recria Activity e
+    // WebView num processo em que o núcleo Rust já roda, o caminho da tela branca/presa e da abertura lenta.
+    // Sem histórico, o Voltar só manda o app para o fundo, como o Início. Registrado depois: roda antes do AppPlugin.
+    onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+      override fun handleOnBackPressed() {
+        val wv = webView
+        if (wv != null && wv.canGoBack()) wv.goBack() else moveTaskToBack(true)
+      }
+    })
     // Girar a tela recria a Activity com o mesmo Intent: só o toque novo (sem estado salvo) abre o email.
     if (savedInstanceState == null) NotificationOpen.take(intent)
   }

@@ -72,8 +72,10 @@ fn running() -> std::sync::MutexGuard<'static, Vec<(u64, String, Instant)>> {
     RUNNING.lock().unwrap_or_else(|p| p.into_inner())
 }
 
-/// Envolve o despacho de comandos. Os síncronos rodam dentro de `handler` (no Android, numa thread da WebView, não no
-/// laço de eventos), então o tempo medido é o deles e o vigia vê qual está preso.
+/// Envolve o despacho de comandos. No Android, `handler` roda dentro da chamada `window.ipc.postMessage` (ponte
+/// JavaScript da WebView), que é síncrona: enquanto ela não volta, o JavaScript da página fica parado. Por isso todo
+/// comando que toca banco, rede ou cofre é `async` (vai para `spawn_blocking`); se um aparecer aqui como lento ou
+/// preso, é um comando síncrono que voltou a fazer trabalho de verdade.
 pub fn timed<R: Runtime>(handler: impl Fn(Invoke<R>) -> bool + Send + Sync + 'static) -> impl Fn(Invoke<R>) -> bool + Send + Sync + 'static {
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     move |invoke| {
