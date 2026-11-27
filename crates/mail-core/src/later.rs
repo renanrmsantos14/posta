@@ -11,6 +11,8 @@ use crate::{Error, Result};
 const MAX_ATTEMPTS: i64 = 3;
 /// Espera entre tentativas, em segundos.
 const RETRY_AFTER: i64 = 120;
+/// Saiu com mais atraso que isso (o relógio do app roda a cada 20 s): o app estava fechado ou sem rede.
+pub const LATE_AFTER: i64 = 120;
 
 /// Item da lista "Agendados" (sem o corpo e os anexos).
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -21,8 +23,44 @@ pub struct ScheduledItem {
     /// `pending`, `sending` ou `failed`.
     pub status: String,
     pub error: String,
+    /// Tentativas que já falharam (a lista mostra "tentando de novo").
+    pub attempts: i64,
     pub to: String,
     pub subject: String,
+}
+
+/// Como terminou uma tentativa de envio da fila.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DueOutcome {
+    /// Saiu pelo SMTP.
+    Sent,
+    /// Sem rede: foi para a Caixa de saída offline, que envia quando a conexão volta.
+    Offline,
+    /// Falhou, com o motivo.
+    Failed(String),
+}
+
+/// O que uma rodada da fila fez; a UI transforma em aviso.
+#[derive(Debug, Default, Clone, Serialize, PartialEq)]
+pub struct DueReport {
+    /// Saíram agora.
+    pub sent: u32,
+    /// Dos que saíram, quantos já estavam atrasados (app fechado na hora).
+    pub late: u32,
+    /// Foram para a Caixa de saída offline por falta de rede.
+    pub offline: u32,
+    /// Falharam e serão tentados de novo.
+    pub retrying: u32,
+    /// Esgotaram as tentativas e ficaram como falha.
+    pub failed: u32,
+    /// Assunto e motivo do último que esgotou as tentativas.
+    pub last_error: Option<String>,
+}
+
+impl DueReport {
+    pub fn is_empty(&self) -> bool {
+        self.sent == 0 && self.offline == 0 && self.retrying == 0 && self.failed == 0
+    }
 }
 
 /// Envio agendado completo, para a fila enviar ou para editar de volta no Composer.
@@ -135,7 +173,7 @@ impl Store {
     }
 
     pub fn list_scheduled(&self) -> Result<Vec<ScheduledItem>> {
-        let mut st = self.conn.prepare("SELECT id, account, send_at, status, error, payload FROM scheduled ORDER BY send_at, id")?;
+        let mut st = self.conn.prepare("SELECT id, account, send_at, status, error, payload, attempts FROM scheduled ORDER BY send_at, id")?;
         let rows = st
             .query_map([], |r| {
                 let out: Option<Outgoing> = serde_json::from_str(&r.get::<_, String>(5)?).ok();
@@ -145,6 +183,7 @@ impl Store {
                     send_at: r.get(2)?,
                     status: r.get(3)?,
                     error: r.get(4)?,
+                    attempts: r.get(6)?,
                     to: out.as_ref().map(|o| o.to.clone()).unwrap_or_default(),
                     subject: out.map(|o| o.subject).unwrap_or_default(),
                 })
@@ -200,7 +239,8 @@ impl Store {
     }
 
     /// Falhou: tenta de novo em alguns minutos; na terceira vez fica `failed` com o erro à vista.
-    pub fn scheduled_failed(&self, id: &str, error: &str, now: i64) -> Result<()> {
+    /// Devolve `true` quando esgotou as tentativas.
+    pub fn scheduled_failed(&self, id: &str, error: &str, now: i64) -> Result<bool> {
         self.conn.execute(
             "UPDATE scheduled SET attempts = attempts + 1, error = ?2,
                status = CASE WHEN attempts + 1 >= ?4 THEN 'failed' ELSE 'pending' END,
@@ -208,7 +248,54 @@ impl Store {
              WHERE id = ?1",
             params![id, error, now + RETRY_AFTER, MAX_ATTEMPTS],
         )?;
+        let status: Option<String> = self.conn.query_row("SELECT status FROM scheduled WHERE id = ?1", params![id], |r| r.get(0)).optional()?;
+        Ok(status.as_deref() == Some("failed"))
+    }
+
+    /// "Tentar de novo" numa que ficou como falha: volta à fila para sair já, com as tentativas zeradas.
+    pub fn scheduled_retry(&self, id: &str, now: i64) -> Result<bool> {
+        let n = self.conn.execute(
+            "UPDATE scheduled SET status = 'pending', attempts = 0, error = '', send_at = ?2 WHERE id = ?1 AND status = 'failed'",
+            params![id, now],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Registra o resultado de uma tentativa e soma ao relatório. O envio em si acontece fora, sem segurar o banco.
+    pub fn settle_due(&self, s: &Scheduled, outcome: DueOutcome, now: i64, report: &mut DueReport) -> Result<()> {
+        match outcome {
+            DueOutcome::Sent => {
+                self.scheduled_done(&s.id)?;
+                report.sent += 1;
+                if now - s.send_at > LATE_AFTER {
+                    report.late += 1;
+                }
+            }
+            DueOutcome::Offline => {
+                self.scheduled_done(&s.id)?;
+                report.offline += 1;
+            }
+            DueOutcome::Failed(error) => {
+                if self.scheduled_failed(&s.id, &error, now)? {
+                    report.failed += 1;
+                    report.last_error = Some(format!("{}: {error}", if s.out.subject.trim().is_empty() { "(sem assunto)" } else { s.out.subject.trim() }));
+                } else {
+                    report.retrying += 1;
+                }
+            }
+        }
         Ok(())
+    }
+
+    /// Uma rodada: reserva o que venceu, envia com `send` (o caminho real é o SMTP) e registra cada resultado.
+    /// Sem segurar o banco durante o envio só quando o chamador separa `claim_due` e `settle_due`; aqui é a versão simples, usada nos testes.
+    pub fn run_due(&self, now: i64, mut send: impl FnMut(&Scheduled) -> DueOutcome) -> Result<DueReport> {
+        let mut report = DueReport::default();
+        for s in self.claim_due(now)? {
+            let outcome = send(&s);
+            self.settle_due(&s, outcome, now, &mut report)?;
+        }
+        Ok(report)
     }
 }
 
@@ -293,5 +380,73 @@ mod tests {
         assert_eq!(s.claim_due(600).unwrap().len(), 1, "reservado e interrompido volta à fila");
         s.scheduled_done("b").unwrap();
         assert!(s.list_scheduled().unwrap().is_empty());
+    }
+
+    #[test]
+    fn fila_sobrevive_a_reiniciar_e_envia_o_atrasado_ao_abrir() {
+        let path = std::env::temp_dir().join(format!("posta-fila-{}.sqlite", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        {
+            let s = Store::open(&path).unwrap();
+            s.schedule_send("a", "c1", None, 1000, &out("a@x.com")).unwrap();
+            s.schedule_send("b", "c1", None, 9000, &out("b@x.com")).unwrap();
+            // O app fechou no meio de um envio: o item ficou reservado.
+            assert_eq!(s.claim_due(1000).unwrap().len(), 1);
+        }
+        // Reabre horas depois: nada se perdeu e o reservado volta à fila.
+        let s = Store::open(&path).unwrap();
+        s.requeue_sending().unwrap();
+        let ids: Vec<_> = s.list_scheduled().unwrap().into_iter().map(|i| (i.id, i.status)).collect();
+        assert_eq!(ids, vec![("a".into(), "pending".into()), ("b".into(), "pending".into())]);
+        let mut sent = vec![];
+        let rep = s.run_due(5000, |x| { sent.push(x.id.clone()); DueOutcome::Sent }).unwrap();
+        assert_eq!(sent, vec!["a"], "só o que venceu sai; o de 9000 espera");
+        assert_eq!((rep.sent, rep.late), (1, 1), "saiu 4000 s depois da hora: conta como atrasado");
+        assert_eq!(s.list_scheduled().unwrap().len(), 1);
+        drop(s);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn no_horario_nao_e_atraso_e_sem_rede_vai_para_a_caixa_de_saida() {
+        let s = Store::open_in_memory().unwrap();
+        s.schedule_send("a", "c1", None, 1000, &out("a@x.com")).unwrap();
+        s.schedule_send("b", "c1", None, 1000, &out("b@x.com")).unwrap();
+        let rep = s.run_due(1000 + 20, |x| if x.id == "a" { DueOutcome::Sent } else { DueOutcome::Offline }).unwrap();
+        assert_eq!((rep.sent, rep.late, rep.offline), (1, 0, 1));
+        assert!(s.list_scheduled().unwrap().is_empty(), "os dois saíram da fila de agendados");
+    }
+
+    #[test]
+    fn falha_tenta_de_novo_avisa_e_na_terceira_fica_como_falha() {
+        let s = Store::open_in_memory().unwrap();
+        s.schedule_send("a", "c1", None, 1000, &out("a@x.com")).unwrap();
+        let fail = |_: &Scheduled| DueOutcome::Failed("servidor recusou".into());
+        let r1 = s.run_due(1000, fail).unwrap();
+        assert_eq!((r1.retrying, r1.failed), (1, 0));
+        let item = &s.list_scheduled().unwrap()[0];
+        assert_eq!((item.status.as_str(), item.attempts, item.send_at), ("pending", 1, 1000 + RETRY_AFTER));
+        assert!(s.run_due(1000 + 10, fail).unwrap().is_empty(), "ainda não chegou a hora de tentar de novo");
+        s.run_due(1000 + RETRY_AFTER, fail).unwrap();
+        let r3 = s.run_due(1000 + 2 * RETRY_AFTER, fail).unwrap();
+        assert_eq!((r3.retrying, r3.failed), (0, 1));
+        assert_eq!(r3.last_error.as_deref(), Some("Oi: servidor recusou"));
+        assert_eq!(s.list_scheduled().unwrap()[0].status, "failed");
+        // "Tentar de novo": volta à fila e sai.
+        assert!(s.scheduled_retry("a", 5000).unwrap());
+        assert!(!s.scheduled_retry("a", 5000).unwrap(), "só vale para quem está como falha");
+        let ok = s.run_due(5000, |_| DueOutcome::Sent).unwrap();
+        assert_eq!(ok.sent, 1);
+    }
+
+    #[test]
+    fn varios_agendados_saem_em_ordem_de_hora() {
+        let s = Store::open_in_memory().unwrap();
+        for (id, at) in [("c", 300), ("a", 100), ("b", 200)] {
+            s.schedule_send(id, "c1", None, at, &out("x@y.com")).unwrap();
+        }
+        let mut order = vec![];
+        s.run_due(1000, |x| { order.push(x.id.clone()); DueOutcome::Sent }).unwrap();
+        assert_eq!(order, vec!["a", "b", "c"]);
     }
 }

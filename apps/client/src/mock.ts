@@ -265,14 +265,34 @@ const serverOnly: MockMessage[] = [
   seen: true, flagged: false, reply_addr: String(from_addr), attachments: [], to_addrs: "renan@exemplo.com", cc_addrs: "", role: "inbox" as Role, thread_id: 0,
 }));
 
-/** Agendados do mock; a mensagem sai quando a hora chega (como o relógio do app). */
+/** Agendados do mock; a mensagem sai quando a hora chega (como o relógio do app).
+ *  Endereço com "semrede" simula servidor fora do ar: tenta de novo a cada 2 min e na terceira fica como falha. */
 let scheduled: { item: ScheduledItem; draft: Draft }[] = [];
+const RETRY_S = 120;
+const MAX_TRIES = 3;
 setInterval(() => {
   const t = Math.floor(Date.now() / 1000);
-  const due = scheduled.filter((s) => s.item.send_at <= t);
+  const due = scheduled.filter((s) => s.item.status === "pending" && s.item.send_at <= t);
   if (!due.length) return;
-  scheduled = scheduled.filter((s) => s.item.send_at > t);
-  for (const { draft } of due) {
+  const report = { sent: 0, late: 0, offline: 0, retrying: 0, failed: 0, last_error: null as string | null };
+  for (const s of due) {
+    const { draft, item } = s;
+    if (draft.to.includes("semrede")) {
+      item.attempts += 1;
+      item.error = "sem conexão com o servidor";
+      if (item.attempts >= MAX_TRIES) {
+        item.status = "failed";
+        report.failed += 1;
+        report.last_error = `${item.subject || "(sem assunto)"}: ${item.error}`;
+      } else {
+        item.send_at = t + RETRY_S;
+        report.retrying += 1;
+      }
+      continue;
+    }
+    scheduled = scheduled.filter((x) => x !== s);
+    report.sent += 1;
+    if (t - item.send_at > 120) report.late += 1;
     const id = Math.max(...messages.map((m) => m.id)) + 1;
     messages.push({
       id, account: draft.account, uid: id, from_name: "Renan", from_addr: "renan@exemplo.com", subject: draft.subject, date: t,
@@ -280,6 +300,7 @@ setInterval(() => {
       attachments: [], to_addrs: draft.to, cc_addrs: "", role: "sent", thread_id: 0,
     });
   }
+  if (report.late || report.retrying || report.failed) window.dispatchEvent(new CustomEvent("mock-due-report", { detail: report }));
 }, 2000);
 
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -638,11 +659,17 @@ export const mockApi = {
   },
   async scheduleSend(id: string, sendAt: number, draft: Draft): Promise<void> {
     if (draft.to.includes("erro")) throw "endereço inválido";
-    const item: ScheduledItem = { id, account: draft.account, send_at: sendAt, status: "pending", error: "", to: draft.to, subject: draft.subject };
+    const item: ScheduledItem = { id, account: draft.account, send_at: sendAt, status: "pending", error: "", attempts: 0, to: draft.to, subject: draft.subject };
     scheduled = [...scheduled.filter((s) => s.item.id !== id), { item, draft }];
   },
   async listScheduled(): Promise<ScheduledItem[]> {
     return scheduled.map((s) => s.item).sort((a, b) => a.send_at - b.send_at);
+  },
+  async retryScheduled(id: string): Promise<boolean> {
+    const s = scheduled.find((x) => x.item.id === id && x.item.status === "failed");
+    if (!s) return false;
+    Object.assign(s.item, { status: "pending", attempts: 0, error: "", send_at: Math.floor(Date.now() / 1000) });
+    return true;
   },
   async takeScheduled(id: string): Promise<ScheduledEdit | null> {
     const s = scheduled.find((x) => x.item.id === id);

@@ -13,4 +13,4 @@ if ! docker ps --format '{{.Names}}' | grep -qx "$NAME"; then
     greenmail/standalone:2.1.3 >/dev/null
   until docker logs "$NAME" 2>&1 | grep -q "Starting GreenMail API"; do sleep 1; done
 fi
-POSTA_IMAP_TEST=127.0.0.1:3143 POSTA_SMTP_TEST=3025 cargo test -p mail-core --release --test imap_greenmail -- --nocapture
+POSTA_IMAP_TEST=127.0.0.1:3143 POSTA_SMTP_TEST=3025 cargo test -p mail-core --release --test imap_greenmail --test envio_agendado -- --nocapture

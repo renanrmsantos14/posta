@@ -327,6 +327,7 @@ export const api = isTauri
       scheduleSend: (id: string, sendAt: number, draft: Draft) => invoke<void>("schedule_send", { id, sendAt, draft }),
       listScheduled: () => invoke<ScheduledItem[]>("list_scheduled"),
       takeScheduled: (id: string) => invoke<ScheduledEdit | null>("take_scheduled", { id }),
+      retryScheduled: (id: string) => invoke<boolean>("retry_scheduled", { id }),
       thread: (id: number) => invoke<MessageSummary[]>("thread_messages", { id }),
       userFolders: () => invoke<UserFolder[]>("list_user_folders"),
       createFolder: (account: string, parent: string | null, name: string) => invoke<UserFolder[]>("create_folder", { account, parent, name }),
