@@ -1,6 +1,7 @@
 // Dados de exemplo para rodar a UI no navegador (pnpm dev), sem Tauri e sem rede.
 import type { RulesReport, Account, CheckFailure, CheckStep, Detection, FailKind, Contact, Draft, FlushReport, MailDelta, MessagePage, OutboxItem, QueueStatus, Provider, OauthConfig, OauthConfigView, MessageDetail, MessageSummary, NewAccount, Unsubscribe, OutAttachment, Role, ScheduledEdit, SendReport, Settings, StoredDraft, SyncResult, UnreadAll, UserFolder, View, DragFiles, FolderUnread } from "./api";
 import { parseRules, planFor, ruleMatches, type Rule, type RuleTarget, type ScheduledItem } from "./productivity";
+import type { Digest } from "./digest";
 import { parseBox, parseCat } from "./views";
 
 const now = Math.floor(Date.now() / 1000);
@@ -25,7 +26,7 @@ let accounts: Account[] = [
 ];
 
 /** `thread_count` é calculado ao responder; `thread_id` 0 = mensagem sem fio. `box`: nome completo da pasta do usuário (então `role` é null). */
-type MockMessage = Omit<MessageDetail, "thread_count"> & { role: Role | null; box?: string; snoozeUntil?: number; woke?: boolean; noBody?: boolean };
+type MockMessage = Omit<MessageDetail, "thread_count"> & { role: Role | null; box?: string; snoozeUntil?: number; woke?: boolean; noBody?: boolean; unsub?: boolean };
 
 let messages: MockMessage[] = Array.from({ length: 60 }, (_, i) => {
   const [from_name, from_addr, subject, body, hoursAgo] = seed[i % seed.length];
@@ -69,6 +70,7 @@ htmlSamples.forEach(([from_name, from_addr, subject, text, html, hoursAgo], i) =
     id, account: accounts[0].id, uid: id, from_name, from_addr, subject,
     date: now - Math.round(hoursAgo * H), snippet: text, body_text: text, body_html: html,
     seen: false, flagged: false, reply_addr: from_addr, attachments: [], to_addrs: "renan@exemplo.com", cc_addrs: "", role: "inbox", thread_id: 0,
+    unsub: /^(ofertas|news)@/.test(from_addr),
   });
 });
 
@@ -198,6 +200,23 @@ const summary = (m: MockMessage): MessageSummary => {
   const { box: _x, snoozeUntil: _s, woke: _w, noBody: _n, body_text: _b, body_html: _h, reply_addr: _r, attachments: _a, to_addrs: _t, cc_addrs: _c, ...s } = withCount(m);
   return s;
 };
+/** Espelho enxuto da heurística de `crates/mail-core/src/digest.rs` (a fonte da verdade, com testes), só para o navegador. */
+const fold = (s: string) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+const NOTIFY = /^(notifications?|notificacao|notificacoes|alerts?|alertas?|mailer-daemon|postmaster|bounces?|security|receipts?|billing|invoices?|fatura|faturas|system|sistema)$/;
+const NEWS = /^(newsletters?|news|marketing|mkt|promo|promocao|promocoes|ofertas|offers|deals|digest|weekly|boletim)$/;
+const NOREPLY = /^(noreply|no-reply|no_reply|donotreply|do-not-reply|naoresponda|nao-responda)$/;
+const TRANSACTIONAL = ["codigo de verificacao", "verification code", "fatura", "boleto", "recibo", "comprovante", "alerta de seguranca", "security alert", "redefinir senha", "seu pedido", "confirmacao de pedido", "order confirmation"];
+function mockBucket(m: MockMessage): "important" | "people" | "notifications" | "newsletters" {
+  const local = fold(m.from_addr.split("@")[0] ?? "").split("+")[0];
+  const subject = fold(m.subject);
+  const notify = NOTIFY.test(local);
+  const news = NEWS.test(local) || subject.includes("newsletter");
+  const automated = notify || news || NOREPLY.test(local) || !!m.unsub;
+  if (m.flagged || m.pinned || (m.importance === 1 && !automated)) return "important";
+  if (notify || TRANSACTIONAL.some((t) => subject.includes(t))) return "notifications";
+  if (m.unsub || news) return "newsletters";
+  return NOREPLY.test(local) ? "notifications" : "people";
+}
 /** Pastas virtuais: "Com estrela" (fora de Lixeira e Spam), "Todas as caixas" (a Entrada de todas as contas), pastas do usuário e categorias. */
 const snoozed = (m: MockMessage) => (m.snoozeUntil ?? 0) > Math.floor(Date.now() / 1000);
 /** Ordem da lista: fixadas primeiro; depois a data (ou a hora em que a adiada voltou). */
@@ -669,6 +688,16 @@ export const mockApi = {
     if (draft.to.includes("erro")) throw "endereço inválido";
     const item: ScheduledItem = { id, account: draft.account, send_at: sendAt, status: "pending", error: "", attempts: 0, to: draft.to, subject: draft.subject };
     scheduled = [...scheduled.filter((s) => s.item.id !== id), { item, draft }];
+  },
+  async dailyDigest(): Promise<Digest> {
+    await wait(120);
+    wake();
+    const until = Math.floor(Date.now() / 1000);
+    const out: Digest = { since: until - 24 * H, until, important: [], people: [], notifications: [], newsletters: [] };
+    for (const m of messages.filter((x) => x.role === "inbox" && !x.box && !snoozed(x) && x.date >= out.since && x.date <= until).sort((a, b) => b.date - a.date)) {
+      out[mockBucket(m)].push(summary(m));
+    }
+    return out;
   },
   async listScheduled(): Promise<ScheduledItem[]> {
     return scheduled.map((s) => s.item).sort((a, b) => a.send_at - b.send_at);

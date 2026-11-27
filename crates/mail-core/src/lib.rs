@@ -1,6 +1,7 @@
 //! Núcleo do RenanMail: sincronização de email e cópia local pesquisável.
 
 pub mod attachments;
+pub mod digest;
 pub mod folders;
 pub mod imap_sync;
 pub mod later;

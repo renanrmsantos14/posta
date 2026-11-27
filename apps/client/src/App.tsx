@@ -12,6 +12,8 @@ import { SearchDialog, type SearchDialogState } from "./SearchDialog";
 import { newSearchId, parseSavedSearches, serializeSavedSearches, suggestName, type SavedSearch } from "./savedSearches";
 import { OutboxPane, useQueue } from "./Offline";
 import { DraftList, ScheduledList } from "./DraftLists";
+import { TodayPane } from "./TodayPane";
+import type { Digest } from "./digest";
 import { dueMessages, type DueReport } from "./sendReport";
 import { boxView, catView, parseBox, parseCat, roleOf } from "./views";
 import { Composer, type ComposeInit } from "./Composer";
@@ -161,6 +163,10 @@ export default function App() {
   settingsRef.current = settings;
   const [showDrafts, setShowDrafts] = useState(false);
   const [showScheduled, setShowScheduled] = useState(false);
+  /** "Hoje": resumo das últimas 24 h. Como Agendados, é uma tela à parte (não uma pasta). */
+  const [showToday, setShowToday] = useState(false);
+  const [digest, setDigest] = useState<Digest | null>(null);
+  const [digestError, setDigestError] = useState<string | null>(null);
   const [scheduled, setScheduled] = useState<ScheduledItem[]>([]);
   const [scope, setScope] = useState<SearchScope>("folder");
   const [menu, setMenu] = useState<MenuState | null>(null);
@@ -473,6 +479,7 @@ export default function App() {
   onMailChanged.current = async (fetched: number) => {
     api.folders().then((r) => setFolderList(withStarred(r))).catch(() => {});
     refreshScheduled();
+    if (showToday) refreshDigest();
     if (!LOCAL_VIEWS.includes(folderRef.current)) return;
     // O `mail-delta` que vem junto já atualizou a lista por id: só recarrega tudo quando ele não veio (fallback).
     if (Date.now() - lastDelta.current < DELTA_GRACE_MS) return void (fetched && toast(plural(fetched, "mensagem nova", "mensagens novas"), "success"));
@@ -513,6 +520,7 @@ export default function App() {
   const lastDelta = useRef(0);
   const onDelta = useRef((_d: MailDelta) => {});
   onDelta.current = (d: MailDelta) => {
+    if (showToday) refreshDigest();
     if (!roleOf(folderRef.current)) return;
     lastDelta.current = Date.now();
     applyDelta(d).catch(() => { lastDelta.current = 0; reload(listLen.current).catch(() => {}); });
@@ -605,6 +613,7 @@ export default function App() {
     if (role === "all") role = "inbox";
     setShowDrafts(false);
     setShowScheduled(false);
+    setShowToday(false);
     setShowOutbox(false);
     if (role === folder) return;
     setQuery("");
@@ -762,7 +771,23 @@ export default function App() {
     openComposer({ title: d.reply_to !== null ? "Responder" : "Nova mensagem", draftId: d.id, account, reply_to: d.reply_to, to: d.to, cc: d.cc, bcc: d.bcc, subject: d.subject, body: d.body, html: d.html || undefined });
   }
 
+  const refreshDigest = useCallback(() => {
+    api.dailyDigest().then((d) => { setDigest(d); setDigestError(null); }).catch((e) => setDigestError(String(e)));
+  }, []);
+
+  function openToday() {
+    setShowToday(true);
+    setShowScheduled(false);
+    setShowOutbox(false);
+    setShowDrafts(false);
+    setReaderOpen(false);
+    setSelectedId(null);
+    setDetail(null);
+    refreshDigest();
+  }
+
   function openScheduled() {
+    setShowToday(false);
     setShowScheduled(true);
     setShowOutbox(false);
     setShowDrafts(false);
@@ -771,6 +796,7 @@ export default function App() {
   }
 
   function openOutbox() {
+    setShowToday(false);
     setShowDrafts(true);
     setShowOutbox(true);
     setShowScheduled(false);
@@ -779,6 +805,7 @@ export default function App() {
   }
 
   function openDrafts() {
+    setShowToday(false);
     setShowDrafts(true);
     setShowScheduled(false);
     setShowOutbox(false);
@@ -949,7 +976,7 @@ export default function App() {
 
   /** Alvo de soltar mensagens arrastadas da lista; a pasta aberta não é alvo (o hit-test lê `data-drop-view`). */
   function dropProps(key: string, view: string): Record<string, unknown> {
-    if (view === folder || showDrafts || showScheduled) return {};
+    if (view === folder || showDrafts || showScheduled || showToday) return {};
     return { "data-drop-view": view, "data-drop": dropKey === key || undefined };
   }
 
@@ -1677,7 +1704,7 @@ export default function App() {
       }
       const action: ShortcutAction | null = shortcutOf(e, typing);
       if (!action) return;
-      if ((showDrafts || showScheduled || showOutbox) && action !== "compose" && action !== "search") return;
+      if ((showDrafts || showScheduled || showOutbox || showToday) && action !== "compose" && action !== "search") return;
       if (action === "open" && !(t instanceof Element && t.closest("[role=option]"))) return;
       // Setas/Home/End só movem a seleção com o foco na lista ou fora de qualquer controle (não roubam a rolagem do leitor nem botões).
       if (e.key.startsWith("Arrow") || e.key === "Home" || e.key === "End") {
@@ -1739,7 +1766,7 @@ export default function App() {
       onSnooze={(at) => current && snooze(withThread([current]), at)} />
   );
 
-  const inList = !showDrafts && !showScheduled;
+  const inList = !showDrafts && !showScheduled && !showToday;
   /** Rascunhos, Agendados e Caixa de saída são de todas as contas: abrem sem conta ativa. */
   const inAll = (run: () => void) => () => { setAccountFilter(null); run(); };
   /** A mesma Rail serve de barra lateral (desktop) e de gaveta (celular). */
@@ -1754,14 +1781,14 @@ export default function App() {
       onRenameSearch={(s) => setSearchDialog({ mode: "rename", id: s.id, query: s.query, name: s.name })} accounts={accounts}
       accountFilter={accountFilter} acctLabel={acctLabel} acctColor={acctColor}
       openAccounts={openAccounts} onToggleAccount={(id, open) => setOpenAccounts(open ? (oneAtATime ? [id] : [...openAccounts, id]) : openAccounts.filter((a) => a !== id))}
-      drafts={drafts.length} scheduled={scheduled.length} outbox={net.outbox} showDrafts={showDrafts} showScheduled={showScheduled} showOutbox={showOutbox}
-      openDrafts={inAll(openDrafts)} openScheduled={inAll(openScheduled)} openOutbox={inAll(openOutbox)}
+      drafts={drafts.length} scheduled={scheduled.length} outbox={net.outbox} showDrafts={showDrafts} showScheduled={showScheduled} showToday={showToday} showOutbox={showOutbox}
+      openDrafts={inAll(openDrafts)} openScheduled={inAll(openScheduled)} openToday={inAll(openToday)} openOutbox={inAll(openOutbox)}
       onNewFolder={(parent, account) => setFolderDialog({ mode: "create", account: parent?.account ?? account ?? accountFilter ?? undefined, parent: parent?.name })}
       onRenameFolder={(node) => setFolderDialog({ mode: "rename", node })} onDeleteFolder={askDeleteFolder}
       onAddAccount={() => setDialog(true)} />
   );
   /** Antes do título da lista: `Apelido ›` ou `Todas as contas ›` (só com várias contas). */
-  const listScopeId = showDrafts || showScheduled ? accountFilter : scopeAccount;
+  const listScopeId = showDrafts || showScheduled || showToday ? accountFilter : scopeAccount;
   const listScope = multi ? (listScopeId ? { label: acctLabel(listScopeId), color: acctColor(listScopeId) } : { label: "Todas as contas" }) : undefined;
   const pickTab = (t: "focused" | "other") => changeSetting("inbox:tab", t);
   const pull = usePullToRefresh(syncing, narrow && accounts?.length ? () => void sync(true) : undefined);
@@ -1784,7 +1811,7 @@ export default function App() {
         {rail()}
 
         <PageLayout area="list" aria-label="Lista de mensagens" {...pull.bind}>
-          <ListHead scope={listScope} title={showScheduled ? "Agendados" : showOutbox ? "Caixa de saída" : showDrafts ? "Rascunhos" : info.label}
+          <ListHead scope={listScope} title={showToday ? "Hoje" : showScheduled ? "Agendados" : showOutbox ? "Caixa de saída" : showDrafts ? "Rascunhos" : info.label}
             tabsOn={tabsOn && inList} tab={tab} unread={tabUnread} onTab={pickTab}>{pull.indicator}</ListHead>
           {checkedList.length > 0 && (
             <BulkBar rows={rows} checkedRows={checkedRows} checked={checkedList} categories={categories}
@@ -1802,7 +1829,9 @@ export default function App() {
             </div>
           )}
 
-          {showScheduled ? (
+          {showToday ? (
+            <TodayPane digest={digest} error={digestError} selectedId={selectedId} onOpen={(m) => { void select(m.id); if (pane === "off") setFull(true); }} onRetry={refreshDigest} />
+          ) : showScheduled ? (
             <ScheduledList items={scheduled} onEdit={editScheduled} onCancel={cancelScheduled} onRetry={retryScheduled} />
           ) : showOutbox ? (
             <OutboxPane items={outbox} accounts={(accounts ?? []).map((a) => a.id)} online={net.online} onChange={refreshOutbox} />

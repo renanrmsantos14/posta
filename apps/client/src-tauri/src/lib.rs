@@ -1693,6 +1693,16 @@ async fn list_scheduled(app: AppHandle) -> CmdResult<Vec<mail_core::later::Sched
     blocking(app, move |state| state.store.lk().list_scheduled().map_err(err)).await
 }
 
+/// Resumo "Hoje": últimas 24 h da caixa de entrada, por grupo (só lê o banco local).
+#[tauri::command]
+async fn daily_digest(app: AppHandle) -> CmdResult<mail_core::digest::Digest> {
+    blocking(app, move |state| {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+        state.store.lk().digest(now, mail_core::digest::WINDOW_HOURS).map_err(err)
+    })
+    .await
+}
+
 #[derive(Serialize)]
 struct ScheduledEdit {
     id: String,
@@ -1941,6 +1951,7 @@ pub fn run() {
             set_pinned,
             schedule_send,
             list_scheduled,
+            daily_digest,
             take_scheduled,
             retry_scheduled
         ]))

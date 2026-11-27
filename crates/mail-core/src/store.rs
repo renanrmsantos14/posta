@@ -356,7 +356,7 @@ pub(crate) const SUMMARY_COLS: &str = concat!(
 );
 
 /// Adiada e ainda dentro do prazo: some das listas até a hora marcada. (`snooze_until` é mantida na gravação.)
-const NOT_SNOOZED: &str = "m.snooze_until <= CAST(strftime('%s', 'now') AS INTEGER)";
+pub(crate) const NOT_SNOOZED: &str = "m.snooze_until <= CAST(strftime('%s', 'now') AS INTEGER)";
 
 /// Fixadas primeiro; depois a data, ou a hora em que a adiada voltou (o que a leva ao topo).
 /// Colunas desnormalizadas + índice `messages_by_top`: a primeira página custa O(limite).
@@ -1200,7 +1200,7 @@ impl Store {
     }
 
     /// Pastas (conta, nome) que têm o papel, uma por conta. Caixa de entrada sem linha em `folders` é "INBOX".
-    fn role_boxes(&self, role: Role) -> Result<Vec<(String, String)>> {
+    pub(crate) fn role_boxes(&self, role: Role) -> Result<Vec<(String, String)>> {
         let accounts: Vec<String> = {
             // Varredura "solta" no índice: O(contas), não O(mensagens).
             let mut st = self.conn.prepare_cached(
