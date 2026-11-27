@@ -19,3 +19,15 @@ serde_json = "1"
 sha2 = "0.10"
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 url = "2"
+
+[features]
+# Testes de integração contra um servidor IMAP real e local (`pnpm test:imap` sobe o GreenMail).
+imap-it = []
+
+[[test]]
+name = "imap_greenmail"
+required-features = ["imap-it"]
+
+[[test]]
+name = "imap_it"
+required-features = ["imap-it"]
