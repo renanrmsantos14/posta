@@ -1,11 +1,11 @@
 # Triagem automática
 
 - Nível: 2 (feature grande, sem dado real em risco: tudo local; envio testado só contra SMTP local de teste)
-- Etapa: 6 de 7 provar e abrir PR (os 4 PRs abertos; falta o seu QA e o merge)
-- Próximo passo: QA no app real (Tauri) e merge dos PRs #68, #69, #71, #74 · **com você**
-- Branch e PR: `feature/triagem-automatica` · PR1 #68; adiar #69 (`feature/adiar-atalhos`); envio agendado #71 (`feature/envio-agendado`); Hoje #74 (`feature/resumo-hoje`), todos em aberto
+- Etapa: 7 de 7 entregue (os 4 PRs mesclados em 27/11/2026; falta só o QA no app real)
+- Próximo passo: QA no app Tauri real, com contas verdadeiras (o que eu não pude fazer) · **com você**
+- Branch e PR: PR1 #68, adiar #69, envio agendado #71, Hoje #74, todos mesclados na `master` (a ordem gerou conflitos resolvidos nos #71 e #74; ver commits de atualização)
 - Protótipo: sem protótipo (segue o padrão visual de Configurações)
-- Go: 27/11/2026 por Renan (brief da thread principal)
+- PROD: sim. Os merges publicaram releases até v0.1.46 (CI e Release verdes, Windows/Linux/APK); o app se atualiza sozinho. Nada foi provado no Tauri real
 - PROD: ainda não (o merge na `master` publica release; não fiz merge)
 - Atualizado: 27/11/2026
 
