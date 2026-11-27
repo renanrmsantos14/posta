@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { mockApi } from "./mock";
 import { parseBox, parseCat } from "./views";
 import type { ScheduledItem } from "./productivity";
+import type { Digest } from "./digest";
 
 export type Security = "tls" | "starttls" | "plaintext";
 export type Provider = "google" | "microsoft";
@@ -326,6 +327,7 @@ export const api = isTauri
       setPinned: (ids: number[], pinned: boolean) => invoke<void>("set_pinned", { ids, pinned }),
       scheduleSend: (id: string, sendAt: number, draft: Draft) => invoke<void>("schedule_send", { id, sendAt, draft }),
       listScheduled: () => invoke<ScheduledItem[]>("list_scheduled"),
+      dailyDigest: () => invoke<Digest>("daily_digest"),
       takeScheduled: (id: string) => invoke<ScheduledEdit | null>("take_scheduled", { id }),
       thread: (id: number) => invoke<MessageSummary[]>("thread_messages", { id }),
       userFolders: () => invoke<UserFolder[]>("list_user_folders"),

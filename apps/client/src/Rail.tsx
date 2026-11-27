@@ -1,7 +1,7 @@
 // Painel de pastas: Favoritos, "Todas as contas" e, com várias contas, uma seção recolhível por conta (pastas do sistema e do usuário),
 // no estilo do Outlook: cada conta abre e fecha por conta própria e o cabeçalho mostra o endereço.
 // Com uma conta só, é a lista simples de sempre. O mesmo componente serve de gaveta no celular (`variant="drawer"`).
-import { CaretRight, FileText, MagnifyingGlass, PaperPlaneTilt, PencilSimple, Plus, Clock, Trash } from "@phosphor-icons/react";
+import { CaretRight, FileText, SunHorizon, MagnifyingGlass, PaperPlaneTilt, PencilSimple, Plus, Clock, Trash } from "@phosphor-icons/react";
 import type { Account, Category, UserFolder, View } from "./api";
 import { FolderTree } from "./FolderTree";
 import { PageLayout } from "./layout/primitives";
@@ -49,9 +49,11 @@ interface Props {
   outbox: number;
   showDrafts: boolean;
   showScheduled: boolean;
+  showToday: boolean;
   showOutbox: boolean;
   openDrafts: () => void;
   openScheduled: () => void;
+  openToday: () => void;
   openOutbox: () => void;
   onNewFolder: (parent?: FolderNode, account?: string) => void;
   onRenameFolder: (n: FolderNode) => void;
@@ -101,6 +103,7 @@ export function Rail(p: Props) {
   );
   const extras = (
     <>
+      {extra("Hoje", SunHorizon, 0, p.showToday, p.openToday)}
       {extra("Rascunhos", FileText, p.drafts, p.showDrafts && !p.showOutbox, p.openDrafts)}
       {extra("Agendados", Clock, p.scheduled, p.showScheduled, p.openScheduled)}
       {(p.outbox > 0 || p.showOutbox) && extra("Caixa de saída", PaperPlaneTilt, p.outbox, p.showOutbox, p.openOutbox)}

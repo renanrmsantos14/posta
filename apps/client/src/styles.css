@@ -1522,3 +1522,17 @@ button.scope-chip { cursor: pointer; }
 @media (max-width: 720px) {
   .pv { zoom: 0.8; }
 }
+
+/* Hoje: resumo das últimas 24 h em grupos recolhíveis. */
+.today { flex: 1; min-height: 0; overflow-y: auto; padding: 0 6px 24px; font-size: var(--fs-list); }
+.today-meta { margin: 4px 10px 6px; color: var(--muted); font: 12px/1.3 var(--num); }
+.today-head {
+  display: flex; align-items: center; gap: 8px; width: 100%; padding: 8px 10px; margin-top: 6px;
+  background: transparent; border: 0; border-radius: var(--r8); color: var(--muted); cursor: pointer; text-align: left;
+}
+.today-head:hover { background: var(--selected); }
+.today-title { color: var(--strong); font-weight: 600; }
+.today-count { margin-left: auto; font: 12px/1 var(--num); }
+.today-list { overflow: visible; padding: 0; }
+.today-none { padding: 6px 10px 8px 28px; color: var(--faint); }
+.today-group[data-empty] .today-title { font-weight: 500; color: var(--muted); }

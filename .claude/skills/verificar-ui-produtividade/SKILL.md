@@ -15,5 +15,6 @@ description: Verifica a UI de produtividade do RenanMail (regras, busca com filt
    - Tecla `p` fixa a linha selecionada no topo com a marca de alfinete; `p` de novo desafixa.
    - Novo email: botão "Modelos de resposta" insere o texto no editor; "Enviar mais tarde" > "Próxima semana" fecha o painel; "Agendados" na barra lista a mensagem com a hora e "Cancelar envio" (volta para Rascunhos). Destinatário com "erro" deixa o painel aberto com a mensagem de erro.
    - Clique direito numa mensagem: "Criar regra com este remetente" abre Configurações > Regras com uma regra desligada (Remetente = endereço da linha); "Bloquear remetente" mostra o toast com Desfazer, e a ação "Mover para a Lixeira" existe no seletor de ação.
+   - "Hoje" na barra lateral: abre o resumo das últimas 24 h em Importante / Pessoas / Notificações / Newsletters (cada cabeçalho mostra a contagem e as não lidas e recolhe ao clicar); clicar numa mensagem abre o leitor; voltar para "Caixa de entrada" some com o resumo. O mock espelha a heurística de `digest.rs` (os testes de verdade estão no Rust).
    - Console sem erro nem aviso.
 4. Prints: `posta-regras.png`, `posta-busca.png` e `posta-adiar.png` em `/home/renan/.t3/userdata/attachments/`. Encerre o vite ao terminar e remova o `node_modules` do worktree.
