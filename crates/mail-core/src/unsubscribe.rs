@@ -95,7 +95,7 @@ pub fn parse(raw: &[u8]) -> Option<Unsubscribe> {
     Some(Unsubscribe { url, mailto, one_click })
 }
 
-fn percent_decode(s: &str) -> String {
+fn percent_decode(s: &str, plus_is_space: bool) -> String {
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
@@ -107,7 +107,7 @@ fn percent_decode(s: &str) -> String {
                 continue;
             }
         }
-        out.push(if b[i] == b'+' { b' ' } else { b[i] });
+        out.push(if plus_is_space && b[i] == b'+' { b' ' } else { b[i] });
         i += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
@@ -117,7 +117,7 @@ fn percent_decode(s: &str) -> String {
 pub fn parse_mailto(m: &str) -> Option<UnsubMail> {
     let rest = m.get(7..).filter(|_| scheme_is(m, "mailto:"))?;
     let (to, query) = rest.split_once('?').unwrap_or((rest, ""));
-    let to = percent_decode(to);
+    let to = percent_decode(to, false);
     // Sem quebra de linha nem vírgulas: um único destinatário, sem injetar cabeçalhos.
     if to.is_empty() || !to.contains('@') || to.contains(['\r', '\n', ',', ';', '<', '>']) {
         return None;
@@ -126,8 +126,8 @@ pub fn parse_mailto(m: &str) -> Option<UnsubMail> {
     for pair in query.split('&') {
         let Some((k, v)) = pair.split_once('=') else { continue };
         match k.to_lowercase().as_str() {
-            "subject" => subject = percent_decode(v).replace(['\r', '\n'], " "),
-            "body" => body = percent_decode(v),
+            "subject" => subject = percent_decode(v, true).replace(['\r', '\n'], " "),
+            "body" => body = percent_decode(v, true),
             _ => {}
         }
     }
@@ -225,6 +225,16 @@ mod tests {
         assert_eq!(m, UnsubMail { to: "sair@lista.com".into(), subject: "Cancelar inscrição".into(), body: "por favor".into() });
         let m = parse_mailto("mailto:sair@lista.com").unwrap();
         assert_eq!((m.subject.as_str(), m.body.as_str()), ("unsubscribe", "unsubscribe"));
+    }
+
+    #[test]
+    fn mailto_preserva_o_mais_do_endereco_com_tag() {
+        // `+` no destinatário é parte do endereço (plus addressing); trocá-lo por espaço manda o pedido para ninguém.
+        let m = parse_mailto("mailto:sair+abc123@lista.com?subject=sair").unwrap();
+        assert_eq!(m.to, "sair+abc123@lista.com");
+        // No assunto, `+` segue valendo espaço (formulários antigos); `%2B` é um `+` de verdade.
+        let m = parse_mailto("mailto:sair@lista.com?subject=Cancelar+inscri%C3%A7%C3%A3o+%2B1").unwrap();
+        assert_eq!(m.subject, "Cancelar inscrição +1");
     }
 
     #[test]
