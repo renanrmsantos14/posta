@@ -597,6 +597,13 @@ impl Store {
 
     /// Ajustes por conexão (não persistem no arquivo, exceto o modo WAL): cache e mmap grandes, WAL e fsync relaxado.
     fn tune(conn: &Connection) -> Result<()> {
+        // `plain(texto)`: minúsculas e sem acento, para os filtros `assunto:`/`de:`/`para:` (o LIKE do SQLite só dobra ASCII).
+        conn.create_scalar_function(
+            "plain",
+            1,
+            rusqlite::functions::FunctionFlags::SQLITE_UTF8 | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
+            |ctx| Ok(ctx.get::<Option<String>>(0)?.map(|s| crate::search::plain(&s))),
+        )?;
         // No celular o app abre várias conexões (UI, sync, IDLE por conta, pré-busca, fila): 64 MB de cache e 256 MB
         // de mmap em cada uma pesam na memória e o Android passa a matar ou estrangular o processo.
         #[cfg(target_os = "android")]
