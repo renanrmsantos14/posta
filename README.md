@@ -31,7 +31,7 @@ Depois de instalado no desktop, o RenanMail se atualiza sozinho: procura versão
 | `pnpm release [versão]` | Lança uma versão específica (MINOR/MAJOR) na hora: sobe a versão, cria commit e tag `vX.Y.Z` e envia |
 | `pnpm --filter client tauri build` | Instalador local (exige `TAURI_SIGNING_PRIVATE_KEY` com a chave de assinatura) |
 | `pnpm test` | Testes do núcleo (banco local) |
-| `pnpm test:imap` | Sobe Greenmail no Docker e testa IMAP real (1.000 mensagens) e resposta por SMTP |
+| `pnpm test:imap` | Sobe Greenmail no Docker e roda os testes de integração IMAP/SMTP (feature `imap-it`: sync, UIDVALIDITY, queda de conexão, WAL, 20 MB...) |
 
 Linux precisa de `libwebkit2gtk-4.1-dev`, `libgtk-3-dev`, `librsvg2-dev` e de um serviço de segredos (GNOME Keyring/KWallet).
 

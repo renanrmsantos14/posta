@@ -1,13 +1,13 @@
 //! Testes contra um servidor IMAP real (Greenmail em Docker).
 //! Rodar: `pnpm test:imap` (sobe o container e define POSTA_IMAP_TEST=127.0.0.1:3143).
-//! Sem a variável, os testes passam sem fazer nada.
+//! Exige `--features imap-it` e a variável: sem servidor o teste falha, não passa em branco.
 
 use imap::{ClientBuilder, ConnectionMode};
 use mail_core::{imap_sync, send, ImapAccount, OutAttachment, Outgoing, Role, Security, SmtpServer, Store};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 fn account(tag: &str) -> Option<ImapAccount> {
-    let addr = std::env::var("POSTA_IMAP_TEST").ok()?;
+    let addr = std::env::var("POSTA_IMAP_TEST").expect("defina POSTA_IMAP_TEST=127.0.0.1:3143 (ou rode `pnpm test:imap`)");
     let (host, port) = addr.split_once(':')?;
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
     // Greenmail cria a caixa pelo endereço: login = email.
