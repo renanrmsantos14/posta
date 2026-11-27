@@ -50,6 +50,8 @@ export interface ScheduledItem {
   send_at: number;
   status: "pending" | "sending" | "failed";
   error: string;
+  /** Tentativas que já falharam. */
+  attempts: number;
   to: string;
   subject: string;
 }

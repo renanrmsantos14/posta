@@ -12,6 +12,7 @@ import { SearchDialog, type SearchDialogState } from "./SearchDialog";
 import { newSearchId, parseSavedSearches, serializeSavedSearches, suggestName, type SavedSearch } from "./savedSearches";
 import { OutboxPane, useQueue } from "./Offline";
 import { DraftList, ScheduledList } from "./DraftLists";
+import { dueMessages, type DueReport } from "./sendReport";
 import { boxView, catView, parseBox, parseCat, roleOf } from "./views";
 import { Composer, type ComposeInit } from "./Composer";
 import { aliasFor, aliasLines, addrOf } from "./aliases";
@@ -484,6 +485,26 @@ export default function App() {
     let alive = true;
     import("@tauri-apps/api/event")
       .then(({ listen }) => listen<number>("mail-changed", (e) => { onMailChanged.current(e.payload).catch(() => {}); }))
+      .then((un) => (alive ? (off = un) : un()));
+    return () => { alive = false; off?.(); };
+  }, []);
+
+  // Relatório do relógio de envios agendados: avisa atraso (app fechado na hora), falta de rede e falhas.
+  const onDueReport = useRef((_r: DueReport) => {});
+  onDueReport.current = (r: DueReport) => {
+    refreshScheduled();
+    for (const m of dueMessages(r)) toast(m.text, m.kind);
+  };
+  useEffect(() => {
+    if (!isTauri) {
+      const on = (e: Event) => onDueReport.current((e as CustomEvent<DueReport>).detail);
+      window.addEventListener("mock-due-report", on);
+      return () => window.removeEventListener("mock-due-report", on);
+    }
+    let off: (() => void) | undefined;
+    let alive = true;
+    import("@tauri-apps/api/event")
+      .then(({ listen }) => listen<DueReport>("scheduled-report", (e) => onDueReport.current(e.payload)))
       .then((un) => (alive ? (off = un) : un()));
     return () => { alive = false; off?.(); };
   }, []);
@@ -1132,6 +1153,17 @@ export default function App() {
     }
   }
 
+  /** Falhou de vez: volta à fila e sai na próxima rodada do relógio. */
+  async function retryScheduled(s: ScheduledItem) {
+    try {
+      await api.retryScheduled(s.id);
+      refreshScheduled();
+      toast("Vou tentar enviar de novo agora.", "info");
+    } catch (e) {
+      toast(`Não foi possível tentar de novo: ${e}`, "error");
+    }
+  }
+
   /** Cancelar não perde o texto: a mensagem volta para Rascunhos. */
   async function cancelScheduled(s: ScheduledItem) {
     try {
@@ -1771,7 +1803,7 @@ export default function App() {
           )}
 
           {showScheduled ? (
-            <ScheduledList items={scheduled} onEdit={editScheduled} onCancel={cancelScheduled} />
+            <ScheduledList items={scheduled} onEdit={editScheduled} onCancel={cancelScheduled} onRetry={retryScheduled} />
           ) : showOutbox ? (
             <OutboxPane items={outbox} accounts={(accounts ?? []).map((a) => a.id)} online={net.online} onChange={refreshOutbox} />
           ) : showDrafts ? (

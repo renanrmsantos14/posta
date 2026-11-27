@@ -1713,6 +1713,12 @@ async fn take_scheduled(app: AppHandle, id: String) -> CmdResult<Option<Schedule
     .await
 }
 
+/// "Tentar de novo" num agendado que ficou como falha: volta à fila e sai na próxima rodada do relógio.
+#[tauri::command]
+async fn retry_scheduled(app: AppHandle, id: String) -> CmdResult<bool> {
+    blocking(app, move |state| state.store.lk().scheduled_retry(&id, now_ts()).map_err(err)).await
+}
+
 /// Adiadas que venceram voltam não lidas (a marca de lida também sai no servidor); devolve se algo mudou.
 fn wake_snoozed(st: &AppState) -> bool {
     let ids = st.store.lk().wake_due(now_ts()).unwrap_or_default();
@@ -1726,44 +1732,53 @@ fn wake_snoozed(st: &AppState) -> bool {
 }
 
 /// Envia o que está agendado e venceu. Falha tenta de novo em 2 min; na terceira fica como falha na lista.
-fn send_due(st: &AppState) -> bool {
+fn send_due(st: &AppState) -> mail_core::later::DueReport {
+    use mail_core::later::{DueOutcome, DueReport};
     let now = now_ts();
     let due = st.store.lk().claim_due(now).unwrap_or_default();
+    let mut report = DueReport::default();
     for s in &due {
-        let sent = (|| -> CmdResult<()> {
+        let outcome = (|| -> CmdResult<DueOutcome> {
             let reply = match s.reply_to {
                 Some(r) => st.store.lk().reply_ref(r).map_err(err)?,
                 None => None,
             };
             let acc = st.account_with_password(&s.account)?;
             match send::send(&acc, &s.out, reply.as_ref()) {
-                Ok(_) => Ok(()),
+                Ok(_) => Ok(DueOutcome::Sent),
                 // Sem rede: passa para a Caixa de saída offline, que envia quando a conexão volta (um único caminho, sem duplicar).
                 Err(e) if e.is_network() && !reachable(st, &s.account) => {
-                    st.store.lk().enqueue_send(&s.account, &s.out, reply.as_ref()).map(|_| ()).map_err(err)
+                    st.store.lk().enqueue_send(&s.account, &s.out, reply.as_ref()).map_err(err)?;
+                    Ok(DueOutcome::Offline)
                 }
                 Err(e) => Err(err(e)),
             }
-        })();
-        let store = st.store.lk();
-        match sent {
-            Ok(()) => store.scheduled_done(&s.id).ok(),
-            Err(e) => store.scheduled_failed(&s.id, &e, now).ok(),
-        };
+        })()
+        .unwrap_or_else(DueOutcome::Failed);
+        st.store.lk().settle_due(s, outcome, now, &mut report).ok();
     }
-    !due.is_empty()
+    report
 }
 
-/// Relógio do app: a cada 20 s acorda adiadas e envia agendados (só roda com o app aberto).
+/// Relógio do app: envia o agendado que já venceu logo ao abrir (o app pode ter ficado fechado na hora) e,
+/// depois, a cada 20 s acorda adiadas e envia agendados (só roda com o app aberto).
+/// Sai um aviso (`scheduled-report`) quando algo saiu atrasado, foi para a caixa de saída ou falhou.
 fn start_scheduler(app: AppHandle) {
     app.state::<AppState>().store.lk().requeue_sending().ok();
-    std::thread::spawn(move || loop {
-        std::thread::sleep(Duration::from_secs(20));
-        let st = app.state::<AppState>();
-        let woke = wake_snoozed(&st);
-        let sent = send_due(&st);
-        if woke || sent {
-            app.emit("mail-changed", 0).ok();
+    std::thread::spawn(move || {
+        // Dá um instante para o resto do app subir (contas, janela) antes da primeira rodada.
+        std::thread::sleep(Duration::from_secs(3));
+        loop {
+            let st = app.state::<AppState>();
+            let woke = wake_snoozed(&st);
+            let report = send_due(&st);
+            if woke || !report.is_empty() {
+                app.emit("mail-changed", 0).ok();
+            }
+            if report.late > 0 || report.offline > 0 || report.retrying > 0 || report.failed > 0 {
+                app.emit("scheduled-report", &report).ok();
+            }
+            std::thread::sleep(Duration::from_secs(20));
         }
     });
 }
@@ -1926,7 +1941,8 @@ pub fn run() {
             set_pinned,
             schedule_send,
             list_scheduled,
-            take_scheduled
+            take_scheduled,
+            retry_scheduled
         ]))
         .build(tauri::generate_context!())
         .expect("erro ao iniciar o RenanMail")
