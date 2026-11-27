@@ -29,7 +29,7 @@ interface Props {
   onClose: () => void;
   onUpdate: (u: Update) => void;
   /** "Aplicar agora à Entrada": roda as regras e atualiza a lista. */
-  onApplyRules: () => Promise<void>;
+  onApplyRules: (only?: string) => Promise<void>;
   /** Muda só na tela (arrasto da cor de destaque); `onSetting` grava. */
   onPreview: (key: string, value: string) => void;
   /** O destaque próprio foi ajustado para manter o contraste do tema. */
@@ -145,7 +145,7 @@ export function SettingsPage({ initialSection, accounts, settings, onSetting, on
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
       e.stopPropagation();
-      if (editing) return; // o diálogo de edição trata o próprio Esc
+      if (editing || document.querySelector(".rule-dialog")) return; // os diálogos de edição tratam o próprio Esc
       if (leaving) setLeaving(null);
       else if (removing) { if (!removeBusy) setRemoving(null); }
       else guard(onClose);
