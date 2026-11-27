@@ -1,8 +1,9 @@
 //! Sincronização IMAP → Store. Uma conexão por chamada; `idle_wait` espera novidades (IMAP IDLE).
 
 use imap::Session;
-use mail_parser::{MessageParser, PartKind};
+use mail_parser::{Charset, DecodeProblems, MessageParser, MessagePart, PartKind};
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::collections::{BTreeSet, HashSet};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -212,6 +213,28 @@ fn idle_sliced(live: &mut Live, mailbox: &str, timeout: Duration, slice: Duratio
     }
 }
 
+/// Texto de uma parte text/html. Sem `charset` declarado (clientes antigos, 8-bit) e com bytes que não são UTF-8
+/// válido, lê como windows-1252 (Latin-1 com os acentos do Windows) em vez de trocar cada byte por U+FFFD.
+fn part_text<'a>(p: &MessagePart<'a>) -> Option<Cow<'a, str>> {
+    let (text, problems) = p.text_checked()?;
+    let declared = p.content_type().and_then(|c| c.attribute("charset")).is_some();
+    if declared || !problems.contains(DecodeProblems::MALFORMED_CHARSET) {
+        return Some(text);
+    }
+    Some(Charset::Windows1252.decode(&p.decoded()).into_owned().into())
+}
+
+/// Primeiro texto da mensagem; só HTML vira texto puro (para busca e prévia).
+fn body_text(m: &mail_parser::Message) -> String {
+    let Some(p) = m.text_body().next() else { return String::new() };
+    let text = part_text(&p).map(|t| t.into_owned()).unwrap_or_default();
+    if matches!(p.kind(), PartKind::Html) {
+        mail_parser::html_to_text(&text)
+    } else {
+        text
+    }
+}
+
 fn parse(uid: u32, raw: &[u8], seen: bool, flagged: bool, fallback_date: i64, own_addr: &str) -> NewMessage {
     let msg = MessageParser::default().parse(raw);
     let from = msg.as_ref().and_then(|m| m.from()).and_then(|f| f.first());
@@ -236,7 +259,7 @@ fn parse(uid: u32, raw: &[u8], seen: bool, flagged: bool, fallback_date: i64, ow
             let html = m
                 .html_body()
                 .filter(|p| matches!(p.kind(), PartKind::Html))
-                .filter_map(|p| p.text())
+                .filter_map(|p| part_text(&p))
                 .collect::<Vec<_>>()
                 .join("\n");
             attachments::inline_cids(m, html)
@@ -252,11 +275,7 @@ fn parse(uid: u32, raw: &[u8], seen: bool, flagged: bool, fallback_date: i64, ow
             .and_then(|m| m.date())
             .map(|d| d.to_timestamp())
             .unwrap_or(fallback_date),
-        body_text: msg
-            .as_ref()
-            .and_then(|m| m.body_text(0))
-            .map(|b| b.into_owned())
-            .unwrap_or_default(),
+        body_text: msg.as_ref().map(body_text).unwrap_or_default(),
         body_html: html.clone(),
         attachments: msg.as_ref().map(|m| attachments::list(m, &html)).unwrap_or_default(),
         seen,
@@ -902,6 +921,32 @@ pub fn check_login(acc: &ImapAccount) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn corpo_8bit_sem_charset_e_lido_como_latin1_e_nao_vira_mojibake() {
+        // Cliente antigo: sem Content-Type nem charset, bytes Latin-1 crus ("Ação combinada às 15h – já está pago").
+        let raw = b"From: a@b.c\r\nSubject: x\r\n\r\nA\xe7\xe3o combinada \xe0s 15h \x96 j\xe1 est\xe1 pago\r\n";
+        let m = parse(1, raw, false, false, 0, "");
+        assert_eq!(m.body_text.trim(), "Ação combinada às 15h – já está pago");
+        // Também com Content-Type text/plain sem o parâmetro charset, em HTML e em quoted-printable.
+        let raw = b"From: a@b.c\r\nSubject: x\r\nContent-Type: text/plain\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\nA=E7=E3o\r\n";
+        assert_eq!(parse(1, raw, false, false, 0, "").body_text.trim(), "Ação");
+        let raw = b"From: a@b.c\r\nSubject: x\r\nContent-Type: text/html\r\n\r\n<p>A\xe7\xe3o</p>\r\n";
+        let m = parse(1, raw, false, false, 0, "");
+        assert!(m.body_html.contains("<p>Ação</p>") && m.body_text.contains("Ação"), "{:?} / {:?}", m.body_html, m.body_text);
+    }
+
+    #[test]
+    fn corpo_com_charset_declarado_ou_utf8_valido_nao_muda() {
+        let utf8 = "Ação 😀".as_bytes();
+        let raw = [b"From: a@b.c\r\nSubject: x\r\n\r\n".as_slice(), utf8, b"\r\n"].concat();
+        assert_eq!(parse(1, &raw, false, false, 0, "").body_text.trim(), "Ação 😀");
+        let raw = b"From: a@b.c\r\nSubject: x\r\nContent-Type: text/plain; charset=iso-8859-1\r\n\r\nA\xe7\xe3o\r\n";
+        assert_eq!(parse(1, raw, false, false, 0, "").body_text.trim(), "Ação");
+        // Charset declarado como utf-8 com byte inválido continua sendo problema do remetente: não adivinhamos.
+        let raw = b"From: a@b.c\r\nSubject: x\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nA\xe7o\r\n";
+        assert_eq!(parse(1, raw, false, false, 0, "").body_text.trim(), "A\u{fffd}o");
+    }
 
     #[test]
     fn guarda_o_html_e_o_texto_da_alternativa() {
