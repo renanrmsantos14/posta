@@ -1601,7 +1601,7 @@ async fn search_server(app: AppHandle, scope: search::Scope, query: String) -> C
 /// Esconde as mensagens até `until` (Unix, segundos); depois voltam ao topo como não lidas.
 #[tauri::command]
 async fn snooze_messages(app: AppHandle, ids: Vec<i64>, until: i64) -> CmdResult<()> {
-    blocking(app, move |state| state.store.lk().snooze(&ids, until).map_err(err)).await
+    blocking(app, move |state| state.store.lk().snooze(&ids, until, now_ts()).map_err(err)).await
 }
 
 #[tauri::command]

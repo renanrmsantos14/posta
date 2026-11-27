@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowBendUpLeft, ArrowBendDoubleUpLeft, ArrowBendUpRight, ArrowsClockwise, Archive, Copy, FolderOpen, FolderSimple, NotePencil, Star, Tag, Trash, EnvelopeSimple, EnvelopeSimpleOpen, FloppyDisk, Printer, PushPin, Clock, ShieldWarning, Prohibit, FunnelSimple } from "@phosphor-icons/react";
+import { ArrowBendUpLeft, ArrowBendDoubleUpLeft, ArrowBendUpRight, ArrowsClockwise, Archive, Copy, FolderOpen, FolderSimple, NotePencil, Star, Tag, Trash, EnvelopeSimple, EnvelopeSimpleOpen, FloppyDisk, Printer, PushPin, Clock, CalendarBlank, ShieldWarning, Prohibit, FunnelSimple } from "@phosphor-icons/react";
 import { api, isTauri, type Account, type Attachment, type MailDelta, type MessageDetail, type MessageSummary, type OutAttachment, type OutboxItem, type Role, type Settings, type StoredDraft, type UnreadCounts, type UserFolder, type View } from "./api";
 import { AccountDialog } from "./AccountDialog";
 import { colorKey } from "./accountColors";
@@ -7,6 +7,7 @@ import { accountColor, accountLabel, labelKey } from "./accountMeta";
 import { NavDrawer, useDrawer } from "./NavDrawer";
 import { parseCategories } from "./Categories";
 import { FolderDialog, type FolderDialogState } from "./FolderDialog";
+import { WhenDialog } from "./WhenDialog";
 import { SearchDialog, type SearchDialogState } from "./SearchDialog";
 import { newSearchId, parseSavedSearches, serializeSavedSearches, suggestName, type SavedSearch } from "./savedSearches";
 import { OutboxPane, useQueue } from "./Offline";
@@ -27,7 +28,7 @@ import { Resizer } from "./Resizer";
 import { SettingsPage } from "./SettingsPage";
 import { UpdateDialog } from "./UpdateDialog";
 import { autoCheck, checkUpdate, CHECK_EVERY_MS, skip, skipped, type Update } from "./updater";
-import { addFilter, hasFilters, parseRules, parseTemplates, whenLabel, whenPresets, type ScheduledItem } from "./productivity";
+import { addFilter, hasFilters, isPast, parseRules, parseTemplates, whenLabel, whenPresets, type ScheduledItem } from "./productivity";
 import { AppShell, RouteLayout, PageLayout } from "./layout/primitives";
 import { TopBar, type SearchScope } from "./TopBar";
 import { CommandBar } from "./CommandBar";
@@ -181,6 +182,8 @@ export default function App() {
   const [userFolders, setUserFolders] = useState<UserFolder[]>([]);
   const [folderDialog, setFolderDialog] = useState<FolderDialogState | null>(null);
   const [searchDialog, setSearchDialog] = useState<SearchDialogState | null>(null);
+  /** Mensagens à espera de "Escolher data e hora…" do Adiar. */
+  const [snoozePick, setSnoozePick] = useState<MessageSummary[] | null>(null);
   const [folderDelete, setFolderDelete] = useState<{ node: FolderNode; count: number } | null>(null);
   const [folderBusy, setFolderBusy] = useState(false);
   /** Arrastar da lista para uma pasta: mensagens em arrasto e alvo sob o ponteiro. */
@@ -1146,6 +1149,7 @@ export default function App() {
 
   /** Esconde até `until`; volta ao topo como não lida. Dá para desfazer logo depois. */
   function snooze(ms: MessageSummary[], until: number) {
+    if (isPast(until)) { toast("Esse horário já passou. Escolha uma hora no futuro.", "error"); return; }
     const ids = ms.map((m) => m.id);
     const undo = takeOutMany(ms);
     api.snooze(ids, until).then(refreshCounts).catch((e) => { undo(); toast(`Não foi possível adiar: ${e}`, "error"); });
@@ -1519,8 +1523,10 @@ export default function App() {
     }
     return items;
   };
-  const snoozeItems = (ms: MessageSummary[]): MenuItem[] =>
-    whenPresets(Math.floor(Date.now() / 1000)).map((p) => ({ label: p.label, onSelect: () => snooze(ms, p.at) }));
+  const snoozeItems = (ms: MessageSummary[]): MenuItem[] => [
+    ...whenPresets(Math.floor(Date.now() / 1000)).map((p) => ({ label: `${p.label} · ${whenLabel(p.at)}`, onSelect: () => snooze(ms, p.at) })),
+    { label: "Escolher data e hora…", icon: CalendarBlank, onSelect: () => setSnoozePick(ms) },
+  ];
   const categoryItems = (ms: MessageSummary[]): MenuItem[] => [
     { label: "Sem categoria", onSelect: () => void applyCategory(ms, null) },
     ...categories.map((c) => ({ label: c.name, onSelect: () => void applyCategory(ms, c.id) })),
@@ -1875,6 +1881,7 @@ export default function App() {
       {folderDialog && (
         <FolderDialog state={folderDialog} accounts={accounts ?? []} folders={userFolders} onSubmit={submitFolder} onClose={() => setFolderDialog(null)} />
       )}
+      {snoozePick && <WhenDialog title="Adiar até…" confirm="Adiar" onPick={(at) => snooze(snoozePick, at)} onClose={() => setSnoozePick(null)} />}
       {searchDialog && <SearchDialog state={searchDialog} onSubmit={submitSearch} onClose={() => setSearchDialog(null)} />}
       {folderDelete && (
         <div className="confirm scrim" onMouseDown={(e) => { if (e.target === e.currentTarget && !folderBusy) setFolderDelete(null); }}>

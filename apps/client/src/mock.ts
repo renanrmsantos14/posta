@@ -627,6 +627,7 @@ export const mockApi = {
   },
   async snooze(ids: number[], until: number): Promise<void> {
     await wait(100);
+    if (until <= Math.floor(Date.now() / 1000)) throw "o horário já passou";
     messages.forEach((m) => { if (ids.includes(m.id)) { m.snoozeUntil = until; m.woke = false; } });
   },
   async unsnooze(ids: number[]): Promise<void> {

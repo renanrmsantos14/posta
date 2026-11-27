@@ -68,50 +68,8 @@ export function parseVacation(raw: string | undefined): Vacation {
   }
 }
 
-// ---- Horários (America/Sao_Paulo = UTC-3, sem horário de verão) ----
-
-const OFFSET = 3 * 3600;
-const DAY = 86_400;
-const pad = (n: number) => String(n).padStart(2, "0");
-
-/** Meia-noite (Brasília) do dia que contém `unix`. */
-const startOfDay = (unix: number) => Math.floor((unix - OFFSET) / DAY) * DAY + OFFSET;
-/** Dia da semana em Brasília (0 = domingo). */
-const weekday = (unix: number) => new Date((unix - OFFSET) * 1000).getUTCDay();
-
-export interface WhenPreset {
-  key: string;
-  label: string;
-  at: number;
-}
-
-/** "Hoje mais tarde" (daqui a 3 h; depois das 20 h vira amanhã 8 h), "Amanhã" (8 h) e "Próxima semana" (segunda 8 h). */
-export function whenPresets(now: number, later = "Hoje mais tarde"): WhenPreset[] {
-  const today = startOfDay(now);
-  const tomorrow = today + DAY + 8 * 3600;
-  const evening = now - today >= 20 * 3600 - 1;
-  const toMonday = (8 - weekday(now)) % 7 || 7;
-  return [
-    { key: "later", label: later, at: evening ? tomorrow : now + 3 * 3600 },
-    { key: "tomorrow", label: "Amanhã", at: tomorrow },
-    { key: "week", label: "Próxima semana", at: today + toMonday * DAY + 8 * 3600 },
-  ];
-}
-
-/** Valor para `<input type="datetime-local">` (horário de Brasília). */
-export function toLocalInput(unix: number): string {
-  const d = new Date((unix - OFFSET) * 1000);
-  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}T${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
-}
-
-/** Lê o valor de `datetime-local` como horário de Brasília; NaN se inválido. */
-export function fromLocalInput(v: string): number {
-  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/.exec(v);
-  return m ? Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]) / 1000 + OFFSET : NaN;
-}
-
-const fmtWhen = new Intl.DateTimeFormat("pt-BR", { timeZone: "America/Sao_Paulo", weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
-export const whenLabel = (unix: number) => fmtWhen.format(new Date(unix * 1000));
+// ---- Horários (ver when.ts) ----
+export { fromLocalInput, isPast, toLocalInput, whenLabel, whenPresets, type WhenPreset } from "./when";
 
 // ---- Filtros da busca ----
 
