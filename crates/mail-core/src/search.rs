@@ -102,13 +102,29 @@ fn tokens(input: &str) -> Vec<String> {
     out
 }
 
+/// Minúsculas e sem acento (Latim-1 e Latim Estendido-A), como o índice de texto (`remove_diacritics`): regras,
+/// chaves de filtro e a função `plain()` do SQLite usam a mesma dobra.
 pub(crate) fn plain(s: &str) -> String {
     s.to_lowercase().chars().map(|c| match c {
-        'é' | 'ê' => 'e',
-        'ã' | 'á' | 'â' => 'a',
-        'í' => 'i',
-        'ó' | 'ô' => 'o',
-        'ú' => 'u',
+        'à'..='å' | 'ā' | 'ă' | 'ą' => 'a',
+        'ç' | 'ć' | 'ĉ' | 'ċ' | 'č' => 'c',
+        'ď' => 'd',
+        'è'..='ë' | 'ē' | 'ĕ' | 'ė' | 'ę' | 'ě' => 'e',
+        'ĝ' | 'ğ' | 'ġ' | 'ģ' => 'g',
+        'ĥ' => 'h',
+        'ì'..='ï' | 'ĩ' | 'ī' | 'ĭ' | 'į' => 'i',
+        'ĵ' => 'j',
+        'ķ' => 'k',
+        'ĺ' | 'ļ' | 'ľ' => 'l',
+        'ñ' | 'ń' | 'ņ' | 'ň' => 'n',
+        'ò'..='ö' | 'ō' | 'ŏ' | 'ő' => 'o',
+        'ŕ' | 'ŗ' | 'ř' => 'r',
+        'ś' | 'ŝ' | 'ş' | 'š' => 's',
+        'ţ' | 'ť' => 't',
+        'ù'..='ü' | 'ũ' | 'ū' | 'ŭ' | 'ů' | 'ű' | 'ų' => 'u',
+        'ŵ' => 'w',
+        'ý' | 'ÿ' | 'ŷ' => 'y',
+        'ź' | 'ż' | 'ž' => 'z',
         c => c,
     }).collect()
 }
@@ -152,7 +168,7 @@ pub enum Scope {
 }
 
 fn like(s: &str) -> Value {
-    Value::Text(format!("%{}%", s.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")))
+    Value::Text(format!("%{}%", plain(s).replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")))
 }
 
 impl Filters {
@@ -164,13 +180,13 @@ impl Filters {
             c.push(sql.replace('?', &format!("?{}", p.len())));
         }
         for x in &self.from {
-            add(&mut c, "(m.from_name LIKE ? ESCAPE '\\' OR m.from_addr LIKE ? ESCAPE '\\')", like(x), p);
+            add(&mut c, "(plain(m.from_name) LIKE ? ESCAPE '\\' OR plain(m.from_addr) LIKE ? ESCAPE '\\')", like(x), p);
         }
         for x in &self.to {
-            add(&mut c, "(m.to_addrs LIKE ? ESCAPE '\\' OR m.cc_addrs LIKE ? ESCAPE '\\')", like(x), p);
+            add(&mut c, "(plain(m.to_addrs) LIKE ? ESCAPE '\\' OR plain(m.cc_addrs) LIKE ? ESCAPE '\\')", like(x), p);
         }
         for x in &self.subject {
-            add(&mut c, "m.subject LIKE ? ESCAPE '\\'", like(x), p);
+            add(&mut c, "plain(m.subject) LIKE ? ESCAPE '\\'", like(x), p);
         }
         if self.attachment {
             c.push("m.attachments <> '[]'".into());
@@ -192,7 +208,11 @@ impl Filters {
     /// Consulta IMAP SEARCH (sem o prefixo `UID SEARCH`); `None` quando não há critério.
     /// `tem:anexo` vira multipart/mixed no Content-Type, que é o melhor que o IMAP oferece.
     pub fn imap_query(&self) -> Option<String> {
-        let q = |s: &str| format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""));
+        // CR, LF e NUL não cabem numa string entre aspas: encerrariam o comando e abririam outro no servidor.
+        let q = |s: &str| {
+            let s: String = s.chars().map(|c| if matches!(c, '\r' | '\n' | '\0') { ' ' } else { c }).collect();
+            format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+        };
         let mut k: Vec<String> = Vec::new();
         k.extend(self.from.iter().map(|x| format!("FROM {}", q(x))));
         k.extend(self.to.iter().map(|x| format!("OR TO {} CC {}", q(x), q(x))));
@@ -318,6 +338,15 @@ mod tests {
         assert_eq!(parse("").imap_query(), None);
     }
 
+    #[test]
+    fn imap_query_nao_deixa_passar_quebra_de_linha_nem_nulo() {
+        // Uma quebra de linha dentro das aspas encerra o comando e abre outro no servidor.
+        let q = parse("assunto:\"a\r\nA1 DELETE INBOX\"").imap_query().unwrap();
+        assert!(!q.contains(['\r', '\n', '\0']), "consulta com controle: {q:?}");
+        assert_eq!(q.matches('"').count() % 2, 0, "aspas abertas: {q:?}");
+        let q = parse("de:\"x\0y\"").imap_query().unwrap();
+        assert!(!q.contains('\0'), "{q:?}");    }
+
     fn msg(uid: u32, from: &str, subject: &str, date: i64, seen: bool, att: bool) -> NewMessage {
         NewMessage {
             uid, from_name: from.into(), from_addr: format!("{}@x.com", from.to_lowercase()), subject: subject.into(), date,
@@ -326,6 +355,29 @@ mod tests {
             seen, message_id: format!("{uid}@x"), refs: String::new(), reply_addr: String::new(), flagged: false,
             to_addrs: "eu@y.com".into(), cc_addrs: String::new(), ..Default::default()
         }
+    }
+
+    #[test]
+    fn plain_dobra_todos_os_acentos_do_latim_e_a_caixa() {
+        assert_eq!(plain("Ação Çüñ ÀÈÌÕÛ Ÿ Łódź"), "acao cun aeiou y łodz");
+        assert_eq!(plain("São Paulo — Preços €"), "sao paulo — precos €");
+    }
+
+    #[test]
+    fn filtros_assunto_e_de_ignoram_acento_e_caixa() {
+        let mut s = Store::open_in_memory().unwrap();
+        let d = Ymd(2026, 11, 1).unix();
+        s.insert_messages("a", "INBOX", &[
+            msg(1, "João Çelik", "Cotação de preços", d + 100, false, false),
+            msg(2, "Bia", "Reunião", d + 200, false, false),
+        ]).unwrap();
+        let inbox = Scope::Role { role: Role::Inbox };
+        let ids = |q: &str| s.search_filtered(&inbox, &parse(q), 50).unwrap().into_iter().map(|m| m.uid).collect::<Vec<_>>();
+        for q in ["assunto:cotacao", "assunto:COTAÇÃO", "assunto:precos", "assunto:\"cotacao de precos\"", "de:joao", "de:CELIK", "de:çelik"] {
+            assert_eq!(ids(q), [1], "{q}");
+        }
+        assert_eq!(ids("assunto:reuniao"), [2]);
+        assert!(ids("assunto:inexistente").is_empty());
     }
 
     #[test]

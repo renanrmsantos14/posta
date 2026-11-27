@@ -2,9 +2,10 @@ import { PaperPlaneTilt } from "@phosphor-icons/react";
 import type { StoredDraft } from "./api";
 import { shortDate } from "./dates";
 import { whenLabel, type ScheduledItem } from "./productivity";
+import { scheduledStatus } from "./sendReport";
 
 /** Lista "Agendados": mensagens à espera da hora de envio. Clicar (ou Enter) reabre no Composer. */
-export function ScheduledList({ items, onEdit, onCancel }: { items: ScheduledItem[]; onEdit: (s: ScheduledItem) => void; onCancel: (s: ScheduledItem) => void }) {
+export function ScheduledList({ items, onEdit, onCancel, onRetry }: { items: ScheduledItem[]; onEdit: (s: ScheduledItem) => void; onCancel: (s: ScheduledItem) => void; onRetry: (s: ScheduledItem) => void }) {
   if (items.length === 0) return <div className="empty quiet"><p>Nenhuma mensagem agendada</p></div>;
   return (
     <ul className="plain-list" aria-label="Agendados">
@@ -15,8 +16,9 @@ export function ScheduledList({ items, onEdit, onCancel }: { items: ScheduledIte
           <span className="from">{s.to.trim() || "(sem destinatário)"}</span>
           <time className="date" dateTime={new Date(s.send_at * 1000).toISOString()}>{whenLabel(s.send_at)}</time>
           <span className="subject">{s.subject || "(sem assunto)"}</span>
-          <span className="snippet sched-status" data-failed={s.status === "failed" || undefined}>
-            {s.status === "failed" ? `Falhou: ${s.error}` : s.status === "sending" ? "Enviando…" : "Aguardando a hora"}
+          <span className="snippet sched-status" data-failed={s.status === "failed" || s.attempts > 0 || undefined}>
+            {scheduledStatus(s)}
+            {s.status === "failed" && <button type="button" className="btn ghost small" onClick={(e) => { e.stopPropagation(); onRetry(s); }}>Tentar de novo</button>}
             <button type="button" className="btn ghost small" onClick={(e) => { e.stopPropagation(); onCancel(s); }}>Cancelar envio</button>
           </span>
         </li>

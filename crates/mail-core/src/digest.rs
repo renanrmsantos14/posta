@@ -342,7 +342,7 @@ mod tests {
         s.insert_messages("a", "INBOX", &[lida, nm(2, "bia@exemplo.com", "Adiada", NOW - 2 * H)]).unwrap();
         let adiada = s.list("INBOX", 10, 0).unwrap().into_iter().find(|m| m.subject == "Adiada").unwrap().id;
         // Adiada até muito depois do relógio real: não aparece no resumo.
-        s.snooze(&[adiada], 4_102_444_800).unwrap();
+        s.snooze(&[adiada], 4_102_444_800, NOW).unwrap();
         let d = s.digest(NOW, 24).unwrap();
         assert_eq!(subjects(&d.people), ["Lida"]);
         assert!(d.people[0].seen, "lidas entram: o resumo é do dia, não só do que falta ler");

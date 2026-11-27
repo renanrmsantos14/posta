@@ -16,6 +16,7 @@ pub mod send;
 pub mod store;
 pub mod threads;
 pub mod unsubscribe;
+pub mod utf7;
 pub mod vacation;
 
 pub use attachments::Attachment;
@@ -57,3 +58,7 @@ impl Error {
         }
     }
 }
+
+/// Property tests (proptest) dos parsers e da busca; rodam no `cargo test` comum. Veja o cabeçalho do módulo.
+#[cfg(test)]
+mod proptests;

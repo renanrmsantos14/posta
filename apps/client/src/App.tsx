@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowBendUpLeft, ArrowBendDoubleUpLeft, ArrowBendUpRight, ArrowsClockwise, Archive, Copy, FolderOpen, FolderSimple, NotePencil, Star, Tag, Trash, EnvelopeSimple, EnvelopeSimpleOpen, FloppyDisk, Printer, PushPin, Clock, ShieldWarning, Prohibit, FunnelSimple } from "@phosphor-icons/react";
+import { ArrowBendUpLeft, ArrowBendDoubleUpLeft, ArrowBendUpRight, ArrowsClockwise, Archive, Copy, FolderOpen, FolderSimple, NotePencil, Star, Tag, Trash, EnvelopeSimple, EnvelopeSimpleOpen, FloppyDisk, Printer, PushPin, Clock, CalendarBlank, ShieldWarning, Prohibit, FunnelSimple } from "@phosphor-icons/react";
 import { api, isTauri, type Account, type Attachment, type MailDelta, type MessageDetail, type MessageSummary, type OutAttachment, type OutboxItem, type Role, type Settings, type StoredDraft, type UnreadCounts, type UserFolder, type View } from "./api";
 import { AccountDialog } from "./AccountDialog";
 import { colorKey } from "./accountColors";
@@ -7,12 +7,14 @@ import { accountColor, accountLabel, labelKey } from "./accountMeta";
 import { NavDrawer, useDrawer } from "./NavDrawer";
 import { parseCategories } from "./Categories";
 import { FolderDialog, type FolderDialogState } from "./FolderDialog";
+import { WhenDialog } from "./WhenDialog";
 import { SearchDialog, type SearchDialogState } from "./SearchDialog";
 import { newSearchId, parseSavedSearches, serializeSavedSearches, suggestName, type SavedSearch } from "./savedSearches";
 import { OutboxPane, useQueue } from "./Offline";
 import { DraftList, ScheduledList } from "./DraftLists";
 import { TodayPane } from "./TodayPane";
 import type { Digest } from "./digest";
+import { dueMessages, type DueReport } from "./sendReport";
 import { boxView, catView, parseBox, parseCat, roleOf } from "./views";
 import { Composer, type ComposeInit } from "./Composer";
 import { aliasFor, aliasLines, addrOf } from "./aliases";
@@ -29,7 +31,7 @@ import { Resizer } from "./Resizer";
 import { SettingsPage } from "./SettingsPage";
 import { UpdateDialog } from "./UpdateDialog";
 import { autoCheck, checkUpdate, CHECK_EVERY_MS, skip, skipped, type Update } from "./updater";
-import { addFilter, hasFilters, parseRules, parseTemplates, whenLabel, whenPresets, type ScheduledItem } from "./productivity";
+import { addFilter, hasFilters, isPast, newRule, parseRules, parseTemplates, whenLabel, whenPresets, type ScheduledItem } from "./productivity";
 import { AppShell, RouteLayout, PageLayout } from "./layout/primitives";
 import { TopBar, type SearchScope } from "./TopBar";
 import { CommandBar } from "./CommandBar";
@@ -187,6 +189,8 @@ export default function App() {
   const [userFolders, setUserFolders] = useState<UserFolder[]>([]);
   const [folderDialog, setFolderDialog] = useState<FolderDialogState | null>(null);
   const [searchDialog, setSearchDialog] = useState<SearchDialogState | null>(null);
+  /** Mensagens à espera de "Escolher data e hora…" do Adiar. */
+  const [snoozePick, setSnoozePick] = useState<MessageSummary[] | null>(null);
   const [folderDelete, setFolderDelete] = useState<{ node: FolderNode; count: number } | null>(null);
   const [folderBusy, setFolderBusy] = useState(false);
   /** Arrastar da lista para uma pasta: mensagens em arrasto e alvo sob o ponteiro. */
@@ -488,6 +492,26 @@ export default function App() {
     let alive = true;
     import("@tauri-apps/api/event")
       .then(({ listen }) => listen<number>("mail-changed", (e) => { onMailChanged.current(e.payload).catch(() => {}); }))
+      .then((un) => (alive ? (off = un) : un()));
+    return () => { alive = false; off?.(); };
+  }, []);
+
+  // Relatório do relógio de envios agendados: avisa atraso (app fechado na hora), falta de rede e falhas.
+  const onDueReport = useRef((_r: DueReport) => {});
+  onDueReport.current = (r: DueReport) => {
+    refreshScheduled();
+    for (const m of dueMessages(r)) toast(m.text, m.kind);
+  };
+  useEffect(() => {
+    if (!isTauri) {
+      const on = (e: Event) => onDueReport.current((e as CustomEvent<DueReport>).detail);
+      window.addEventListener("mock-due-report", on);
+      return () => window.removeEventListener("mock-due-report", on);
+    }
+    let off: (() => void) | undefined;
+    let alive = true;
+    import("@tauri-apps/api/event")
+      .then(({ listen }) => listen<DueReport>("scheduled-report", (e) => onDueReport.current(e.payload)))
       .then((un) => (alive ? (off = un) : un()));
     return () => { alive = false; off?.(); };
   }, []);
@@ -1156,6 +1180,17 @@ export default function App() {
     }
   }
 
+  /** Falhou de vez: volta à fila e sai na próxima rodada do relógio. */
+  async function retryScheduled(s: ScheduledItem) {
+    try {
+      await api.retryScheduled(s.id);
+      refreshScheduled();
+      toast("Vou tentar enviar de novo agora.", "info");
+    } catch (e) {
+      toast(`Não foi possível tentar de novo: ${e}`, "error");
+    }
+  }
+
   /** Cancelar não perde o texto: a mensagem volta para Rascunhos. */
   async function cancelScheduled(s: ScheduledItem) {
     try {
@@ -1173,6 +1208,7 @@ export default function App() {
 
   /** Esconde até `until`; volta ao topo como não lida. Dá para desfazer logo depois. */
   function snooze(ms: MessageSummary[], until: number) {
+    if (isPast(until)) { toast("Esse horário já passou. Escolha uma hora no futuro.", "error"); return; }
     const ids = ms.map((m) => m.id);
     const undo = takeOutMany(ms);
     api.snooze(ids, until).then(refreshCounts).catch((e) => { undo(); toast(`Não foi possível adiar: ${e}`, "error"); });
@@ -1222,9 +1258,10 @@ export default function App() {
 
   /** Bloquear: regra "remetente → Lixeira", já aplicada à Entrada; "Desfazer" tira só esta regra. */
   function blockSender(m: MessageSummary) {
-    const id = `r${Date.now().toString(36)}`;
+    const rule = newRule({ conditions: [{ field: "from", value: m.from_addr }], actions: [{ kind: "trash", arg: "" }] });
+    const id = rule.id;
     const rules = parseRules(settings.rules);
-    changeSetting("rules", JSON.stringify([...rules, { id, field: "from", contains: m.from_addr, action: "trash", arg: "", enabled: true }]));
+    changeSetting("rules", JSON.stringify([...rules, rule]));
     void api.applyRulesNow().then(() => reload(messages.length)).catch(() => {});
     toast(`${m.from_addr} bloqueado: as mensagens vão para a Lixeira`, "info", { action: { label: "Desfazer", onClick: () => {
       changeSetting("rules", JSON.stringify(parseRules(settingsRef.current.rules).filter((r) => r.id !== id)));
@@ -1234,15 +1271,16 @@ export default function App() {
   /** Cria a regra desligada, com o remetente preenchido, e abre as Regras para escolher a ação. */
   function ruleFromSender(m: MessageSummary) {
     const rules = parseRules(settings.rules);
-    changeSetting("rules", JSON.stringify([...rules, { id: `r${Date.now().toString(36)}`, field: "from", contains: m.from_addr, action: "read", arg: "", enabled: false }]));
+    changeSetting("rules", JSON.stringify([...rules, newRule({ conditions: [{ field: "from", value: m.from_addr }], enabled: false })]));
     setSettingsSection("rules");
     setSettingsOpen(true);
   }
 
-  async function applyRules() {
+  async function applyRules(only?: string) {
     try {
-      const n = await api.applyRulesNow();
-      toast(n ? `${plural(n, "mensagem atualizada", "mensagens atualizadas")} pelas regras` : "Nenhuma mensagem da Entrada casou com as regras", n ? "success" : "info");
+      const { changed: n, missing_folders: missing } = await api.applyRulesNow(only);
+      const gone = missing.length ? ` A pasta ${missing.map((f) => `“${f}”`).join(", ")} não existe: nada foi movido para ela.` : "";
+      toast(`${n ? `${plural(n, "mensagem atualizada", "mensagens atualizadas")} pelas regras` : "Nenhuma mensagem da Entrada casou com as regras"}.${gone}`, missing.length ? "error" : n ? "success" : "info");
       await reload(messages.length);
       api.userFolders().then(setUserFolders).catch(() => {});
     } catch (e) {
@@ -1546,8 +1584,10 @@ export default function App() {
     }
     return items;
   };
-  const snoozeItems = (ms: MessageSummary[]): MenuItem[] =>
-    whenPresets(Math.floor(Date.now() / 1000)).map((p) => ({ label: p.label, onSelect: () => snooze(ms, p.at) }));
+  const snoozeItems = (ms: MessageSummary[]): MenuItem[] => [
+    ...whenPresets(Math.floor(Date.now() / 1000)).map((p) => ({ label: `${p.label} · ${whenLabel(p.at)}`, onSelect: () => snooze(ms, p.at) })),
+    { label: "Escolher data e hora…", icon: CalendarBlank, onSelect: () => setSnoozePick(ms) },
+  ];
   const categoryItems = (ms: MessageSummary[]): MenuItem[] => [
     { label: "Sem categoria", onSelect: () => void applyCategory(ms, null) },
     ...categories.map((c) => ({ label: c.name, onSelect: () => void applyCategory(ms, c.id) })),
@@ -1792,7 +1832,7 @@ export default function App() {
           {showToday ? (
             <TodayPane digest={digest} error={digestError} selectedId={selectedId} onOpen={(m) => { void select(m.id); if (pane === "off") setFull(true); }} onRetry={refreshDigest} />
           ) : showScheduled ? (
-            <ScheduledList items={scheduled} onEdit={editScheduled} onCancel={cancelScheduled} />
+            <ScheduledList items={scheduled} onEdit={editScheduled} onCancel={cancelScheduled} onRetry={retryScheduled} />
           ) : showOutbox ? (
             <OutboxPane items={outbox} accounts={(accounts ?? []).map((a) => a.id)} online={net.online} onChange={refreshOutbox} />
           ) : showDrafts ? (
@@ -1904,6 +1944,7 @@ export default function App() {
       {folderDialog && (
         <FolderDialog state={folderDialog} accounts={accounts ?? []} folders={userFolders} onSubmit={submitFolder} onClose={() => setFolderDialog(null)} />
       )}
+      {snoozePick && <WhenDialog title="Adiar até…" confirm="Adiar" onPick={(at) => snooze(snoozePick, at)} onClose={() => setSnoozePick(null)} />}
       {searchDialog && <SearchDialog state={searchDialog} onSubmit={submitSearch} onClose={() => setSearchDialog(null)} />}
       {folderDelete && (
         <div className="confirm scrim" onMouseDown={(e) => { if (e.target === e.currentTarget && !folderBusy) setFolderDelete(null); }}>

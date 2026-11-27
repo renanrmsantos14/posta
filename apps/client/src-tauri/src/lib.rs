@@ -1442,7 +1442,11 @@ fn sync_inbox_hooked(st: &AppState, store: &mut Store, acc: &ImapAccount) -> Cmd
     if report.fetched > 0 {
         let new = st.store.lk().inbox_after(&acc.id, mark).map_err(err)?;
         auto_reply(st, acc, &new);
-        apply_rules(st, &new);
+        let rules = rules::parse_rules(setting_of(st, "rules").as_deref());
+        let done = apply_rules(st, &new, &rules);
+        for f in &done.missing_folders {
+            eprintln!("regra: a pasta \"{f}\" não existe em {}; a mensagem ficou na Entrada", acc.id);
+        }
     }
     Ok(report)
 }
@@ -1478,16 +1482,25 @@ fn auto_reply(st: &AppState, acc: &ImapAccount, new: &[Candidate]) {
     }
 }
 
-/// Aplica as regras ativas às mensagens e devolve quantas mudaram. Falha em uma ação não impede as outras.
-fn apply_rules(st: &AppState, msgs: &[Candidate]) -> usize {
-    let rules = rules::parse_rules(setting_of(st, "rules").as_deref());
+/// Resultado de aplicar regras: quantas mensagens mudaram e que pastas de destino não existiam.
+#[derive(Serialize, Default)]
+struct RulesReport {
+    changed: usize,
+    /// Pastas citadas por regras que não existem na conta da mensagem (a mensagem não é movida).
+    missing_folders: Vec<String>,
+}
+
+/// Aplica as regras às mensagens e devolve quantas mudaram. Falha em uma ação não impede as outras.
+fn apply_rules(st: &AppState, msgs: &[Candidate], rules: &[rules::Rule]) -> RulesReport {
+    let set = rules::Ruleset::new(rules);
     let (mut read, mut star, mut archive, mut trash) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     let mut cats: HashMap<String, Vec<i64>> = HashMap::new();
     let mut moves: HashMap<(String, String), Vec<i64>> = HashMap::new();
     let mut touched: HashSet<i64> = HashSet::new();
+    let mut missing: Vec<String> = Vec::new();
     let user_folders = st.store.lk().user_folders().unwrap_or_default();
     for c in msgs {
-        let plan = rules::plan(&rules, c);
+        let plan = set.plan(c);
         if plan.is_empty() {
             continue;
         }
@@ -1504,8 +1517,17 @@ fn apply_rules(st: &AppState, msgs: &[Candidate]) -> usize {
         match plan.move_to {
             _ if plan.trash => trash.push(c.id),
             Some(f) if user_folders.iter().any(|u| u.account == c.account && u.name == f) => moves.entry((c.account.clone(), f)).or_default().push(c.id),
-            _ if plan.archive => archive.push(c.id),
-            _ => {}
+            // Pasta inexistente: não move (nem arquiva no lugar); as demais ações da regra valem.
+            Some(f) => {
+                if !missing.contains(&f) {
+                    missing.push(f);
+                }
+                if plan.archive {
+                    archive.push(c.id);
+                }
+            }
+            None if plan.archive => archive.push(c.id),
+            None => {}
         }
     }
     let log = |what: &str, r: CmdResult<()>| {
@@ -1532,19 +1554,44 @@ fn apply_rules(st: &AppState, msgs: &[Candidate]) -> usize {
     if !trash.is_empty() {
         log("lixeira", move_to_role(st, &trash, Role::Trash));
     }
-    touched.len()
+    RulesReport { changed: touched.len(), missing_folders: missing }
 }
 
-/// "Aplicar agora à Entrada": roda as regras sobre tudo o que já está na Entrada. Devolve quantas mensagens mudaram.
+/// "Aplicar agora": roda as regras sobre tudo o que já está na Entrada (só a regra `only`, se informada).
 #[tauri::command]
-async fn apply_rules_now(app: AppHandle) -> CmdResult<usize> {
+async fn apply_rules_now(app: AppHandle, only: Option<String>) -> CmdResult<RulesReport> {
     blocking(app, move |st| {
-        let mut changed = 0;
+        let mut rules = rules::parse_rules(setting_of(st, "rules").as_deref());
+        if let Some(id) = &only {
+            rules.retain(|r| &r.id == id);
+        }
+        let mut total = RulesReport::default();
         for acc in st.accounts()? {
             let msgs = st.store.lk().inbox_after(&acc.id, 0).map_err(err)?;
-            changed += apply_rules(st, &msgs);
+            let done = apply_rules(st, &msgs, &rules);
+            total.changed += done.changed;
+            for f in done.missing_folders {
+                if !total.missing_folders.contains(&f) {
+                    total.missing_folders.push(f);
+                }
+            }
         }
-        Ok(changed)
+        Ok(total)
+    })
+    .await
+}
+
+/// Quantas mensagens da Entrada a regra (ainda não salva) pegaria. Não altera nada.
+#[tauri::command]
+async fn count_rule_matches(app: AppHandle, rule: rules::Rule) -> CmdResult<usize> {
+    blocking(app, move |st| {
+        let rules = [rule];
+        let set = rules::Ruleset::new(&rules);
+        let mut n = 0;
+        for acc in st.accounts()? {
+            n += set.count_matching(&st.store.lk().inbox_after(&acc.id, 0).map_err(err)?);
+        }
+        Ok(n)
     })
     .await
 }
@@ -1601,7 +1648,7 @@ async fn search_server(app: AppHandle, scope: search::Scope, query: String) -> C
 /// Esconde as mensagens até `until` (Unix, segundos); depois voltam ao topo como não lidas.
 #[tauri::command]
 async fn snooze_messages(app: AppHandle, ids: Vec<i64>, until: i64) -> CmdResult<()> {
-    blocking(app, move |state| state.store.lk().snooze(&ids, until).map_err(err)).await
+    blocking(app, move |state| state.store.lk().snooze(&ids, until, now_ts()).map_err(err)).await
 }
 
 #[tauri::command]
@@ -1676,6 +1723,12 @@ async fn take_scheduled(app: AppHandle, id: String) -> CmdResult<Option<Schedule
     .await
 }
 
+/// "Tentar de novo" num agendado que ficou como falha: volta à fila e sai na próxima rodada do relógio.
+#[tauri::command]
+async fn retry_scheduled(app: AppHandle, id: String) -> CmdResult<bool> {
+    blocking(app, move |state| state.store.lk().scheduled_retry(&id, now_ts()).map_err(err)).await
+}
+
 /// Adiadas que venceram voltam não lidas (a marca de lida também sai no servidor); devolve se algo mudou.
 fn wake_snoozed(st: &AppState) -> bool {
     let ids = st.store.lk().wake_due(now_ts()).unwrap_or_default();
@@ -1689,44 +1742,53 @@ fn wake_snoozed(st: &AppState) -> bool {
 }
 
 /// Envia o que está agendado e venceu. Falha tenta de novo em 2 min; na terceira fica como falha na lista.
-fn send_due(st: &AppState) -> bool {
+fn send_due(st: &AppState) -> mail_core::later::DueReport {
+    use mail_core::later::{DueOutcome, DueReport};
     let now = now_ts();
     let due = st.store.lk().claim_due(now).unwrap_or_default();
+    let mut report = DueReport::default();
     for s in &due {
-        let sent = (|| -> CmdResult<()> {
+        let outcome = (|| -> CmdResult<DueOutcome> {
             let reply = match s.reply_to {
                 Some(r) => st.store.lk().reply_ref(r).map_err(err)?,
                 None => None,
             };
             let acc = st.account_with_password(&s.account)?;
             match send::send(&acc, &s.out, reply.as_ref()) {
-                Ok(_) => Ok(()),
+                Ok(_) => Ok(DueOutcome::Sent),
                 // Sem rede: passa para a Caixa de saída offline, que envia quando a conexão volta (um único caminho, sem duplicar).
                 Err(e) if e.is_network() && !reachable(st, &s.account) => {
-                    st.store.lk().enqueue_send(&s.account, &s.out, reply.as_ref()).map(|_| ()).map_err(err)
+                    st.store.lk().enqueue_send(&s.account, &s.out, reply.as_ref()).map_err(err)?;
+                    Ok(DueOutcome::Offline)
                 }
                 Err(e) => Err(err(e)),
             }
-        })();
-        let store = st.store.lk();
-        match sent {
-            Ok(()) => store.scheduled_done(&s.id).ok(),
-            Err(e) => store.scheduled_failed(&s.id, &e, now).ok(),
-        };
+        })()
+        .unwrap_or_else(DueOutcome::Failed);
+        st.store.lk().settle_due(s, outcome, now, &mut report).ok();
     }
-    !due.is_empty()
+    report
 }
 
-/// Relógio do app: a cada 20 s acorda adiadas e envia agendados (só roda com o app aberto).
+/// Relógio do app: envia o agendado que já venceu logo ao abrir (o app pode ter ficado fechado na hora) e,
+/// depois, a cada 20 s acorda adiadas e envia agendados (só roda com o app aberto).
+/// Sai um aviso (`scheduled-report`) quando algo saiu atrasado, foi para a caixa de saída ou falhou.
 fn start_scheduler(app: AppHandle) {
     app.state::<AppState>().store.lk().requeue_sending().ok();
-    std::thread::spawn(move || loop {
-        std::thread::sleep(Duration::from_secs(20));
-        let st = app.state::<AppState>();
-        let woke = wake_snoozed(&st);
-        let sent = send_due(&st);
-        if woke || sent {
-            app.emit("mail-changed", 0).ok();
+    std::thread::spawn(move || {
+        // Dá um instante para o resto do app subir (contas, janela) antes da primeira rodada.
+        std::thread::sleep(Duration::from_secs(3));
+        loop {
+            let st = app.state::<AppState>();
+            let woke = wake_snoozed(&st);
+            let report = send_due(&st);
+            if woke || !report.is_empty() {
+                app.emit("mail-changed", 0).ok();
+            }
+            if report.late > 0 || report.offline > 0 || report.retrying > 0 || report.failed > 0 {
+                app.emit("scheduled-report", &report).ok();
+            }
+            std::thread::sleep(Duration::from_secs(20));
         }
     });
 }
@@ -1881,6 +1943,7 @@ pub fn run() {
             set_autostart,
             request_notify_permission,
             apply_rules_now,
+            count_rule_matches,
             search_filtered,
             search_server,
             snooze_messages,
@@ -1889,7 +1952,8 @@ pub fn run() {
             schedule_send,
             list_scheduled,
             daily_digest,
-            take_scheduled
+            take_scheduled,
+            retry_scheduled
         ]))
         .build(tauri::generate_context!())
         .expect("erro ao iniciar o RenanMail")

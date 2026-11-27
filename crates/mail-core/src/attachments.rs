@@ -94,7 +94,8 @@ pub fn to_outgoing(raw: &[u8], listed: &[Attachment]) -> Vec<crate::send::OutAtt
 pub fn safe_name(name: &str) -> String {
     let base = name.rsplit(['/', '\\']).next().unwrap_or("");
     let clean: String = base.chars().map(|c| if c.is_control() || "<>:\"|?*".contains(c) { '_' } else { c }).collect();
-    let clean = clean.trim().trim_matches('.').to_string();
+    // Ponto e espaço nas pontas: o Windows os descarta ao gravar, e `.nome` é arquivo oculto no Linux.
+    let clean = clean.trim_matches(|c: char| c == '.' || c.is_whitespace()).to_string();
     if clean.is_empty() {
         "anexo".into()
     } else {
@@ -160,5 +161,9 @@ Content-Type: multipart/mixed; boundary=\"m\"\r\n\r\n\
         assert_eq!(safe_name("../../etc/passwd"), "passwd");
         assert_eq!(safe_name("a:b?.txt"), "a_b_.txt");
         assert_eq!(safe_name(".."), "anexo");
+        // O Windows apaga ponto e espaço no fim do nome: o gravado ficaria diferente do mostrado.
+        assert_eq!(safe_name("a ."), "a");
+        assert_eq!(safe_name("relatório . "), "relatório");
+        assert_eq!(safe_name(" . "), "anexo");
     }
 }

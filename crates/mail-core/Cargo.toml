@@ -10,7 +10,7 @@ rustls-connector = "0.19.2"
 socket2 = "0.6"
 lettre = { version = "0.11.23", default-features = false, features = ["smtp-transport", "pool", "builder", "rustls", "ring", "rustls-native-certs", "hostname"] }
 mail-parser = "1.0.1"
-rusqlite = { version = "0.41.1", features = ["bundled"] }
+rusqlite = { version = "0.41.1", features = ["bundled", "functions"] }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 base64 = "0.22"
@@ -19,3 +19,18 @@ serde_json = "1"
 sha2 = "0.10"
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 url = "2"
+
+[dev-dependencies]
+proptest = "1.12"
+
+[features]
+# Testes de integração contra um servidor IMAP real e local (`pnpm test:imap` sobe o GreenMail).
+imap-it = []
+
+[[test]]
+name = "imap_greenmail"
+required-features = ["imap-it"]
+
+[[test]]
+name = "imap_it"
+required-features = ["imap-it"]

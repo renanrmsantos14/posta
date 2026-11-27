@@ -1,6 +1,6 @@
 // Dados de exemplo para rodar a UI no navegador (pnpm dev), sem Tauri e sem rede.
-import type { Account, CheckFailure, CheckStep, Detection, FailKind, Contact, Draft, FlushReport, MailDelta, MessagePage, OutboxItem, QueueStatus, Provider, OauthConfig, OauthConfigView, MessageDetail, MessageSummary, NewAccount, Unsubscribe, OutAttachment, Role, ScheduledEdit, SendReport, Settings, StoredDraft, SyncResult, UnreadAll, UserFolder, View, DragFiles, FolderUnread } from "./api";
-import { parseRules, type ScheduledItem } from "./productivity";
+import type { RulesReport, Account, CheckFailure, CheckStep, Detection, FailKind, Contact, Draft, FlushReport, MailDelta, MessagePage, OutboxItem, QueueStatus, Provider, OauthConfig, OauthConfigView, MessageDetail, MessageSummary, NewAccount, Unsubscribe, OutAttachment, Role, ScheduledEdit, SendReport, Settings, StoredDraft, SyncResult, UnreadAll, UserFolder, View, DragFiles, FolderUnread } from "./api";
+import { parseRules, planFor, ruleMatches, type Rule, type RuleTarget, type ScheduledItem } from "./productivity";
 import type { Digest } from "./digest";
 import { parseBox, parseCat } from "./views";
 
@@ -188,6 +188,9 @@ const leaf = (name: string) => {
   return t;
 };
 
+/** Campos que as regras olham. */
+const target = (m: MockMessage): RuleTarget => ({ from_name: m.from_name, from_addr: m.from_addr, subject: m.subject, to_addrs: m.to_addrs, cc_addrs: m.cc_addrs, hasAttachment: m.attachments.length > 0 });
+
 const norm = (s: string) => s.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase();
 const withCount = <T extends MockMessage>(m: T) => ({
   ...m,
@@ -284,14 +287,34 @@ const serverOnly: MockMessage[] = [
   seen: true, flagged: false, reply_addr: String(from_addr), attachments: [], to_addrs: "renan@exemplo.com", cc_addrs: "", role: "inbox" as Role, thread_id: 0,
 }));
 
-/** Agendados do mock; a mensagem sai quando a hora chega (como o relógio do app). */
+/** Agendados do mock; a mensagem sai quando a hora chega (como o relógio do app).
+ *  Endereço com "semrede" simula servidor fora do ar: tenta de novo a cada 2 min e na terceira fica como falha. */
 let scheduled: { item: ScheduledItem; draft: Draft }[] = [];
+const RETRY_S = 120;
+const MAX_TRIES = 3;
 setInterval(() => {
   const t = Math.floor(Date.now() / 1000);
-  const due = scheduled.filter((s) => s.item.send_at <= t);
+  const due = scheduled.filter((s) => s.item.status === "pending" && s.item.send_at <= t);
   if (!due.length) return;
-  scheduled = scheduled.filter((s) => s.item.send_at > t);
-  for (const { draft } of due) {
+  const report = { sent: 0, late: 0, offline: 0, retrying: 0, failed: 0, last_error: null as string | null };
+  for (const s of due) {
+    const { draft, item } = s;
+    if (draft.to.includes("semrede")) {
+      item.attempts += 1;
+      item.error = "sem conexão com o servidor";
+      if (item.attempts >= MAX_TRIES) {
+        item.status = "failed";
+        report.failed += 1;
+        report.last_error = `${item.subject || "(sem assunto)"}: ${item.error}`;
+      } else {
+        item.send_at = t + RETRY_S;
+        report.retrying += 1;
+      }
+      continue;
+    }
+    scheduled = scheduled.filter((x) => x !== s);
+    report.sent += 1;
+    if (t - item.send_at > 120) report.late += 1;
     const id = Math.max(...messages.map((m) => m.id)) + 1;
     messages.push({
       id, account: draft.account, uid: id, from_name: "Renan", from_addr: "renan@exemplo.com", subject: draft.subject, date: t,
@@ -299,6 +322,7 @@ setInterval(() => {
       attachments: [], to_addrs: draft.to, cc_addrs: "", role: "sent", thread_id: 0,
     });
   }
+  if (report.late || report.retrying || report.failed) window.dispatchEvent(new CustomEvent("mock-due-report", { detail: report }));
 }, 2000);
 
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -623,29 +647,34 @@ export const mockApi = {
     for (const m of found) { serverOnly.splice(serverOnly.indexOf(m), 1); messages.push(m); }
     return messages.filter((m) => inView(m, view) && matchFilters(m, query)).sort(byTop).map(summary);
   },
-  /** Aplica `settings.rules` à Entrada; devolve quantas mensagens mudaram. */
-  async applyRulesNow(): Promise<number> {
+  /** Aplica `settings.rules` à Entrada (só a regra `only`, se informada); devolve quantas mensagens mudaram. */
+  async applyRulesNow(only?: string): Promise<RulesReport> {
     await wait(300);
-    const rules = parseRules(settings.rules).filter((r) => r.enabled && r.contains.trim());
+    const rules = parseRules(settings.rules).filter((r) => !only || r.id === only);
+    const missing: string[] = [];
     let changed = 0;
     for (const m of messages.filter((x) => x.role === "inbox" && !snoozed(x))) {
-      let hit = false;
-      for (const r of rules) {
-        const hay = r.field === "from" ? `${m.from_name} ${m.from_addr}` : r.field === "to" ? `${m.to_addrs} ${m.cc_addrs}` : m.subject;
-        if (!norm(hay).includes(norm(r.contains))) continue;
-        hit = true;
-        if (r.action === "read") m.seen = true;
-        else if (r.action === "star") m.flagged = true;
-        else if (r.action === "category") m.category = r.arg;
-        else if (r.action === "move" && userFolders.some((f) => f.account === m.account && f.name === r.arg)) { m.role = null; m.box = r.arg; }
-        else if (r.action === "archive") m.role = "archive";
-      }
-      if (hit) changed++;
+      const p = planFor(rules, target(m));
+      if (!p.read && !p.star && !p.archive && !p.trash && !p.category && !p.moveTo) continue;
+      changed++;
+      if (p.read) m.seen = true;
+      if (p.star) m.flagged = true;
+      if (p.category) m.category = p.category;
+      if (p.trash) { m.role = "trash"; continue; }
+      if (p.moveTo && userFolders.some((f) => f.account === m.account && f.name === p.moveTo)) { m.role = null; m.box = p.moveTo; }
+      else if (p.moveTo && !missing.includes(p.moveTo)) { missing.push(p.moveTo); if (p.archive) m.role = "archive"; }
+      else if (p.archive) m.role = "archive";
     }
-    return changed;
+    return { changed, missing_folders: missing };
+  },
+  /** Quantas mensagens da Entrada a regra (ainda não salva) pegaria. */
+  async countRuleMatches(rule: Rule): Promise<number> {
+    await wait(120);
+    return messages.filter((x) => x.role === "inbox" && !snoozed(x) && ruleMatches({ ...rule, enabled: true }, target(x))).length;
   },
   async snooze(ids: number[], until: number): Promise<void> {
     await wait(100);
+    if (until <= Math.floor(Date.now() / 1000)) throw "o horário já passou";
     messages.forEach((m) => { if (ids.includes(m.id)) { m.snoozeUntil = until; m.woke = false; } });
   },
   async unsnooze(ids: number[]): Promise<void> {
@@ -657,7 +686,7 @@ export const mockApi = {
   },
   async scheduleSend(id: string, sendAt: number, draft: Draft): Promise<void> {
     if (draft.to.includes("erro")) throw "endereço inválido";
-    const item: ScheduledItem = { id, account: draft.account, send_at: sendAt, status: "pending", error: "", to: draft.to, subject: draft.subject };
+    const item: ScheduledItem = { id, account: draft.account, send_at: sendAt, status: "pending", error: "", attempts: 0, to: draft.to, subject: draft.subject };
     scheduled = [...scheduled.filter((s) => s.item.id !== id), { item, draft }];
   },
   async dailyDigest(): Promise<Digest> {
@@ -672,6 +701,12 @@ export const mockApi = {
   },
   async listScheduled(): Promise<ScheduledItem[]> {
     return scheduled.map((s) => s.item).sort((a, b) => a.send_at - b.send_at);
+  },
+  async retryScheduled(id: string): Promise<boolean> {
+    const s = scheduled.find((x) => x.item.id === id && x.item.status === "failed");
+    if (!s) return false;
+    Object.assign(s.item, { status: "pending", attempts: 0, error: "", send_at: Math.floor(Date.now() / 1000) });
+    return true;
   },
   async takeScheduled(id: string): Promise<ScheduledEdit | null> {
     const s = scheduled.find((x) => x.item.id === id);

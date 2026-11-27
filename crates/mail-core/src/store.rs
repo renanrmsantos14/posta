@@ -1,12 +1,13 @@
 //! Cópia local da caixa em SQLite. Toda leitura da UI vem daqui, nunca da rede.
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 use crate::attachments::Attachment;
 use crate::folders::{Folder, Role};
 use crate::threads;
+use crate::utf7;
 use crate::Result;
 
 /// O banco é só uma cópia do servidor: mudou o esquema, apaga e sincroniza de novo.
@@ -177,7 +178,7 @@ const FTS_CREATE: &str = "CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING 
 
 /// Revisão das colunas/índices/tabelas adicionadas sem recriar o banco (guardada em `application_id`).
 /// Banco já na revisão pula todo o esquema ao abrir.
-const SCHEMA_REV: i32 = 0x5054_0005;
+const SCHEMA_REV: i32 = 0x5054_0006;
 
 /// Mensagem já interpretada, pronta para gravar.
 #[derive(Debug, Clone, Default)]
@@ -585,6 +586,12 @@ impl Store {
         Self::init(Connection::open(path)?)
     }
 
+    /// Transação de escrita que já pega o bloqueio de gravação. Começar deferida e ler antes de gravar faz o SQLite
+    /// devolver `database is locked` na hora (sem esperar o `busy_timeout`) se outro processo gravar no meio.
+    fn write_tx(&self) -> Result<rusqlite::Transaction<'_>> {
+        Ok(rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?)
+    }
+
     /// Devolve o WAL ao arquivo principal sem bloquear leitores. O auto-checkpoint só dispara em ~1 GiB (o fsync dele
     /// no meio da carga inicial custava ~1,5 s em 50k mensagens), então quem termina uma sync chama isto.
     pub fn checkpoint(&self) {
@@ -597,6 +604,13 @@ impl Store {
 
     /// Ajustes por conexão (não persistem no arquivo, exceto o modo WAL): cache e mmap grandes, WAL e fsync relaxado.
     fn tune(conn: &Connection) -> Result<()> {
+        // `plain(texto)`: minúsculas e sem acento, para os filtros `assunto:`/`de:`/`para:` (o LIKE do SQLite só dobra ASCII).
+        conn.create_scalar_function(
+            "plain",
+            1,
+            rusqlite::functions::FunctionFlags::SQLITE_UTF8 | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
+            |ctx| Ok(ctx.get::<Option<String>>(0)?.map(|s| crate::search::plain(&s))),
+        )?;
         // No celular o app abre várias conexões (UI, sync, IDLE por conta, pré-busca, fila): 64 MB de cache e 256 MB
         // de mmap em cada uma pesam na memória e o Android passa a matar ou estrangular o processo.
         #[cfg(target_os = "android")]
@@ -725,6 +739,38 @@ impl Store {
         for account in pending {
             self.rebuild_threads(&account)?;
         }
+        self.decode_folder_names()?;
+        Ok(())
+    }
+
+    /// Nomes de pasta gravados antes da tradução UTF-7 (RFC 3501) estão crus (`Pre&AOc-os`): passam a ficar legíveis.
+    fn decode_folder_names(&self) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        for (table, col, filter) in [
+            ("messages", "mailbox", "1"),
+            ("mailbox_state", "mailbox", "1"),
+            ("folders", "name", "1"),
+            ("user_folders", "name", "1"),
+            ("pending_ops", "mailbox", "1"),
+            ("pending_ops", "arg", "kind IN ('move', 'copy')"),
+        ] {
+            let raw: Vec<String> = {
+                let mut st = tx.prepare(&format!("SELECT DISTINCT {col} FROM {table} WHERE {col} LIKE '%&%' AND {filter}"))?;
+                let rows = st.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+                rows
+            };
+            for name in raw {
+                let decoded = utf7::decode(&name);
+                if decoded != name {
+                    // OR IGNORE: se a pasta já existe com o nome legível, a linha crua fica como está.
+                    tx.execute(
+                        &format!("UPDATE OR IGNORE {table} SET {col} = ?1 WHERE {col} = ?2 AND {filter}"),
+                        params![decoded, name],
+                    )?;
+                }
+            }
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -734,7 +780,7 @@ impl Store {
             let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
             rows
         };
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = self.write_tx()?;
         {
             let mut up = tx.prepare("UPDATE messages SET subject_key = ?1, subject_re = ?2 WHERE id = ?3")?;
             for (id, subject) in rows {
@@ -746,7 +792,7 @@ impl Store {
     }
 
     fn backfill_refs(&self) -> Result<()> {
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = self.write_tx()?;
         {
             let mut st = tx.prepare("SELECT id, account, refs FROM messages WHERE refs <> ''")?;
             let rows: Vec<(i64, String, String)> =
@@ -773,7 +819,7 @@ impl Store {
                 contact_hits(&name, &from, &to, &cc, date, &mut acc);
             }
         }
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = self.write_tx()?;
         Self::upsert_contacts(&tx, &acc)?;
         Ok(tx.commit()?)
     }
@@ -813,7 +859,7 @@ impl Store {
             .map(|(id, message_id, refs, subject, _)| threads::Entry { id: *id, message_id, refs, subject })
             .collect();
         let keys = threads::group(&entries);
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = self.write_tx()?;
         {
             let mut up = tx.prepare_cached("UPDATE messages SET thread_id = ?1 WHERE id = ?2")?;
             for ((id, _, _, _, old), key) in rows.iter().zip(keys) {
@@ -853,7 +899,7 @@ impl Store {
         if self.uid_validity(account, mailbox)? == Some(value) {
             return Ok(());
         }
-        let tx = self.conn.transaction()?;
+        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute(
             "DELETE FROM messages WHERE account = ?1 AND mailbox = ?2",
             params![account, mailbox],
@@ -881,7 +927,7 @@ impl Store {
         if msgs.is_empty() {
             return Ok(Vec::new());
         }
-        let tx = self.conn.transaction()?;
+        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let max_before: i64 = tx.query_row("SELECT COALESCE(MAX(id), 0) FROM messages", [], |r| r.get(0))?;
         let mut ids = Vec::with_capacity(msgs.len());
         let mut contacts = std::collections::HashMap::new();
@@ -1014,7 +1060,7 @@ impl Store {
     /// Como `apply_server_state`, mas só vale para UIDs a partir de `lo`: o servidor informou a faixa `lo:*`
     /// e o que é mais antigo fica como está. Sync incremental sem CONDSTORE usa isto numa janela recente.
     pub fn apply_server_state_from(&mut self, account: &str, mailbox: &str, lo: u32, server: &[(u32, bool, bool)]) -> Result<Delta> {
-        let tx = self.conn.transaction()?;
+        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute_batch("CREATE TEMP TABLE IF NOT EXISTS server_uids (uid INTEGER PRIMARY KEY, seen INTEGER, flagged INTEGER); DELETE FROM server_uids;")?;
         {
             let mut ins = tx.prepare_cached("INSERT OR REPLACE INTO server_uids (uid, seen, flagged) VALUES (?1, ?2, ?3)")?;
@@ -1052,7 +1098,7 @@ impl Store {
 
     /// Sync incremental: aplica só as flags que o servidor reportou como alteradas. Devolve os ids que mudaram de fato.
     pub fn apply_flag_changes(&mut self, account: &str, mailbox: &str, changes: &[(u32, bool, bool)]) -> Result<Vec<i64>> {
-        let tx = self.conn.transaction()?;
+        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let mut changed = Vec::new();
         {
             let mut up = tx.prepare_cached(
@@ -1070,7 +1116,7 @@ impl Store {
 
     /// Sync incremental: remove as UIDs que o servidor disse que sumiram (VANISHED). Devolve os ids removidos.
     pub fn remove_uids(&mut self, account: &str, mailbox: &str, uids: &[u32]) -> Result<Vec<i64>> {
-        let tx = self.conn.transaction()?;
+        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let mut removed = Vec::new();
         {
             let mut del = tx.prepare_cached("DELETE FROM messages WHERE account = ?1 AND mailbox = ?2 AND uid = ?3 RETURNING id")?;
@@ -1320,7 +1366,7 @@ impl Store {
     }
 
     pub fn set_folders(&mut self, account: &str, folders: &[Folder]) -> Result<()> {
-        let tx = self.conn.transaction()?;
+        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute("DELETE FROM folders WHERE account = ?1", params![account])?;
         for f in folders {
             tx.execute(
@@ -1567,7 +1613,7 @@ impl Store {
 
     /// Troca a lista de pastas do usuário de uma conta (o que o servidor acabou de listar).
     pub fn set_user_folders(&mut self, account: &str, names: &[String], delimiter: &str) -> Result<()> {
-        let tx = self.conn.transaction()?;
+        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute("DELETE FROM user_folders WHERE account = ?1", params![account])?;
         for n in names {
             tx.execute("INSERT INTO user_folders (account, name, delimiter) VALUES (?1, ?2, ?3)", params![account, n, delimiter])?;
@@ -1601,7 +1647,7 @@ impl Store {
     pub fn rename_box(&mut self, account: &str, old: &str, new: &str, delimiter: &str) -> Result<()> {
         // Sem separador não há subpastas: o prefixo impossível não casa com nada.
         let prefix = if delimiter.is_empty() { "\u{0}".to_string() } else { format!("{old}{delimiter}") };
-        let tx = self.conn.transaction()?;
+        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         for (table, col) in [("messages", "mailbox"), ("mailbox_state", "mailbox"), ("user_folders", "name")] {
             tx.execute(
                 &format!(
@@ -1616,7 +1662,7 @@ impl Store {
 
     /// Depois de excluir no servidor: apaga a cópia local das pastas e das mensagens delas.
     pub fn drop_boxes(&mut self, account: &str, names: &[String]) -> Result<()> {
-        let tx = self.conn.transaction()?;
+        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         for n in names {
             tx.execute("DELETE FROM messages WHERE account = ?1 AND mailbox = ?2", params![account, n])?;
             tx.execute("DELETE FROM mailbox_state WHERE account = ?1 AND mailbox = ?2", params![account, n])?;
@@ -1648,7 +1694,7 @@ impl Store {
 
     /// Aplica a categoria (ou tira, com `None`) às mensagens. Só local: não muda nada no servidor.
     pub fn set_category(&mut self, ids: &[i64], category: Option<&str>) -> Result<()> {
-        let tx = self.conn.transaction()?;
+        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         for id in ids {
             let found: Option<(String, String)> = tx
                 .query_row(
@@ -1707,7 +1753,7 @@ impl Store {
 
     /// Apaga tudo o que é local de uma conta: mensagens (e FTS), estado das pastas, pastas, rascunhos e assinatura.
     pub fn remove_account(&mut self, account: &str) -> Result<()> {
-        let tx = self.conn.transaction()?;
+        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         for sql in [
             "DELETE FROM messages WHERE account = ?1",
             "DELETE FROM mailbox_state WHERE account = ?1",
@@ -1782,6 +1828,34 @@ mod tests {
     }
 
     #[test]
+    fn banco_com_nomes_de_pasta_crus_em_utf7_ganha_os_nomes_legiveis() {
+        let mut s = Store::open_in_memory().unwrap();
+        let cru = "Pre&AOc-os e Cota&AOcA9Q-es";
+        s.set_uid_validity("a", cru, 7).unwrap();
+        s.insert_messages("a", cru, &[msg(1, "Tabela", "x", 100)]).unwrap();
+        s.insert_messages("a", "INBOX", &[msg(1, "Oi", "x", 100)]).unwrap();
+        s.set_user_folders("a", &[cru.to_string(), "R&-D".to_string(), "Simples".to_string()], "/").unwrap();
+        s.enqueue_op("a", "INBOX", 1, crate::outbox::OpKind::Move, cru).unwrap();
+        s.enqueue_op("a", "INBOX", 2, crate::outbox::OpKind::Seen, "").unwrap();
+        // Banco criado antes da tradução: os nomes ficaram como o servidor os mandou.
+        s.conn.pragma_update(None, "application_id", SCHEMA_REV - 1).unwrap();
+        let s = Store::init(s.conn).unwrap();
+
+        let legivel = "Preços e Cotações";
+        let boxes: Vec<String> = s.conn.prepare("SELECT DISTINCT mailbox FROM messages ORDER BY 1").unwrap()
+            .query_map([], |r| r.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+        assert_eq!(boxes, ["INBOX", legivel]);
+        let st: String = s.conn.query_row("SELECT mailbox FROM mailbox_state", [], |r| r.get(0)).unwrap();
+        assert_eq!(st, legivel);
+        let mut nomes: Vec<String> = s.user_folders().unwrap().into_iter().map(|f| f.name).collect();
+        nomes.sort();
+        assert_eq!(nomes, [legivel, "R&D", "Simples"]);
+        let ops = s.pending_ops().unwrap();
+        assert_eq!(ops[0].arg, legivel);
+        assert_eq!(ops[1].arg, "");
+    }
+
+    #[test]
     fn cancelamento_guardado_no_sync_e_banco_antigo_fica_desconhecido() {
         let mut s = Store::open_in_memory().unwrap();
         let mut com = msg(1, "Boletim", "x", 100);
@@ -1848,7 +1922,7 @@ mod tests {
         let msgs: Vec<_> = (1..=30u32).map(|u| msg(u, &format!("m{u}"), "", 1000 + i64::from(u))).collect();
         s.insert_messages("a", "INBOX", &msgs).unwrap();
         let all: Vec<i64> = s.list_box_page("a", "INBOX", None, 100).unwrap().items.iter().map(|m| m.id).collect();
-        s.snooze(&[all[1]], i64::MAX / 2).unwrap();
+        s.snooze(&[all[1]], i64::MAX / 2, 0).unwrap();
         let got = s.summaries(&[all[0], all[1]]).unwrap();
         assert_eq!(got.iter().map(|m| m.id).collect::<Vec<_>>(), [all[0]], "adiada sai, como no delta");
         // O cursor guarda posição (fixada, data, id), não a linha: apagar a linha do cursor não invalida a próxima página.
@@ -2410,7 +2484,7 @@ mod tests {
         s.insert_messages("a", "INBOX", &msgs).unwrap();
         let ids: Vec<i64> = s.list("INBOX", 500, 0).unwrap().iter().map(|m| m.id).collect();
         s.set_pinned(&[ids[40], ids[99]], true).unwrap();
-        s.snooze(&[ids[3], ids[60]], i64::MAX / 2).unwrap();
+        s.snooze(&[ids[3], ids[60]], i64::MAX / 2, 0).unwrap();
         let expected: Vec<i64> = s.list_folder(Role::Inbox, 500, 0).unwrap().iter().map(|m| m.id).collect();
         assert_eq!(expected.len(), 118, "os adiados saem da lista");
         assert!(s.list_folder(Role::Inbox, 2, 0).unwrap().iter().all(|m| m.pinned), "fixadas primeiro");
@@ -2569,5 +2643,39 @@ mod tests {
         assert_eq!(again.list("INBOX", 10, 0).unwrap().len(), 3);
         // As colunas de sync ficam zeradas num banco que nunca sincronizou com a versão nova.
         assert_eq!(again.sync_state("a", "INBOX").unwrap().map(|x| x.highest_modseq), None);
+    }
+
+    /// O app e o worker do Android gravam no mesmo arquivo. Transação que começa lendo e só depois grava (deferida)
+    /// recebe `database is locked` na hora, sem esperar o `busy_timeout`, quando o outro grava no meio.
+    #[test]
+    fn dois_gravadores_no_mesmo_arquivo_esperam_um_ao_outro_e_nao_dao_database_is_locked() {
+        let path = std::env::temp_dir().join(format!("posta-dois-gravadores-{}.sqlite", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        Store::open(&path).unwrap();
+        let writers: Vec<_> = (0..2u32)
+            .map(|w| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    let mut s = Store::open(&path).unwrap();
+                    for lote in 0..150u32 {
+                        let msgs: Vec<_> = (0..5u32)
+                            .map(|i| {
+                                let uid = w * 100_000 + lote * 10 + i + 1;
+                                msg(uid, &format!("Lote {w}-{lote}-{i}"), "corpo", i64::from(uid))
+                            })
+                            .collect();
+                        s.insert_messages(&format!("conta{w}"), "INBOX", &msgs).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for w in writers {
+            w.join().expect("um gravador falhou (database is locked?)");
+        }
+        let s = Store::open(&path).unwrap();
+        assert_eq!(s.count_box("conta0", "INBOX").unwrap() + s.count_box("conta1", "INBOX").unwrap(), 1500);
+        for ext in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{ext}", path.display()));
+        }
     }
 }
