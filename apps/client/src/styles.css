@@ -1116,7 +1116,7 @@ kbd {
 .when-menu { min-width: 220px; }
 .when-menu small { margin-left: auto; color: var(--faint); font-size: 12px; }
 .when-menu[data-up] { top: auto; bottom: calc(100% + 4px); transform-origin: bottom right; }
-.when-custom { display: flex; gap: 6px; align-items: center; padding: 6px 4px 2px; border-top: 1px solid var(--line); margin-top: 4px; }
+.when-custom { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 6px 4px 2px; border-top: 1px solid var(--line); margin-top: 4px; }
 .when-custom input { flex: 1; min-width: 0; height: 32px; padding: 0 8px; border: 1px solid var(--line); border-radius: var(--r6); background: var(--bg); color: var(--text); font-size: 13px; }
 .rule-card { align-items: flex-start; gap: 10px; }
 .rule-card[data-off] { opacity: 0.55; }
@@ -1540,3 +1540,5 @@ button.scope-chip { cursor: pointer; }
 @media (max-width: 720px) {
   .pv { zoom: 0.8; }
 }
+.when-custom .when-past { flex-basis: 100%; color: var(--red); }
+.when-hint { margin: 0; font-size: 13px; color: var(--muted); min-height: 1.2em; }

@@ -1922,7 +1922,7 @@ mod tests {
         let msgs: Vec<_> = (1..=30u32).map(|u| msg(u, &format!("m{u}"), "", 1000 + i64::from(u))).collect();
         s.insert_messages("a", "INBOX", &msgs).unwrap();
         let all: Vec<i64> = s.list_box_page("a", "INBOX", None, 100).unwrap().items.iter().map(|m| m.id).collect();
-        s.snooze(&[all[1]], i64::MAX / 2).unwrap();
+        s.snooze(&[all[1]], i64::MAX / 2, 0).unwrap();
         let got = s.summaries(&[all[0], all[1]]).unwrap();
         assert_eq!(got.iter().map(|m| m.id).collect::<Vec<_>>(), [all[0]], "adiada sai, como no delta");
         // O cursor guarda posição (fixada, data, id), não a linha: apagar a linha do cursor não invalida a próxima página.
@@ -2484,7 +2484,7 @@ mod tests {
         s.insert_messages("a", "INBOX", &msgs).unwrap();
         let ids: Vec<i64> = s.list("INBOX", 500, 0).unwrap().iter().map(|m| m.id).collect();
         s.set_pinned(&[ids[40], ids[99]], true).unwrap();
-        s.snooze(&[ids[3], ids[60]], i64::MAX / 2).unwrap();
+        s.snooze(&[ids[3], ids[60]], i64::MAX / 2, 0).unwrap();
         let expected: Vec<i64> = s.list_folder(Role::Inbox, 500, 0).unwrap().iter().map(|m| m.id).collect();
         assert_eq!(expected.len(), 118, "os adiados saem da lista");
         assert!(s.list_folder(Role::Inbox, 2, 0).unwrap().iter().all(|m| m.pinned), "fixadas primeiro");
