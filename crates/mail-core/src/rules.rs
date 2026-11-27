@@ -332,6 +332,18 @@ mod tests {
     }
 
     #[test]
+    fn casa_com_qualquer_acento_nos_dois_lados() {
+        let mut c = cand();
+        c.subject = "Cotação de preços — São Paulo".into();
+        for needle in ["cotacao", "COTAÇÃO", "precos", "sao paulo", "são paulo"] {
+            assert!(rule("subject", needle, "read", "").matches(&c), "{needle}");
+        }
+        c.from_name = "Çelik Müller".into();
+        assert!(rule("from", "celik muller", "read", "").matches(&c));
+        assert!(rule("from", "ÇELIK MÜLLER", "read", "").matches(&c));
+    }
+
+    #[test]
     fn casa_sem_ligar_para_caixa_e_acento() {
         let c = cand();
         assert!(rule("from", "itau", "read", "").matches(&c));
