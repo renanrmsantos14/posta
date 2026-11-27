@@ -192,7 +192,11 @@ impl Filters {
     /// Consulta IMAP SEARCH (sem o prefixo `UID SEARCH`); `None` quando não há critério.
     /// `tem:anexo` vira multipart/mixed no Content-Type, que é o melhor que o IMAP oferece.
     pub fn imap_query(&self) -> Option<String> {
-        let q = |s: &str| format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""));
+        // CR, LF e NUL não cabem numa string entre aspas: encerrariam o comando e abririam outro no servidor.
+        let q = |s: &str| {
+            let s: String = s.chars().map(|c| if matches!(c, '\r' | '\n' | '\0') { ' ' } else { c }).collect();
+            format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+        };
         let mut k: Vec<String> = Vec::new();
         k.extend(self.from.iter().map(|x| format!("FROM {}", q(x))));
         k.extend(self.to.iter().map(|x| format!("OR TO {} CC {}", q(x), q(x))));
@@ -317,6 +321,15 @@ mod tests {
         assert!(parse("ação").imap_query().unwrap().starts_with("CHARSET UTF-8 "));
         assert_eq!(parse("").imap_query(), None);
     }
+
+    #[test]
+    fn imap_query_nao_deixa_passar_quebra_de_linha_nem_nulo() {
+        // Uma quebra de linha dentro das aspas encerra o comando e abre outro no servidor.
+        let q = parse("assunto:\"a\r\nA1 DELETE INBOX\"").imap_query().unwrap();
+        assert!(!q.contains(['\r', '\n', '\0']), "consulta com controle: {q:?}");
+        assert_eq!(q.matches('"').count() % 2, 0, "aspas abertas: {q:?}");
+        let q = parse("de:\"x\0y\"").imap_query().unwrap();
+        assert!(!q.contains('\0'), "{q:?}");    }
 
     fn msg(uid: u32, from: &str, subject: &str, date: i64, seen: bool, att: bool) -> NewMessage {
         NewMessage {
