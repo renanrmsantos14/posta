@@ -11,6 +11,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::{LazyLock, Mutex};
 
 use crate::folders::{pick, Role};
+use crate::utf7;
 use crate::imap_sync::{connect, AuthMode, ImapAccount, ImapSession, Security};
 use crate::store::ReplyRef;
 use crate::{Error, Result};
@@ -313,10 +314,10 @@ fn after_send(acc: &ImapAccount, raw: &[u8], reply: Option<&ReplyRef>) -> Result
     let save = !server_saves_sent(acc);
     if save {
         let folder = sent_folder(&mut session)?;
-        session.append(&folder, raw).flag(Flag::Seen).finish()?;
+        session.append(&utf7::encode(&folder), raw).flag(Flag::Seen).finish()?;
     }
     if let Some(r) = reply {
-        session.select(&r.mailbox)?;
+        session.select(utf7::encode(&r.mailbox))?;
         session.uid_store(r.uid.to_string(), "+FLAGS.SILENT (\\Answered)")?;
     }
     session.logout().ok();

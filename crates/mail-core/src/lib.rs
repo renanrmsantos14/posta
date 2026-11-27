@@ -15,6 +15,7 @@ pub mod send;
 pub mod store;
 pub mod threads;
 pub mod unsubscribe;
+pub mod utf7;
 pub mod vacation;
 
 pub use attachments::Attachment;

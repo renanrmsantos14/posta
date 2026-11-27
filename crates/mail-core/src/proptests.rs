@@ -8,9 +8,9 @@
 //!
 //! Rodam no `cargo test` comum com `PROPTEST_CASES` (padrão 256). Para uma rodada longa de fuzz:
 //! `PROPTEST_CASES=200000 cargo test -p mail-core --release proptests -- --test-threads=1`.
-//! Falhas ficam em `crates/mail-core/proptest-regressions/` e são reexecutadas primeiro nas próximas rodadas
-//! (esse diretório é versionado: é o corpus de regressão). Propriedades marcadas `#[ignore = "BUG ..."]` expõem bugs
-//! reais já confirmados, corrigidos em PR próprio (número na mensagem); depois do merge de cada um, remova o `ignore` dele.
+//! Falhas ficam em `crates/mail-core/proptest-regressions/` e são reexecutadas primeiro nas próximas rodadas.
+//! Propriedade que revele um bug novo entra com `#[ignore = "BUG ..."]` até o PR da correção (número na mensagem);
+//! depois do merge, remova o `ignore`. Os 6 bugs já confirmados foram corrigidos (PRs #70, #75 a #79).
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
@@ -264,7 +264,6 @@ proptest! {
 
     /// Sem charset e sem Content-Type, corpo 8-bit em Latin-1 (cliente antigo) não vira mojibake.
     #[test]
-    #[ignore = "BUG: corpo 8-bit Latin-1 sem charset vira mojibake (corrigido no PR #70)"]
     fn corpo_latin1_sem_charset(body in text_body()) {
         let m = parsed(&message("Subject: x\r\n", &[Cs::Latin1.bytes(&body).as_slice(), b"\r\n"].concat()));
         prop_assert_eq!(norm(&m.body_text), norm(&body));
@@ -481,7 +480,6 @@ proptest! {
 
     /// `assunto:`/`de:` ignoram acento e caixa como a busca de texto.
     #[test]
-    #[ignore = "BUG: filtros assunto:/de: usam LIKE do SQLite (só ASCII sem acento); corrigido no PR #79"]
     fn filtro_assunto_ignora_acento_e_caixa(w in word()) {
         let store = store_with(&format!("Aviso {w}"), "corpo");
         for q in [strip_accents(&w), w.to_uppercase(), strip_accents(&w).to_uppercase()] {
@@ -506,7 +504,6 @@ proptest! {
 
     /// A consulta IMAP nunca tem quebra de linha (senão vira outro comando) e as aspas fecham.
     #[test]
-    #[ignore = "BUG: CR/LF dentro de valor entre aspas passa para o comando IMAP SEARCH (corrigido no PR #78)"]
     fn imap_query_sem_quebra_de_linha_e_com_aspas_fechadas(
         key in proptest::sample::select(vec!["de", "para", "assunto", "from", "to", "subject"]),
         val in "[a-z \\r\\n\"\\\\\\x00]{1,12}",
@@ -546,7 +543,6 @@ proptest! {
 
     /// Endereço com `+` (plus-addressing) fica intacto: em `mailto:` o `+` é literal (RFC 6068).
     #[test]
-    #[ignore = "BUG: parse_mailto troca '+' por espaço no destinatário (corrigido no PR #77)"]
     fn mailto_preserva_plus_addressing(local in "[a-z0-9]{1,6}", tag in "[a-z0-9]{1,6}") {
         let u = unsubscribe::parse_mailto(&format!("mailto:{local}+{tag}@lista.exemplo.com?subject=sair")).unwrap();
         prop_assert_eq!(u.to, format!("{local}+{tag}@lista.exemplo.com"));
@@ -579,7 +575,6 @@ proptest! {
 
     /// Nome de arquivo salvo em disco: sem pasta, sem caractere proibido no Windows, não vazio.
     #[test]
-    #[ignore = "BUG: safe_name deixa espaço no fim (\"a .\" vira \"a \"); o Windows apaga o espaço e o nome gravado difere do mostrado (corrigido no PR #76)"]
     fn nome_de_anexo_seguro_para_disco(name in prop_oneof![any::<String>(), "[a-z./\\\\:*?\"<>| ]{0,16}"]) {
         let s = attachments::safe_name(&name);
         prop_assert!(!s.is_empty());
@@ -604,11 +599,19 @@ fn candidate(subject: &str) -> rules::Candidate {
         cc_addrs: String::new(),
         reply_addr: String::new(),
         date: 0,
+        has_attachment: false,
     }
 }
 
 fn rule(contains: &str) -> rules::Rule {
-    rules::Rule { id: "r".into(), field: "subject".into(), contains: contains.into(), action: "read".into(), arg: String::new(), enabled: true }
+    rules::Rule {
+        id: "r".into(),
+        name: "r".into(),
+        conditions: vec![rules::Condition { field: "subject".into(), value: contains.into() }],
+        actions: vec![rules::Action { kind: "read".into(), arg: String::new() }],
+        stop: false,
+        enabled: true,
+    }
 }
 
 proptest! {
@@ -622,7 +625,6 @@ proptest! {
 
     /// Qualquer letra acentuada do português: a regra sem acento casa com o assunto acentuado e vice-versa.
     #[test]
-    #[ignore = "BUG: search::plain só dobra 9 acentos (falta ç, à, õ, ü, ñ...); corrigido no PR #79"]
     fn regra_contem_ignora_todos_os_acentos(w in word()) {
         let c = candidate(&format!("Aviso {}", w));
         prop_assert!(rule(&strip_accents(&w)).matches(&c), "regra {:?} não casou com {:?}", strip_accents(&w), w);

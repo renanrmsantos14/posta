@@ -27,7 +27,7 @@ import { Resizer } from "./Resizer";
 import { SettingsPage } from "./SettingsPage";
 import { UpdateDialog } from "./UpdateDialog";
 import { autoCheck, checkUpdate, CHECK_EVERY_MS, skip, skipped, type Update } from "./updater";
-import { addFilter, hasFilters, parseRules, parseTemplates, whenLabel, whenPresets, type ScheduledItem } from "./productivity";
+import { addFilter, hasFilters, newRule, parseRules, parseTemplates, whenLabel, whenPresets, type ScheduledItem } from "./productivity";
 import { AppShell, RouteLayout, PageLayout } from "./layout/primitives";
 import { TopBar, type SearchScope } from "./TopBar";
 import { CommandBar } from "./CommandBar";
@@ -1195,9 +1195,10 @@ export default function App() {
 
   /** Bloquear: regra "remetente → Lixeira", já aplicada à Entrada; "Desfazer" tira só esta regra. */
   function blockSender(m: MessageSummary) {
-    const id = `r${Date.now().toString(36)}`;
+    const rule = newRule({ conditions: [{ field: "from", value: m.from_addr }], actions: [{ kind: "trash", arg: "" }] });
+    const id = rule.id;
     const rules = parseRules(settings.rules);
-    changeSetting("rules", JSON.stringify([...rules, { id, field: "from", contains: m.from_addr, action: "trash", arg: "", enabled: true }]));
+    changeSetting("rules", JSON.stringify([...rules, rule]));
     void api.applyRulesNow().then(() => reload(messages.length)).catch(() => {});
     toast(`${m.from_addr} bloqueado: as mensagens vão para a Lixeira`, "info", { action: { label: "Desfazer", onClick: () => {
       changeSetting("rules", JSON.stringify(parseRules(settingsRef.current.rules).filter((r) => r.id !== id)));
@@ -1207,15 +1208,16 @@ export default function App() {
   /** Cria a regra desligada, com o remetente preenchido, e abre as Regras para escolher a ação. */
   function ruleFromSender(m: MessageSummary) {
     const rules = parseRules(settings.rules);
-    changeSetting("rules", JSON.stringify([...rules, { id: `r${Date.now().toString(36)}`, field: "from", contains: m.from_addr, action: "read", arg: "", enabled: false }]));
+    changeSetting("rules", JSON.stringify([...rules, newRule({ conditions: [{ field: "from", value: m.from_addr }], enabled: false })]));
     setSettingsSection("rules");
     setSettingsOpen(true);
   }
 
-  async function applyRules() {
+  async function applyRules(only?: string) {
     try {
-      const n = await api.applyRulesNow();
-      toast(n ? `${plural(n, "mensagem atualizada", "mensagens atualizadas")} pelas regras` : "Nenhuma mensagem da Entrada casou com as regras", n ? "success" : "info");
+      const { changed: n, missing_folders: missing } = await api.applyRulesNow(only);
+      const gone = missing.length ? ` A pasta ${missing.map((f) => `“${f}”`).join(", ")} não existe: nada foi movido para ela.` : "";
+      toast(`${n ? `${plural(n, "mensagem atualizada", "mensagens atualizadas")} pelas regras` : "Nenhuma mensagem da Entrada casou com as regras"}.${gone}`, missing.length ? "error" : n ? "success" : "info");
       await reload(messages.length);
       api.userFolders().then(setUserFolders).catch(() => {});
     } catch (e) {
