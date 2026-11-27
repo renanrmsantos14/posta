@@ -7,6 +7,7 @@ use std::path::Path;
 use crate::attachments::Attachment;
 use crate::folders::{Folder, Role};
 use crate::threads;
+use crate::utf7;
 use crate::Result;
 
 /// O banco é só uma cópia do servidor: mudou o esquema, apaga e sincroniza de novo.
@@ -177,7 +178,7 @@ const FTS_CREATE: &str = "CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING 
 
 /// Revisão das colunas/índices/tabelas adicionadas sem recriar o banco (guardada em `application_id`).
 /// Banco já na revisão pula todo o esquema ao abrir.
-const SCHEMA_REV: i32 = 0x5054_0005;
+const SCHEMA_REV: i32 = 0x5054_0006;
 
 /// Mensagem já interpretada, pronta para gravar.
 #[derive(Debug, Clone, Default)]
@@ -738,6 +739,38 @@ impl Store {
         for account in pending {
             self.rebuild_threads(&account)?;
         }
+        self.decode_folder_names()?;
+        Ok(())
+    }
+
+    /// Nomes de pasta gravados antes da tradução UTF-7 (RFC 3501) estão crus (`Pre&AOc-os`): passam a ficar legíveis.
+    fn decode_folder_names(&self) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        for (table, col, filter) in [
+            ("messages", "mailbox", "1"),
+            ("mailbox_state", "mailbox", "1"),
+            ("folders", "name", "1"),
+            ("user_folders", "name", "1"),
+            ("pending_ops", "mailbox", "1"),
+            ("pending_ops", "arg", "kind IN ('move', 'copy')"),
+        ] {
+            let raw: Vec<String> = {
+                let mut st = tx.prepare(&format!("SELECT DISTINCT {col} FROM {table} WHERE {col} LIKE '%&%' AND {filter}"))?;
+                let rows = st.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+                rows
+            };
+            for name in raw {
+                let decoded = utf7::decode(&name);
+                if decoded != name {
+                    // OR IGNORE: se a pasta já existe com o nome legível, a linha crua fica como está.
+                    tx.execute(
+                        &format!("UPDATE OR IGNORE {table} SET {col} = ?1 WHERE {col} = ?2 AND {filter}"),
+                        params![decoded, name],
+                    )?;
+                }
+            }
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -1792,6 +1825,34 @@ mod tests {
         s.conn.pragma_update(None, "application_id", SCHEMA_REV - 1).unwrap();
         let s = Store::init(s.conn).unwrap();
         assert!(s.summaries(&ids).unwrap().iter().all(|m| m.importance == 0));
+    }
+
+    #[test]
+    fn banco_com_nomes_de_pasta_crus_em_utf7_ganha_os_nomes_legiveis() {
+        let mut s = Store::open_in_memory().unwrap();
+        let cru = "Pre&AOc-os e Cota&AOcA9Q-es";
+        s.set_uid_validity("a", cru, 7).unwrap();
+        s.insert_messages("a", cru, &[msg(1, "Tabela", "x", 100)]).unwrap();
+        s.insert_messages("a", "INBOX", &[msg(1, "Oi", "x", 100)]).unwrap();
+        s.set_user_folders("a", &[cru.to_string(), "R&-D".to_string(), "Simples".to_string()], "/").unwrap();
+        s.enqueue_op("a", "INBOX", 1, crate::outbox::OpKind::Move, cru).unwrap();
+        s.enqueue_op("a", "INBOX", 2, crate::outbox::OpKind::Seen, "").unwrap();
+        // Banco criado antes da tradução: os nomes ficaram como o servidor os mandou.
+        s.conn.pragma_update(None, "application_id", SCHEMA_REV - 1).unwrap();
+        let s = Store::init(s.conn).unwrap();
+
+        let legivel = "Preços e Cotações";
+        let boxes: Vec<String> = s.conn.prepare("SELECT DISTINCT mailbox FROM messages ORDER BY 1").unwrap()
+            .query_map([], |r| r.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+        assert_eq!(boxes, ["INBOX", legivel]);
+        let st: String = s.conn.query_row("SELECT mailbox FROM mailbox_state", [], |r| r.get(0)).unwrap();
+        assert_eq!(st, legivel);
+        let mut nomes: Vec<String> = s.user_folders().unwrap().into_iter().map(|f| f.name).collect();
+        nomes.sort();
+        assert_eq!(nomes, [legivel, "R&D", "Simples"]);
+        let ops = s.pending_ops().unwrap();
+        assert_eq!(ops[0].arg, legivel);
+        assert_eq!(ops[1].arg, "");
     }
 
     #[test]

@@ -4,6 +4,7 @@
 use serde::Serialize;
 
 use crate::session::Live;
+use crate::utf7;
 use crate::{Error, Result};
 
 /// O que o cabeçalho oferece para cancelar a inscrição.
@@ -56,7 +57,7 @@ pub fn header_lines(raw: &[u8]) -> Option<String> {
 
 /// Baixa só os cabeçalhos de cancelamento da mensagem (sem corpo nem anexos) numa sessão já aberta, já em `header_lines`.
 pub fn fetch_on(live: &mut Live, mailbox: &str, uid: u32) -> Result<String> {
-    live.s.select(mailbox)?;
+    live.s.select(utf7::encode(mailbox))?;
     let fetches = live.s.uid_fetch(uid.to_string(), "BODY.PEEK[HEADER.FIELDS (LIST-UNSUBSCRIBE LIST-UNSUBSCRIBE-POST)]")?;
     let raw = fetches.iter().find_map(|f| f.header()).unwrap_or_default();
     Ok(header_lines(raw).unwrap_or_default())
