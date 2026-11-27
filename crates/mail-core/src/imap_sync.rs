@@ -1,8 +1,9 @@
 //! Sincronização IMAP → Store. Uma conexão por chamada; `idle_wait` espera novidades (IMAP IDLE).
 
 use imap::Session;
-use mail_parser::{MessageParser, PartKind};
+use mail_parser::{Charset, DecodeProblems, MessageParser, MessagePart, PartKind};
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::collections::{BTreeSet, HashSet};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -11,6 +12,7 @@ use imap::types::UnsolicitedResponse;
 use imap_proto::NameAttribute;
 
 use crate::attachments;
+use crate::utf7;
 use crate::oauth::{Provider, XOauth2};
 use crate::folders::{is_system, new_name, pick, renamed, system_names, user_folders, with_children, Folder, Listed, Role};
 use crate::session::{Hub, Kind, Live};
@@ -195,7 +197,7 @@ fn idle_sliced(live: &mut Live, mailbox: &str, timeout: Duration, slice: Duratio
     if !live.idle {
         return Ok(IdleEnd::Unsupported);
     }
-    live.s.select(mailbox)?;
+    live.s.select(utf7::encode(mailbox))?;
     let deadline = Instant::now() + timeout;
     loop {
         if cancelled() {
@@ -209,6 +211,28 @@ fn idle_sliced(live: &mut Live, mailbox: &str, timeout: Duration, slice: Duratio
         if matches!(outcome, imap::extensions::idle::WaitOutcome::MailboxChanged) || live.s.take_all_unsolicited().len() > 0 {
             return Ok(IdleEnd::Changed);
         }
+    }
+}
+
+/// Texto de uma parte text/html. Sem `charset` declarado (clientes antigos, 8-bit) e com bytes que não são UTF-8
+/// válido, lê como windows-1252 (Latin-1 com os acentos do Windows) em vez de trocar cada byte por U+FFFD.
+fn part_text<'a>(p: &MessagePart<'a>) -> Option<Cow<'a, str>> {
+    let (text, problems) = p.text_checked()?;
+    let declared = p.content_type().and_then(|c| c.attribute("charset")).is_some();
+    if declared || !problems.contains(DecodeProblems::MALFORMED_CHARSET) {
+        return Some(text);
+    }
+    Some(Charset::Windows1252.decode(&p.decoded()).into_owned().into())
+}
+
+/// Primeiro texto da mensagem; só HTML vira texto puro (para busca e prévia).
+fn body_text(m: &mail_parser::Message) -> String {
+    let Some(p) = m.text_body().next() else { return String::new() };
+    let text = part_text(&p).map(|t| t.into_owned()).unwrap_or_default();
+    if matches!(p.kind(), PartKind::Html) {
+        mail_parser::html_to_text(&text)
+    } else {
+        text
     }
 }
 
@@ -236,7 +260,7 @@ fn parse(uid: u32, raw: &[u8], seen: bool, flagged: bool, fallback_date: i64, ow
             let html = m
                 .html_body()
                 .filter(|p| matches!(p.kind(), PartKind::Html))
-                .filter_map(|p| p.text())
+                .filter_map(|p| part_text(&p))
                 .collect::<Vec<_>>()
                 .join("\n");
             attachments::inline_cids(m, html)
@@ -252,11 +276,7 @@ fn parse(uid: u32, raw: &[u8], seen: bool, flagged: bool, fallback_date: i64, ow
             .and_then(|m| m.date())
             .map(|d| d.to_timestamp())
             .unwrap_or(fallback_date),
-        body_text: msg
-            .as_ref()
-            .and_then(|m| m.body_text(0))
-            .map(|b| b.into_owned())
-            .unwrap_or_default(),
+        body_text: msg.as_ref().map(body_text).unwrap_or_default(),
         body_html: html.clone(),
         attachments: msg.as_ref().map(|m| attachments::list(m, &html)).unwrap_or_default(),
         seen,
@@ -362,7 +382,7 @@ fn vanished(s: &mut ImapSession) -> Vec<u32> {
 /// - nada disso: UIDNEXT e a janela recente (`RECENT_WINDOW` mensagens mais novas), sem varrer a pasta toda.
 pub fn sync_on(live: &mut Live, acc: &ImapAccount, store: &mut Store, mailbox: &str, keep: Option<usize>) -> Result<SyncReport> {
     live.s.take_all_unsolicited().for_each(drop);
-    let sel = live.s.select(mailbox)?;
+    let sel = live.s.select(utf7::encode(mailbox))?;
     let validity = sel.uid_validity.unwrap_or(0);
     let prev = store.sync_state(&acc.id, mailbox)?;
     store.set_uid_validity(&acc.id, mailbox, validity)?;
@@ -523,7 +543,7 @@ fn fill_bodies(session: &mut ImapSession, acc: &ImapAccount, store: &mut Store, 
 pub fn load_body_on(live: &mut Live, acc: &ImapAccount, store: &mut Store, id: i64) -> Result<bool> {
     let Some((account, mailbox, uid)) = store.body_missing(id)? else { return Ok(false) };
     debug_assert_eq!(account, acc.id);
-    live.s.select(&mailbox)?;
+    live.s.select(utf7::encode(&mailbox))?;
     Ok(!fill_bodies(&mut live.s, acc, store, &mailbox, &[uid])?.is_empty())
 }
 
@@ -539,7 +559,7 @@ pub fn prefetch_bodies_on(live: &mut Live, acc: &ImapAccount, store: &mut Store,
     if uids.is_empty() {
         return Ok(Vec::new());
     }
-    live.s.select(mailbox)?;
+    live.s.select(utf7::encode(mailbox))?;
     fill_bodies(&mut live.s, acc, store, mailbox, &uids)
 }
 
@@ -550,7 +570,7 @@ pub fn search_server(acc: &ImapAccount, store: &mut Store, mailbox: &str, filter
         return Ok(Vec::new());
     };
     let mut session = connect(acc)?;
-    session.select(mailbox)?;
+    session.select(utf7::encode(mailbox))?;
     let mut found: Vec<u32> = session.uid_search(&query)?.into_iter().collect();
     found.sort_unstable_by(|a, b| b.cmp(a));
     let local: HashSet<u32> = store.local_uids(&acc.id, mailbox)?.into_iter().collect();
@@ -584,7 +604,7 @@ pub(crate) fn list_folders(session: &mut ImapSession) -> Result<(Vec<Listed>, Op
     let listed = names
         .iter()
         .filter(|n| !n.attributes().contains(&NameAttribute::NoSelect))
-        .map(|n| Listed { name: n.name().to_string(), special: special(n.attributes()) })
+        .map(|n| Listed { name: utf7::decode(n.name()), special: special(n.attributes()) })
         .collect();
     Ok((listed, delimiter))
 }
@@ -595,9 +615,9 @@ pub(crate) fn list_folders(session: &mut ImapSession) -> Result<(Vec<Listed>, Op
 pub(crate) fn create_system_folder(session: &mut ImapSession, listed: &[Listed], delimiter: Option<&str>, leaf: &str) -> Result<String> {
     let mut first = None;
     for name in system_names(listed, delimiter, leaf) {
-        match session.create(&name) {
+        match session.create(utf7::encode(&name)) {
             Ok(()) => {
-                session.subscribe(&name).ok();
+                session.subscribe(utf7::encode(&name)).ok();
                 return Ok(name);
             }
             Err(e) if already_exists(&e) => return Ok(name),
@@ -648,8 +668,8 @@ pub fn create_folder(acc: &ImapAccount, parent: Option<&str>, leaf: &str) -> Res
     let mut session = connect(acc)?;
     let (listed, delimiter) = list_folders(&mut session)?;
     let name = new_name(&listed, delimiter.as_deref(), parent, leaf)?;
-    session.create(&name)?;
-    session.subscribe(&name).ok();
+    session.create(utf7::encode(&name))?;
+    session.subscribe(utf7::encode(&name)).ok();
     session.logout().ok();
     Ok(name)
 }
@@ -662,9 +682,9 @@ pub fn rename_folder(acc: &ImapAccount, old: &str, leaf: &str) -> Result<String>
         return Err(crate::Error::Invalid("pastas do sistema não podem ser renomeadas".into()));
     }
     let name = renamed(&listed, delimiter.as_deref(), old, leaf)?;
-    session.rename(old, &name)?;
-    session.unsubscribe(old).ok();
-    session.subscribe(&name).ok();
+    session.rename(utf7::encode(old), utf7::encode(&name))?;
+    session.unsubscribe(utf7::encode(old)).ok();
+    session.subscribe(utf7::encode(&name)).ok();
     session.logout().ok();
     Ok(name)
 }
@@ -682,8 +702,8 @@ pub fn delete_folder(acc: &ImapAccount, name: &str) -> Result<Vec<String>> {
         return Err(crate::Error::Invalid(format!("a pasta {name} não existe")));
     }
     for n in &doomed {
-        session.unsubscribe(n).ok();
-        session.delete(n)?;
+        session.unsubscribe(utf7::encode(n)).ok();
+        session.delete(utf7::encode(n))?;
     }
     session.logout().ok();
     Ok(doomed)
@@ -695,7 +715,7 @@ pub fn count_messages(acc: &ImapAccount, name: &str) -> Result<u32> {
     let (listed, delimiter) = list_folders(&mut session)?;
     let mut total = 0;
     for n in with_children(&listed, delimiter.as_deref(), name) {
-        total += session.status(&n, "(MESSAGES)")?.exists;
+        total += session.status(utf7::encode(&n), "(MESSAGES)")?.exists;
     }
     session.logout().ok();
     Ok(total)
@@ -740,7 +760,7 @@ pub fn move_messages_on(live: &mut Live, from: &str, uids: &[u32], to: &str) -> 
         return Ok(());
     }
     let (has_move, uidplus) = (live.has_move, live.uidplus);
-    live.s.select(from)?;
+    live.s.select(utf7::encode(from))?;
     let here = present(&mut live.s, uids)?;
     if here.is_empty() {
         return Ok(());
@@ -748,7 +768,7 @@ pub fn move_messages_on(live: &mut Live, from: &str, uids: &[u32], to: &str) -> 
     let left: Vec<u32> = here.iter().map(|(u, _)| *u).collect();
     let set = uid_set(&left);
     if has_move {
-        return match live.s.uid_mv(&set, to) {
+        return match live.s.uid_mv(&set, utf7::encode(to)) {
             Ok(_) => Ok(()),
             // O servidor recusou (ex.: UID inexistente por corrida): se nada sobrou na origem, a mensagem já foi.
             Err(e) => match present(&mut live.s, &left) {
@@ -759,7 +779,7 @@ pub fn move_messages_on(live: &mut Live, from: &str, uids: &[u32], to: &str) -> 
     }
     // Sem MOVE: a cópia pode ter ido numa tentativa anterior que caiu antes do EXPUNGE.
     let mut to_copy: Vec<u32> = Vec::new();
-    live.s.select(to)?;
+    live.s.select(utf7::encode(to))?;
     for (uid, id) in &here {
         let known = match id {
             Some(id) => !live.s.uid_search(format!("HEADER Message-ID \"{}\"", id.replace(['\\', '"'], "")))?.is_empty(),
@@ -769,9 +789,9 @@ pub fn move_messages_on(live: &mut Live, from: &str, uids: &[u32], to: &str) -> 
             to_copy.push(*uid);
         }
     }
-    live.s.select(from)?;
+    live.s.select(utf7::encode(from))?;
     if !to_copy.is_empty() {
-        live.s.uid_copy(uid_set(&to_copy), to)?;
+        live.s.uid_copy(uid_set(&to_copy), utf7::encode(to))?;
     }
     live.s.uid_store(&set, "+FLAGS.SILENT (\\Deleted)")?;
     if uidplus { live.s.uid_expunge(&set)?; } else { live.s.expunge()?; }
@@ -784,12 +804,12 @@ pub fn copy_messages_on(live: &mut Live, from: &str, uids: &[u32], to: &str) -> 
     if uids.is_empty() || from == to {
         return Ok(());
     }
-    live.s.select(from)?;
+    live.s.select(utf7::encode(from))?;
     let here = present(&mut live.s, uids)?;
     if here.is_empty() {
         return Ok(());
     }
-    live.s.select(to)?;
+    live.s.select(utf7::encode(to))?;
     let mut to_copy: Vec<u32> = Vec::new();
     for (uid, id) in &here {
         let known = match id {
@@ -801,8 +821,8 @@ pub fn copy_messages_on(live: &mut Live, from: &str, uids: &[u32], to: &str) -> 
         }
     }
     if !to_copy.is_empty() {
-        live.s.select(from)?;
-        live.s.uid_copy(uid_set(&to_copy), to)?;
+        live.s.select(utf7::encode(from))?;
+        live.s.uid_copy(uid_set(&to_copy), utf7::encode(to))?;
     }
     Ok(())
 }
@@ -822,7 +842,7 @@ pub fn delete_forever_on(live: &mut Live, mailbox: &str, uids: &[u32]) -> Result
         return Ok(());
     }
     let uidplus = live.uidplus;
-    live.s.select(mailbox)?;
+    live.s.select(utf7::encode(mailbox))?;
     let left: Vec<u32> = present(&mut live.s, uids)?.into_iter().map(|(u, _)| u).collect();
     if left.is_empty() {
         return Ok(());
@@ -856,7 +876,7 @@ pub fn set_flag_on(live: &mut Live, mailbox: &str, uids: &[u32], flag: MsgFlag, 
         MsgFlag::Seen => "\\Seen",
         MsgFlag::Flagged => "\\Flagged",
     };
-    live.s.select(mailbox)?;
+    live.s.select(utf7::encode(mailbox))?;
     live.s.uid_store(uid_set(uids), format!("{}FLAGS.SILENT ({name})", if on { "+" } else { "-" }))?;
     Ok(())
 }
@@ -873,7 +893,7 @@ pub fn fetch_to(acc: &ImapAccount, mailbox: &str, uid: u32) -> Result<Option<Str
 
 /// `fetch_to` numa sessão já aberta.
 pub fn fetch_to_on(live: &mut Live, mailbox: &str, uid: u32) -> Result<Option<String>> {
-    live.s.select(mailbox)?;
+    live.s.select(utf7::encode(mailbox))?;
     let fetches = live.s.uid_fetch(uid.to_string(), "BODY.PEEK[HEADER.FIELDS (TO)]")?;
     Ok(fetches.iter().find_map(|f| f.header()).and_then(|h| {
         let msg = MessageParser::default().parse(h)?;
@@ -888,7 +908,7 @@ pub fn fetch_raw(acc: &ImapAccount, mailbox: &str, uid: u32) -> Result<Option<Ve
 
 /// `fetch_raw` numa sessão já aberta.
 pub fn fetch_raw_on(live: &mut Live, mailbox: &str, uid: u32) -> Result<Option<Vec<u8>>> {
-    live.s.select(mailbox)?;
+    live.s.select(utf7::encode(mailbox))?;
     let fetches = live.s.uid_fetch(uid.to_string(), "BODY.PEEK[]")?;
     Ok(fetches.iter().find_map(|f| f.body().map(<[u8]>::to_vec)))
 }
@@ -902,6 +922,32 @@ pub fn check_login(acc: &ImapAccount) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn corpo_8bit_sem_charset_e_lido_como_latin1_e_nao_vira_mojibake() {
+        // Cliente antigo: sem Content-Type nem charset, bytes Latin-1 crus ("Ação combinada às 15h – já está pago").
+        let raw = b"From: a@b.c\r\nSubject: x\r\n\r\nA\xe7\xe3o combinada \xe0s 15h \x96 j\xe1 est\xe1 pago\r\n";
+        let m = parse(1, raw, false, false, 0, "");
+        assert_eq!(m.body_text.trim(), "Ação combinada às 15h – já está pago");
+        // Também com Content-Type text/plain sem o parâmetro charset, em HTML e em quoted-printable.
+        let raw = b"From: a@b.c\r\nSubject: x\r\nContent-Type: text/plain\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\nA=E7=E3o\r\n";
+        assert_eq!(parse(1, raw, false, false, 0, "").body_text.trim(), "Ação");
+        let raw = b"From: a@b.c\r\nSubject: x\r\nContent-Type: text/html\r\n\r\n<p>A\xe7\xe3o</p>\r\n";
+        let m = parse(1, raw, false, false, 0, "");
+        assert!(m.body_html.contains("<p>Ação</p>") && m.body_text.contains("Ação"), "{:?} / {:?}", m.body_html, m.body_text);
+    }
+
+    #[test]
+    fn corpo_com_charset_declarado_ou_utf8_valido_nao_muda() {
+        let utf8 = "Ação 😀".as_bytes();
+        let raw = [b"From: a@b.c\r\nSubject: x\r\n\r\n".as_slice(), utf8, b"\r\n"].concat();
+        assert_eq!(parse(1, &raw, false, false, 0, "").body_text.trim(), "Ação 😀");
+        let raw = b"From: a@b.c\r\nSubject: x\r\nContent-Type: text/plain; charset=iso-8859-1\r\n\r\nA\xe7\xe3o\r\n";
+        assert_eq!(parse(1, raw, false, false, 0, "").body_text.trim(), "Ação");
+        // Charset declarado como utf-8 com byte inválido continua sendo problema do remetente: não adivinhamos.
+        let raw = b"From: a@b.c\r\nSubject: x\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nA\xe7o\r\n";
+        assert_eq!(parse(1, raw, false, false, 0, "").body_text.trim(), "A\u{fffd}o");
+    }
 
     #[test]
     fn guarda_o_html_e_o_texto_da_alternativa() {

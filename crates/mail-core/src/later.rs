@@ -92,8 +92,12 @@ fn mark(tx: &rusqlite::Connection, id: i64, col: &str, value: i64) -> Result<()>
 }
 
 impl Store {
-    /// Esconde as mensagens até `until` (Unix, segundos). Adiar de novo troca a hora.
-    pub fn snooze(&mut self, ids: &[i64], until: i64) -> Result<()> {
+    /// Esconde as mensagens até `until` (Unix, segundos). Adiar de novo troca a hora. `now` é o relógio de quem chama:
+    /// hora no passado (ou agora) é recusada, porque a mensagem sumiria da lista sem motivo.
+    pub fn snooze(&mut self, ids: &[i64], until: i64, now: i64) -> Result<()> {
+        if until <= now {
+            return Err(Error::Invalid("o horário para adiar já passou".into()));
+        }
         let tx = self.conn.transaction()?;
         for id in ids {
             tx.execute(
@@ -326,17 +330,45 @@ mod tests {
         s.insert_messages("a", "INBOX", &[msg(1, 1000), msg(2, 2000), msg(3, 3000)]).unwrap();
         let id1 = s.list_folder(crate::Role::Inbox, 50, 0).unwrap().last().unwrap().id;
         let far = 4_000_000_000;
-        s.snooze(&[id1], far).unwrap();
+        s.snooze(&[id1], far, 0).unwrap();
         assert_eq!(subjects(&s), ["m3", "m2"]);
         assert!(s.wake_due(far - 1).unwrap().is_empty());
-        s.snooze(&[id1], 5_000).unwrap();
+        s.snooze(&[id1], 5_000, 0).unwrap();
         assert_eq!(s.wake_due(5_001).unwrap(), [id1]);
         assert!(s.wake_due(5_002).unwrap().is_empty());
         assert_eq!(subjects(&s), ["m1", "m3", "m2"]);
         assert!(!s.list_folder(crate::Role::Inbox, 50, 0).unwrap()[0].seen);
-        s.snooze(&[id1], far).unwrap();
+        s.snooze(&[id1], far, 0).unwrap();
         s.unsnooze(&[id1]).unwrap();
         assert_eq!(subjects(&s), ["m3", "m2", "m1"]);
+    }
+
+    #[test]
+    fn adiar_para_o_passado_e_recusado_e_nada_muda() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.insert_messages("a", "INBOX", &[msg(1, 1000), msg(2, 2000)]).unwrap();
+        let id = s.list_folder(crate::Role::Inbox, 50, 0).unwrap()[0].id;
+        let (now, far) = (3_999_999_999, 4_000_000_000);
+        for until in [now - 1, now] {
+            let e = s.snooze(&[id], until, now).unwrap_err();
+            assert!(matches!(e, Error::Invalid(_)), "{e:?}");
+        }
+        assert_eq!(subjects(&s), ["m2", "m1"], "a mensagem continua na lista");
+        s.snooze(&[id], far, now).unwrap();
+        assert_eq!(subjects(&s), ["m1"]);
+    }
+
+    #[test]
+    fn adiada_na_virada_do_dia_volta_no_primeiro_acordar_depois_da_hora() {
+        // 31/12/2026 23:59 em Brasília = 01/01/2027 02:59 UTC; "amanhã 8h" = 01/01/2027 11:00 UTC.
+        let mut s = Store::open_in_memory().unwrap();
+        s.insert_messages("a", "INBOX", &[msg(1, 1000)]).unwrap();
+        let id = s.list_folder(crate::Role::Inbox, 50, 0).unwrap()[0].id;
+        let (now, at) = (1_798_772_340, 1_798_801_200);
+        assert_eq!(at - now, 8 * 3600 + 60, "8h01 depois");
+        s.snooze(&[id], at, now).unwrap();
+        assert!(s.wake_due(at - 1).unwrap().is_empty());
+        assert_eq!(s.wake_due(at).unwrap(), [id]);
     }
 
     #[test]

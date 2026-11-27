@@ -1,6 +1,6 @@
 // Dados de exemplo para rodar a UI no navegador (pnpm dev), sem Tauri e sem rede.
-import type { Account, CheckFailure, CheckStep, Detection, FailKind, Contact, Draft, FlushReport, MailDelta, MessagePage, OutboxItem, QueueStatus, Provider, OauthConfig, OauthConfigView, MessageDetail, MessageSummary, NewAccount, Unsubscribe, OutAttachment, Role, ScheduledEdit, SendReport, Settings, StoredDraft, SyncResult, UnreadAll, UserFolder, View, DragFiles, FolderUnread } from "./api";
-import { parseRules, type ScheduledItem } from "./productivity";
+import type { RulesReport, Account, CheckFailure, CheckStep, Detection, FailKind, Contact, Draft, FlushReport, MailDelta, MessagePage, OutboxItem, QueueStatus, Provider, OauthConfig, OauthConfigView, MessageDetail, MessageSummary, NewAccount, Unsubscribe, OutAttachment, Role, ScheduledEdit, SendReport, Settings, StoredDraft, SyncResult, UnreadAll, UserFolder, View, DragFiles, FolderUnread } from "./api";
+import { parseRules, planFor, ruleMatches, type Rule, type RuleTarget, type ScheduledItem } from "./productivity";
 import { parseBox, parseCat } from "./views";
 
 const now = Math.floor(Date.now() / 1000);
@@ -185,6 +185,9 @@ const leaf = (name: string) => {
   if (!t || /[/*%\\]/.test(t)) throw "Nome inválido: não use / * % nem deixe vazio";
   return t;
 };
+
+/** Campos que as regras olham. */
+const target = (m: MockMessage): RuleTarget => ({ from_name: m.from_name, from_addr: m.from_addr, subject: m.subject, to_addrs: m.to_addrs, cc_addrs: m.cc_addrs, hasAttachment: m.attachments.length > 0 });
 
 const norm = (s: string) => s.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase();
 const withCount = <T extends MockMessage>(m: T) => ({
@@ -625,29 +628,34 @@ export const mockApi = {
     for (const m of found) { serverOnly.splice(serverOnly.indexOf(m), 1); messages.push(m); }
     return messages.filter((m) => inView(m, view) && matchFilters(m, query)).sort(byTop).map(summary);
   },
-  /** Aplica `settings.rules` à Entrada; devolve quantas mensagens mudaram. */
-  async applyRulesNow(): Promise<number> {
+  /** Aplica `settings.rules` à Entrada (só a regra `only`, se informada); devolve quantas mensagens mudaram. */
+  async applyRulesNow(only?: string): Promise<RulesReport> {
     await wait(300);
-    const rules = parseRules(settings.rules).filter((r) => r.enabled && r.contains.trim());
+    const rules = parseRules(settings.rules).filter((r) => !only || r.id === only);
+    const missing: string[] = [];
     let changed = 0;
     for (const m of messages.filter((x) => x.role === "inbox" && !snoozed(x))) {
-      let hit = false;
-      for (const r of rules) {
-        const hay = r.field === "from" ? `${m.from_name} ${m.from_addr}` : r.field === "to" ? `${m.to_addrs} ${m.cc_addrs}` : m.subject;
-        if (!norm(hay).includes(norm(r.contains))) continue;
-        hit = true;
-        if (r.action === "read") m.seen = true;
-        else if (r.action === "star") m.flagged = true;
-        else if (r.action === "category") m.category = r.arg;
-        else if (r.action === "move" && userFolders.some((f) => f.account === m.account && f.name === r.arg)) { m.role = null; m.box = r.arg; }
-        else if (r.action === "archive") m.role = "archive";
-      }
-      if (hit) changed++;
+      const p = planFor(rules, target(m));
+      if (!p.read && !p.star && !p.archive && !p.trash && !p.category && !p.moveTo) continue;
+      changed++;
+      if (p.read) m.seen = true;
+      if (p.star) m.flagged = true;
+      if (p.category) m.category = p.category;
+      if (p.trash) { m.role = "trash"; continue; }
+      if (p.moveTo && userFolders.some((f) => f.account === m.account && f.name === p.moveTo)) { m.role = null; m.box = p.moveTo; }
+      else if (p.moveTo && !missing.includes(p.moveTo)) { missing.push(p.moveTo); if (p.archive) m.role = "archive"; }
+      else if (p.archive) m.role = "archive";
     }
-    return changed;
+    return { changed, missing_folders: missing };
+  },
+  /** Quantas mensagens da Entrada a regra (ainda não salva) pegaria. */
+  async countRuleMatches(rule: Rule): Promise<number> {
+    await wait(120);
+    return messages.filter((x) => x.role === "inbox" && !snoozed(x) && ruleMatches({ ...rule, enabled: true }, target(x))).length;
   },
   async snooze(ids: number[], until: number): Promise<void> {
     await wait(100);
+    if (until <= Math.floor(Date.now() / 1000)) throw "o horário já passou";
     messages.forEach((m) => { if (ids.includes(m.id)) { m.snoozeUntil = until; m.woke = false; } });
   },
   async unsnooze(ids: number[]): Promise<void> {

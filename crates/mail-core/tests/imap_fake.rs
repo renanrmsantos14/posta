@@ -732,3 +732,20 @@ fn servidor_com_namespace_inbox_cria_pasta_de_sistema_com_prefixo() {
     let s = srv.lock().unwrap();
     assert!(s.others.contains_key("INBOX.Sent") && s.others.contains_key("INBOX.Archive"));
 }
+
+#[test]
+fn pasta_com_acento_vai_em_utf7_modificado_para_o_servidor_e_volta_legivel() {
+    let (acc, srv, _) = start("IDLE MOVE UIDPLUS");
+    srv.lock().unwrap().add(0);
+    // Servidor que já tem "Preços e Cotações" (no fio: UTF-7 modificado).
+    srv.lock().unwrap().boxm("Pre&AOc-os e Cota&AOcA9Q-es");
+    // O que o servidor lista volta legível, em Unicode.
+    let (listed, _) = imap_sync::list_user_folders(&acc).unwrap();
+    assert!(listed.iter().any(|n| n == "Preços e Cotações"), "listou {listed:?}");
+    // Mover para a pasta pelo nome legível chega na pasta certa do servidor.
+    let hub = Hub::new();
+    mail_core::outbox::apply_op_via(&hub, &acc, "INBOX", &[1], mail_core::OpKind::Move, "Preços e Cotações").unwrap();
+    assert_eq!((count_in(&srv, "INBOX"), count_in(&srv, "Pre&AOc-os e Cota&AOcA9Q-es")), (0, 1));
+    let log = cmds(&srv);
+    assert!(log.iter().all(|c| c.is_ascii()), "comando com byte fora de ASCII: {log:?}");
+}

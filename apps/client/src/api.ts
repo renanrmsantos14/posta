@@ -2,7 +2,15 @@
 import { invoke } from "@tauri-apps/api/core";
 import { mockApi } from "./mock";
 import { parseBox, parseCat } from "./views";
-import type { ScheduledItem } from "./productivity";
+import type { Rule, ScheduledItem } from "./productivity";
+
+/** Resultado de aplicar regras à Entrada. */
+export interface RulesReport {
+  /** Mensagens que mudaram. */
+  changed: number;
+  /** Pastas de destino citadas por regras que não existem (nada foi movido para elas). */
+  missing_folders: string[];
+}
 
 export type Security = "tls" | "starttls" | "plaintext";
 export type Provider = "google" | "microsoft";
@@ -320,7 +328,8 @@ export const api = isTauri
       },
       searchFiltered: (query: string, view: View) => invoke<MessageSummary[]>("search_filtered", { scope: scopeOf(view), query }),
       searchServer: (query: string, view: View) => invoke<MessageSummary[]>("search_server", { scope: scopeOf(view), query }),
-      applyRulesNow: () => invoke<number>("apply_rules_now"),
+      applyRulesNow: (only?: string) => invoke<RulesReport>("apply_rules_now", { only: only ?? null }),
+      countRuleMatches: (rule: Rule) => invoke<number>("count_rule_matches", { rule }),
       snooze: (ids: number[], until: number) => invoke<void>("snooze_messages", { ids, until }),
       unsnooze: (ids: number[]) => invoke<void>("unsnooze_messages", { ids }),
       setPinned: (ids: number[], pinned: boolean) => invoke<void>("set_pinned", { ids, pinned }),
