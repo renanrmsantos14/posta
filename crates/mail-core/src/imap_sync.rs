@@ -236,7 +236,7 @@ fn body_text(m: &mail_parser::Message) -> String {
     }
 }
 
-fn parse(uid: u32, raw: &[u8], seen: bool, flagged: bool, fallback_date: i64, own_addr: &str) -> NewMessage {
+pub(crate) fn parse(uid: u32, raw: &[u8], seen: bool, flagged: bool, fallback_date: i64, own_addr: &str) -> NewMessage {
     let msg = MessageParser::default().parse(raw);
     let from = msg.as_ref().and_then(|m| m.from()).and_then(|f| f.first());
     let from_addr = from.and_then(|f| f.address()).unwrap_or_default().to_string();

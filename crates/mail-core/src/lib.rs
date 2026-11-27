@@ -57,3 +57,7 @@ impl Error {
         }
     }
 }
+
+/// Property tests (proptest) dos parsers e da busca; rodam no `cargo test` comum. Veja o cabeçalho do módulo.
+#[cfg(test)]
+mod proptests;

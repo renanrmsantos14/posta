@@ -195,7 +195,6 @@ fn assunto_com_emoji_e_acento_e_busca_sem_acento() {
 }
 
 #[test]
-#[ignore = "BUG conhecido: corpo 8-bit sem charset vira mojibake (corrigido no PR de charset, #70)"]
 fn corpo_sem_charset_declarado() {
     let acc = account("semcs");
     let mut s = session(&acc);
@@ -272,7 +271,6 @@ fn filho_wal_sincroniza_no_banco_compartilhado() {
 }
 
 #[test]
-#[ignore = "BUG conhecido: 'database is locked' com dois processos no mesmo banco (corrigido no PR do WAL, #72)"]
 fn banco_aberto_por_dois_processos_com_wal() {
     let dir = std::env::temp_dir().join(format!("posta-wal-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -311,7 +309,6 @@ fn banco_aberto_por_dois_processos_com_wal() {
 const PRECOS_UTF7: &str = "Pre&AOc-os e Cota&AOcA9Q-es"; // "Preços e Cotações"
 
 #[test]
-#[ignore = "BUG conhecido: nomes de pasta sem UTF-7 modificado (corrigido no PR #75)"]
 fn pasta_com_acento_cria_lista_e_sincroniza_com_o_nome_legivel() {
     let acc = account("utf7");
     let leaf = "Preços e Cotações";

@@ -20,6 +20,9 @@ sha2 = "0.10"
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 url = "2"
 
+[dev-dependencies]
+proptest = "1.12"
+
 [features]
 # Testes de integração contra um servidor IMAP real e local (`pnpm test:imap` sobe o GreenMail).
 imap-it = []
