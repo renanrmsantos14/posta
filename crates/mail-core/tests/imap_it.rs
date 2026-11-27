@@ -311,7 +311,7 @@ fn banco_aberto_por_dois_processos_com_wal() {
 const PRECOS_UTF7: &str = "Pre&AOc-os e Cota&AOcA9Q-es"; // "Preços e Cotações"
 
 #[test]
-#[ignore = "BUG conhecido: nomes de pasta sem UTF-7 modificado (corrigido no PR de UTF-7)"]
+#[ignore = "BUG conhecido: nomes de pasta sem UTF-7 modificado (corrigido no PR #75)"]
 fn pasta_com_acento_cria_lista_e_sincroniza_com_o_nome_legivel() {
     let acc = account("utf7");
     let leaf = "Preços e Cotações";
